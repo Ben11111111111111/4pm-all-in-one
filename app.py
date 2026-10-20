@@ -6,7 +6,9 @@ import time
 import base64
 import html
 import uuid
+import random
 import hashlib
+import zipfile
 import pandas as pd
 from typing import List, Dict
 
@@ -50,7 +52,7 @@ if APP_PASSWORD:
         st.stop()
 
 # 🔑 2) Gemini API 키 로드 (Secrets 우선)
-LOCAL_FALLBACK_KEY = ""  # 웹 배포 시에는 Secrets의 GEMINI_API_KEY를 자동으로 읽어옵니다.
+LOCAL_FALLBACK_KEY = ""  # 로컬 전용 실행 시에만 입력
 API_KEY = get_secret("GEMINI_API_KEY", LOCAL_FALLBACK_KEY)
 
 if not API_KEY or API_KEY == "여기에_선생님의_API_키를_넣어주세요":
@@ -63,8 +65,10 @@ def get_genai_client(api_key: str):
 
 client = get_genai_client(API_KEY)
 
-# ☁️ 3) Supabase 클라우드 DB 연결 초기화
-SUPABASE_URL = get_secret("SUPABASE_URL", "")
+# ☁️ 3) Supabase 클라우드 DB 연결 초기화 (URL 뒤에 /rest/v1 등이 붙어있어도 자동으로 순수 도메인만 추출)
+raw_supabase_url = get_secret("SUPABASE_URL", "https://evwqyfmnqiklxcbwaqee.supabase.co")
+m_url = re.match(r"(https?://[^/\s]+)", raw_supabase_url)
+SUPABASE_URL = m_url.group(1) if m_url else raw_supabase_url
 SUPABASE_KEY = get_secret("SUPABASE_KEY", "")
 
 @st.cache_resource
@@ -141,7 +145,7 @@ def save_exam_dna(dna_data: Dict):
     doc_key = filepath_to_doc_key(DNA_FILE)
     if IS_CLOUD_DB:
         try:
-            supabase.table("app_storage").upsert({"doc_key": doc_key, "content": dna_data}).execute()
+            supabase.table("app_storage").upsert({"doc_key": doc_key, "content": dna_data}, on_conflict="doc_key").execute()
         except Exception as e:
             st.warning(f"⚠️ 클라우드 출제 DNA 저장 실패: {e}")
     try:
@@ -173,7 +177,6 @@ def extract_question_number(label: str):
     return int(nums[-1]) if nums else None
 
 def save_base64_to_image_file(data_url: str, custom_filename: str = "") -> str:
-    """이미지를 로컬 캐시 폴더와 Supabase 클라우드(app_images)에 동시 저장"""
     if not data_url or "," not in data_url:
         return ""
     try:
@@ -190,12 +193,19 @@ def save_base64_to_image_file(data_url: str, custom_filename: str = "") -> str:
                 img_f.write(img_bytes)
         if IS_CLOUD_DB:
             try:
-                supabase.table("app_images").upsert({
-                    "img_id": filename,
-                    "b64_data": f"data:image/png;base64,{b64_str}"
-                }).execute()
+                supabase.storage.from_("image_assets").upload(
+                    path=filename,
+                    file=img_bytes,
+                    file_options={"content-type": "image/png", "upsert": "true"}
+                )
             except Exception:
-                pass
+                try:
+                    supabase.table("app_images").upsert({
+                        "img_id": filename,
+                        "b64_data": f"data:image/png;base64,{b64_str}"
+                    }, on_conflict="img_id").execute()
+                except Exception:
+                    pass
         return img_path
     except Exception:
         return ""
@@ -210,7 +220,6 @@ def normalize_passage_records(data: List[Dict]) -> (List[Dict], bool):
         if p.get("label") != cleaned:
             p["label"] = cleaned
             needs_save = True
-        # 다른 컴퓨터의 절대경로(C:\... 등)가 들어있어도 파일명만 깔끔하게 유지되도록 보정
         if p.get("image_path"):
             base_fn = os.path.basename(str(p["image_path"]).replace("\\", "/"))
             norm_path = os.path.join(IMAGE_DIR, base_fn)
@@ -259,7 +268,10 @@ def save_to_file(filepath: str, passages: List[Dict]):
     passages.sort(key=natural_sort_key)
     if IS_CLOUD_DB:
         try:
-            supabase.table("app_storage").upsert({"doc_key": doc_key, "content": passages}).execute()
+            supabase.table("app_storage").upsert({
+                "doc_key": doc_key,
+                "content": passages
+            }, on_conflict="doc_key").execute()
         except Exception as e:
             st.warning(f"⚠️ 클라우드 자동 저장 실패 ({doc_key}): {e}")
     try:
@@ -298,7 +310,17 @@ def cached_read_image_base64(img_filename: str) -> str:
     if os.path.exists(local_p):
         with open(local_p, "rb") as f:
             return f"data:image/png;base64,{base64.b64encode(f.read()).decode()}"
+
     if IS_CLOUD_DB:
+        for candidate_path in [img_filename, f"image_assets/{img_filename}"]:
+            try:
+                img_bytes = supabase.storage.from_("image_assets").download(candidate_path)
+                if img_bytes:
+                    with open(local_p, "wb") as f:
+                        f.write(img_bytes)
+                    return f"data:image/png;base64,{base64.b64encode(img_bytes).decode()}"
+            except Exception:
+                pass
         try:
             res = supabase.table("app_images").select("b64_data").eq("img_id", img_filename).execute()
             if res.data and res.data[0].get("b64_data"):
@@ -331,6 +353,303 @@ def esc(t) -> str:
 
 def nl2br(t) -> str:
     return esc(t).replace("\n", "<br>")
+
+
+# -----------------------------
+# 2-A. 📘 단행본 표지(1P) + 공란(2P) + 저작권 뒤표지(마지막P) 빌더
+# -----------------------------
+BOOK_COVER_CSS = """
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800;900&family=Noto+Sans+KR:wght@300;400;500;700;900&display=swap');
+.book-special-page {
+    width: 210mm;
+    height: 297mm;
+    box-sizing: border-box;
+    margin: 10mm auto;
+    background: #ffffff;
+    box-shadow: 0 0 15px rgba(0,0,0,0.10);
+    page-break-after: always;
+    break-after: page;
+    position: relative;
+    overflow: hidden;
+    font-family: 'Inter', 'Noto Sans KR', sans-serif;
+}
+.book-cover-inner {
+    width: 100%;
+    height: 100%;
+    box-sizing: border-box;
+    padding: 26mm 24mm 22mm 24mm;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    position: relative;
+}
+.cover-accent-bar {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 10mm;
+    background: linear-gradient(90deg, #0f172a 0%, #0047AB 65%, #38bdf8 100%);
+}
+.cover-side-line {
+    position: absolute;
+    top: 26mm; bottom: 22mm; left: 16mm;
+    width: 1.5px;
+    background: #e2e8f0;
+}
+.cover-top-meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1.5px solid #0f172a;
+    padding-bottom: 14px;
+}
+.cover-series-tag {
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 3.5px;
+    color: #0047AB;
+    text-transform: uppercase;
+}
+.cover-logo-circle {
+    width: 46px; height: 46px;
+    border-radius: 50%;
+    border: 2px solid #0047AB;
+    background-size: cover;
+    background-position: center;
+}
+.cover-hero {
+    margin: auto 0;
+    padding: 15mm 0;
+}
+.cover-edition-pill {
+    display: inline-block;
+    background: #0f172a;
+    color: #38bdf8;
+    font-size: 10.5px;
+    font-weight: 800;
+    letter-spacing: 2.5px;
+    padding: 5px 12px;
+    border-radius: 4px;
+    margin-bottom: 18px;
+    text-transform: uppercase;
+}
+.cover-main-title {
+    font-size: 54px;
+    font-weight: 900;
+    color: #0f172a;
+    letter-spacing: -1.5px;
+    line-height: 1.08;
+    margin: 0 0 14px 0;
+}
+.cover-main-title span {
+    color: #0047AB;
+}
+.cover-subtitle-en {
+    font-size: 15px;
+    font-weight: 600;
+    color: #475569;
+    letter-spacing: 0.5px;
+    margin-bottom: 8px;
+}
+.cover-subtitle-ko {
+    font-size: 13.5px;
+    font-weight: 500;
+    color: #64748b;
+}
+.cover-divider {
+    width: 65px;
+    height: 5px;
+    background: #0047AB;
+    margin: 28px 0;
+}
+.cover-author-credit {
+    font-size: 14px;
+    font-weight: 700;
+    color: #1e293b;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+}
+.cover-author-credit span {
+    color: #0047AB;
+    font-weight: 900;
+}
+.cover-bottom-area {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    border-top: 1px solid #cbd5e1;
+    padding-top: 18px;
+}
+.cover-Creator-block {
+    font-size: 11.5px;
+    color: #475569;
+    line-height: 1.6;
+}
+.cover-student-box {
+    width: 210px;
+    border: 1.5px solid #0f172a;
+    border-radius: 6px;
+    padding: 10px 14px;
+    font-size: 11.5px;
+    color: #0f172a;
+    background: #f8fafc;
+}
+.cover-student-row {
+    display: flex;
+    justify-content: space-between;
+    border-bottom: 1px dashed #cbd5e1;
+    padding: 5px 0;
+    font-weight: 700;
+}
+.cover-student-row:last-child {
+    border-bottom: none;
+}
+.back-cover-inner {
+    width: 100%;
+    height: 100%;
+    box-sizing: border-box;
+    padding: 25mm 24mm 22mm 24mm;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    align-items: flex-end;
+}
+.copyright-box-right {
+    text-align: right;
+    max-width: 125mm;
+    border-right: 4px solid #0047AB;
+    padding-right: 14px;
+}
+.copyright-title-en {
+    font-size: 12px;
+    font-weight: 900;
+    color: #0f172a;
+    letter-spacing: 1.5px;
+    margin-bottom: 6px;
+}
+.copyright-ko-legal {
+    font-size: 10.5px;
+    font-weight: 700;
+    color: #334155;
+    line-height: 1.65;
+    word-break: keep-all;
+    margin-bottom: 6px;
+}
+.copyright-en-sub {
+    font-size: 9px;
+    color: #94a3b8;
+    letter-spacing: 0.4px;
+    line-height: 1.4;
+}
+@media print {
+    .book-special-page {
+        width: 210mm !important;
+        height: 296mm !important;
+        margin: 0 !important;
+        box-shadow: none !important;
+        border: none !important;
+        page-break-after: always !important;
+        break-after: page !important;
+    }
+    .book-last-page {
+        page-break-after: auto !important;
+        break-after: auto !important;
+    }
+}
+"""
+
+def build_booklet_front_and_back(book_type: str, h_img: str, f_img: str, academy: str, school: str, passage_count: int) -> (str, str):
+    """
+    1페이지: 심플 & 프리미엄 영문 표지 (Anatomy One-Shot / Self-Note / Core / Voca + Created by PQRS Young)
+    2페이지: 공란 (백지 페이지)
+    마지막 페이지: 우측 하단 저작권 및 법적 처벌 경고 문구 페이지
+    """
+    meta_map = {
+        "victory": {
+            "main_first": "Anatomy",
+            "main_Highlight": "One-Shot",
+            "sub_en": "Intensive Syntax Analysis & Direct Comprehension System",
+            "sub_ko": "시험 직전 최후의 승자 — 문장별 구조 분석과 직독직해 한판승"
+        },
+        "anatomy": {
+            "main_first": "Anatomy",
+            "main_Highlight": "Self-Note",
+            "sub_en": " Comprehensive Text Dissection, Grammar & Structure Workbook",
+            "sub_ko": "내신과 수능 1등급을 위한 지문 해부 & 자기주도 필기·복습 노트"
+        },
+        "core": {
+            "main_first": "Anatomy",
+            "main_Highlight": "Core",
+            "sub_en": "Essential Paraphrasing, Topics, Main Ideas & Summary Master",
+            "sub_ko": "학교 내신 변형 1순위 — 다중 주제·제목·요지·요약문 패러프레이징"
+        },
+        "voca": {
+            "main_first": "Anatomy",
+            "main_Highlight": "Voca",
+            "sub_en": "Contextual Vocabulary, Idioms, Synonyms & Antonyms Master",
+            "sub_ko": "문맥 중심 중고등 필수 어휘 및 패러프레이징 유의어·반의어 마스터"
+        }
+    }
+    cfg = meta_map.get(book_type, meta_map["victory"])
+    acad_esc = esc(academy)
+    sch_esc = esc(school)
+
+    front_pages_html = f"""
+    <!-- 1페이지: 앞표지 (Front Cover) -->
+    <div class="book-special-page">
+        <div class="cover-accent-bar"></div>
+        <div class="cover-side-line"></div>
+        <div class="book-cover-inner">
+            <div class="cover-top-meta">
+                <div class="cover-series-tag">PQRS YOUNG ENGLISH CURRICULUM SERIES</div>
+                <div class="cover-logo-circle" style="background-image: url('{h_img}');"></div>
+            </div>
+
+            <div class="cover-hero">
+                <div class="cover-edition-pill">PREMIUM EDITION &bull; {passage_count} PASSAGES INCLUDED</div>
+                <h1 class="cover-main-title">{cfg['main_first']} <span>{cfg['main_Highlight']}</span></h1>
+                <div class="cover-subtitle-en">{cfg['sub_en']}</div>
+                <div class="cover-subtitle-ko">{cfg['sub_ko']}</div>
+                <div class="cover-divider"></div>
+                <div class="cover-author-credit">Created &amp; Designed by <span>PQRS Young</span></div>
+            </div>
+
+            <div class="cover-bottom-area">
+                <div class="cover-Creator-block">
+                    <div style="font-weight:900; color:#0f172a; font-size:13px; margin-bottom:2px;">PQRS Young &times; {acad_esc}</div>
+                    <div>High School English Exam &amp; CSAT Preparation</div>
+                    <div style="font-size:10.5px; color:#94a3b8;">Original Pedagogical System by PQRS Young</div>
+                </div>
+                <div class="cover-student-box">
+                    <div class="cover-student-row"><span>SCHOOL</span><span style="color:#64748b; font-weight:500;">{sch_esc if sch_esc else ''}</span></div>
+                    <div class="cover-student-row"><span>GRADE / CLASS</span><span></span></div>
+                    <div class="cover-student-row"><span>STUDENT NAME</span><span></span></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 2페이지: 표지 다음 공란 페이지 (Inside Front Blank Page) -->
+    <div class="book-special-page"></div>
+    """
+
+    back_page_html = f"""
+    <!-- 마지막 페이지: 저작권 명시 뒤표지 (우측 하단 배치) -->
+    <div class="book-special-page book-last-page">
+        <div class="back-cover-inner">
+            <div class="copyright-box-right">
+                <div class="copyright-title-en">{cfg['main_first'].upper()} {cfg['main_Highlight'].upper()} &mdash; CREATED BY PQRS YOUNG</div>
+                <div class="copyright-ko-legal">
+                    본 교재의 모든 저작권은 제작자인 <b>PQRS영쌤</b>에게 있으며, 저작권자의 사전 서면 동의 없는 무단 복제, 배포, 전송, 스캔 및 도용 시 저작권법에 의거하여 민·형사상의 엄중한 법적 처벌을 받을 수 있습니다.
+                </div>
+                <div class="copyright-en-sub">
+                    Copyright &copy; PQRS Young ({acad_esc}). All rights reserved.<br>
+                    Unauthorized reproduction, distribution, or plagiarism of this material is strictly prohibited and subject to legal prosecution.
+                </div>
+            </div>
+        </div>
+    </div>
+    """
+    return front_pages_html, back_page_html
 
 
 # -----------------------------
@@ -367,8 +686,71 @@ def merge_core_vocab_into_voca_item(core_data: Dict, voca_data: Dict) -> int:
 
 
 # -----------------------------
-# 2-C. 엑셀(.xlsx) 계층형 단어장 생성기
+# 2-C. 엑셀(.xlsx) 및 지정 양식 CSV 생성기
 # -----------------------------
+def generate_voca_csv_bytes(selected_passages: List[Dict]) -> bytes:
+    """
+    1행 필수 제목: 분류, 단어번호, 영어단어, 발음기호, 뜻, 한글발음, 예문
+    """
+    rows = []
+    word_no = 1
+    for p in selected_passages:
+        lbl = p.get("label", "")
+        voca_list = p.get("data", {}).get("voca_list", [])
+        for item in voca_list:
+            w = str(item.get("word", "")).strip()
+            if not w:
+                continue
+            pos = str(item.get("pos", "")).strip()
+            pron = str(item.get("pronunciation", "")).strip()
+            mean = str(item.get("meaning", "")).strip()
+            full_mean = f"[{pos}] {mean}" if pos else mean
+
+            rows.append({
+                "분류": lbl,
+                "단어번호": word_no,
+                "영어단어": w,
+                "발음기호": str(item.get("ipa", "")).strip(),
+                "뜻": full_mean,
+                "한글발음": pron,
+                "예문": str(item.get("example", "")).strip()
+            })
+            word_no += 1
+
+            for syn in item.get("synonyms", []):
+                sw = str(syn.get("word", "")).strip()
+                if not sw:
+                    continue
+                rows.append({
+                    "분류": f"{lbl} (유의어)",
+                    "단어번호": word_no,
+                    "영어단어": sw,
+                    "발음기호": "",
+                    "뜻": f"[유의어: {w}] {str(syn.get('meaning', '')).strip()}",
+                    "한글발음": str(syn.get("pronunciation", "")).strip(),
+                    "예문": ""
+                })
+                word_no += 1
+
+            for ant in item.get("antonyms", []):
+                aw = str(ant.get("word", "")).strip()
+                if not aw:
+                    continue
+                rows.append({
+                    "분류": f"{lbl} (반의어)",
+                    "단어번호": word_no,
+                    "영어단어": aw,
+                    "발음기호": "",
+                    "뜻": f"[반의어: {w}] {str(ant.get('meaning', '')).strip()}",
+                    "한글발음": str(ant.get("pronunciation", "")).strip(),
+                    "예문": ""
+                })
+                word_no += 1
+
+    columns = ["분류", "단어번호", "영어단어", "발음기호", "뜻", "한글발음", "예문"]
+    df = pd.DataFrame(rows, columns=columns) if rows else pd.DataFrame(columns=columns)
+    return df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+
 def generate_voca_excel_bytes(selected_passages: List[Dict]) -> bytes:
     rows_3col = []
     rows_detail = []
@@ -604,7 +986,7 @@ def get_studio_toolbar_html(mode_type: str = "standard") -> str:
     elif mode_type == "core":
         extra_btns = """
         <button class="studio-btn" style="background:#0284c7; border-color:#38bdf8;" onclick="setCoreTestMode('study')">📖 해설·정답 표시 모드</button>
-        <button class="studio-btn" style="background:#0d9488; border-color:#2dd4bf;" onclick="setCoreTestMode('test')">📝 요약문(A)(B) 빈칸 & T/F 실전 시험지 모드</button>
+        <button class="studio-btn" style="background:#0d9488; border-color:#2dd4bf;" onclick="setCoreTestMode('test')">📝 요약문(A)(B) 양자택일 & T/F 실전 시험지 모드</button>
         """
 
     return f"""
@@ -652,20 +1034,19 @@ def get_studio_toolbar_html(mode_type: str = "standard") -> str:
 
 <nav class="studio-toolbar no-print">
     <div class="st-title">
-        <span>⚡ 4pm 실시간 교재 스튜디오</span>
-        <span style="font-size:11px; color:#94a3b8; font-weight:400;">(인쇄 시 상단 바는 자동 숨김)</span>
+        <span>⚡ 4pm 실시간 교재 스튜디오 (표지·공란·저작권 페이지 자동 탑재)</span>
     </div>
     <div class="st-actions">
         {extra_btns}
         <button class="studio-btn" onclick="toggleOrderDrawer()">📋 지문 순서 변경 / 제외</button>
         <button id="btn-edit-mode" class="studio-btn" onclick="toggleEditMode()">✏️ 화면 텍스트 직접 수정: OFF</button>
-        <button class="studio-btn" onclick="downloadEditedHtml()">💾 현재 수정본 HTML 저장</button>
+        <button class="studio-btn" onclick="downloadEditedHtml()">💾 단행본 전체 HTML 저장</button>
         <button class="studio-btn primary" onclick="window.print()">🖨️ 즉시 인쇄 / PDF 저장</button>
     </div>
 </nav>
 <div id="studio-order-drawer" class="studio-drawer no-print">
     <div style="font-size:12px; font-weight:700; margin-bottom:8px; color:#38bdf8;">
-        💡 화살표를 눌러 출력 순서를 실시간으로 바꾸거나 특정 지문을 제외할 수 있습니다.
+        💡 화살표를 눌러 본문 지문 순서를 실시간으로 바꾸거나 특정 지문을 제외할 수 있습니다. (앞표지·공란·뒤표지는 항상 고정됩니다)
     </div>
     <div id="drawer-list"></div>
 </div>
@@ -674,7 +1055,7 @@ def get_studio_toolbar_html(mode_type: str = "standard") -> str:
 let isEditMode = false;
 function toggleEditMode() {{
     isEditMode = !isEditMode;
-    const container = document.getElementById('book-container');
+    const container = document.getElementById('book-wrapper-all');
     const btn = document.getElementById('btn-edit-mode');
     if (container) {{
         container.contentEditable = isEditMode ? "true" : "false";
@@ -785,7 +1166,7 @@ function downloadEditedHtml() {{
     const blob = new Blob(["<!DOCTYPE html>\\n" + docClone.outerHTML], {{type: "text/html;charset=utf-8"}});
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = document.title ? document.title.replace(/\\s+/g, '_') + "_edited.html" : "4pm_edited.html";
+    a.download = document.title ? document.title.replace(/\\s+/g, '_') + "_Booklet.html" : "Anatomy_Booklet.html";
     a.click();
 }}
 </script>
@@ -793,13 +1174,14 @@ function downloadEditedHtml() {{
 
 
 # -----------------------------
-# 3-A. [한판승] 서식 및 렌더링
+# 3-A. [한판승: Anatomy One-Shot] 서식 및 렌더링
 # -----------------------------
 def build_css_victory(h_img, f_img, e_img):
     return f"""<style>
     @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;700;900&display=swap');
     @page {{ size: A4; margin: 12mm 15mm; }} 
     body {{ font-family: 'Noto Sans KR', sans-serif; background: #f0f2f5; margin: 0; padding: 0; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }}
+    {BOOK_COVER_CSS}
     .passage-wrapper {{ width: 210mm; box-sizing: border-box; padding: 15mm 18mm; margin: 10mm auto; background: white; box-shadow: 0 0 10px rgba(0,0,0,0.1); page-break-after: always; }}
     @media print {{ body {{ background: white; }} .passage-wrapper {{ width: 100%; margin: 0; padding: 0; box-shadow: none; border: none; }} }}
     .master-table {{ width: 100%; border-collapse: collapse; }}
@@ -941,18 +1323,19 @@ def render_victory(p):
         </table>
     </div>"""
 
-def wrap_full_html_victory(body_html, css):
-    return f"""<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8"><title>HANPANSEUNG_PRINT</title>{css}</head><body>{get_studio_toolbar_html('standard')}<main id="book-container">{body_html}</main></body></html>"""
+def wrap_full_html_victory(body_html, css, front_html="", back_html=""):
+    return f"""<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8"><title>Anatomy_One_Shot</title>{css}</head><body>{get_studio_toolbar_html('standard')}<div id="book-wrapper-all">{front_html}<main id="book-container">{body_html}</main>{back_html}</div></body></html>"""
 
 
 # -----------------------------
-# 3-B. [ANATOMY] 서식 및 렌더링
+# 3-B. [ANATOMY: Anatomy Self-Note] 서식 및 렌더링
 # -----------------------------
 def build_css_anatomy(h_logo, f_logo, e_logo):
     return f"""<style>
     @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;700;900&display=swap');
     @page {{ size: A4; margin: 0; }}
     body {{ font-family: 'Noto Sans KR', sans-serif; margin: 0; padding: 0; background: #f4f7fa; color: #333; -webkit-print-color-adjust: exact; print-color-adjust: exact; counter-reset: pagenum; }}
+    {BOOK_COVER_CSS}
     #book-container {{ counter-reset: pagenum; }}
     .page {{ --scale: 1; width: 210mm; height: 297mm; padding: calc(15mm * var(--scale)) calc(18mm * var(--scale)) calc(12mm * var(--scale)) calc(18mm * var(--scale)); margin: 10mm auto; background: white; box-shadow: 0 0 15px rgba(0,0,0,0.10); box-sizing: border-box; overflow: hidden; display: flex; flex-direction: column; page-break-after: always; position: relative; counter-increment: pagenum; }}
     .header {{ display: flex; justify-content: space-between; align-items: flex-end; border-bottom: 4px solid #0047AB; padding-bottom: calc(12px * var(--scale)); margin-bottom: calc(18px * var(--scale)); flex: 0 0 auto; }}
@@ -1042,8 +1425,8 @@ window.addEventListener('resize', () => setTimeout(fitAllPages, 120));
 </script>
 """
 
-def wrap_full_html_anatomy(body_html, css):
-    return f"""<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8"><title>ANATOMY_PRINT</title>{css}</head><body>{get_studio_toolbar_html('standard')}<main id="book-container">{body_html}</main>{FIT_SCRIPT}</body></html>"""
+def wrap_full_html_anatomy(body_html, css, front_html="", back_html=""):
+    return f"""<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8"><title>Anatomy_Self_Note</title>{css}</head><body>{get_studio_toolbar_html('standard')}<div id="book-wrapper-all">{front_html}<main id="book-container">{body_html}</main>{back_html}</div>{FIT_SCRIPT}</body></html>"""
 
 def format_passage_for_display(body_text: str) -> str:
     if not body_text:
@@ -1097,6 +1480,7 @@ def build_css_core(h_img, f_img, e_img):
     @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700;900&display=swap');
     @page {{ size: A4; margin: 12mm 14mm; }}
     body {{ font-family: 'Noto Sans KR', sans-serif; background: #f0f2f5; margin: 0; padding: 0; color: #1e293b; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }}
+    {BOOK_COVER_CSS}
     .core-wrapper {{ width: 210mm; box-sizing: border-box; padding: 13mm 15mm; margin: 10mm auto; background: white; box-shadow: 0 0 12px rgba(0,0,0,0.1); page-break-after: always; }}
     @media print {{ body {{ background: white; }} .core-wrapper {{ width: 100%; margin: 0; padding: 0; box-shadow: none; border: none; }} }}
     .core-master-table {{ width: 100%; border-collapse: collapse; }}
@@ -1117,36 +1501,71 @@ def build_css_core(h_img, f_img, e_img):
     .core-ko {{ color: #475569; font-size: 10.5px; margin-top: 1px; }}
     .core-badge {{ display: inline-block; background: #dbeafe; color: #1d4ed8; font-weight: 800; font-size: 9.5px; padding: 1px 5px; border-radius: 4px; margin-right: 4px; }}
     .summary-card {{ border: 1.5px solid #93c5fd; background: #f8fafc; border-radius: 8px; padding: 9px 12px; margin-bottom: 7px; page-break-inside: avoid; break-inside: avoid; }}
-    .summary-en {{ font-size: 12px; font-weight: 800; color: #0f172a; line-height: 1.55; margin-bottom: 4px; }}
+    .summary-en {{ font-size: 12px; font-weight: 800; color: #0f172a; line-height: 1.65; margin-bottom: 4px; }}
     .summary-ko {{ font-size: 11px; color: #475569; margin-bottom: 6px; }}
-    .blank-pill {{ display: inline-block; background: #fef3c7; border: 1px solid #f59e0b; color: #b45309; font-weight: 900; padding: 0 6px; border-radius: 4px; margin: 0 2px; }}
+    
+    .ab-choice-pill {{ display: inline-block; background: #eff6ff; border: 1.5px solid #3b82f6; color: #1e293b; font-weight: 800; padding: 0px 7px; border-radius: 5px; margin: 0 2px; }}
+    .ab-correct-opt {{ color: #0047AB; font-weight: 900; text-decoration: underline; text-underline-offset: 3px; }}
+    .ab-wrong-opt {{ color: #64748b; font-weight: 700; }}
+    
     .summary-ans-bar {{ display: flex; flex-wrap: wrap; gap: 6px 14px; background: #fffbeb; border: 1px dashed #fcd34d; border-radius: 6px; padding: 5px 9px; font-size: 10.8px; color: #78350f; }}
     .tf-row {{ border: 1px solid #e2e8f0; border-radius: 6px; padding: 6px 10px; margin-bottom: 5px; display: flex; justify-content: space-between; align-items: center; gap: 10px; background: #fcfcfd; page-break-inside: avoid; break-inside: avoid; }}
     .tf-ans-badge {{ font-weight: 900; font-size: 11px; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }}
     .tf-O {{ background: #dcfce7; color: #15803d; border: 1px solid #86efac; }}
     .tf-X {{ background: #fee2e2; color: #b91c1c; border: 1px solid #fca5a5; }}
     .core-voca-strip {{ display: grid; grid-template-columns: 1fr 1fr; gap: 5px 10px; background: #fff4e5; border: 1px solid #f5c27a; border-radius: 8px; padding: 8px 10px; font-size: 10.5px; page-break-inside: avoid; break-inside: avoid; }}
-    #book-container.core-test-mode .blank-target-word {{ visibility: hidden; }}
+    
+    #book-container.core-test-mode .ab-choice-pill {{ background: #ffffff !important; border-color: #475569 !important; }}
+    #book-container.core-test-mode .ab-correct-opt,
+    #book-container.core-test-mode .ab-wrong-opt {{ color: #0f172a !important; font-weight: 800 !important; text-decoration: none !important; }}
     #book-container.core-test-mode .summary-ans-bar {{ display: none !important; }}
-    #book-container.core-test-mode .tf-ans-reveal {{ visibility: hidden; }}
+    #book-container.core-test-mode .tf-ans-reveal {{ display: none !important; }}
+    #book-container.core-test-mode .tf-ans-badge.tf-O,
+    #book-container.core-test-mode .tf-ans-badge.tf-X {{
+        background: #f8fafc !important;
+        color: #334155 !important;
+        border: 1px solid #cbd5e1 !important;
+    }}
     </style>"""
 
-def highlight_summary_blanks(eng_text: str, blank_a: str, blank_b: str) -> str:
+def extract_trap_word_fallback(syn_str: str, default_word: str = "opposite") -> str:
+    if not syn_str:
+        return default_word
+    m = re.search(r'(?:\[함정\]|반의어\s*[:\-]?|/)\s*([A-Za-z\-]+)', str(syn_str))
+    if m:
+        return m.group(1).strip()
+    words = re.findall(r'[A-Za-z\-]{3,}', str(syn_str))
+    return words[-1] if words else default_word
+
+def format_summary_dual_choice(eng_text: str, blank_a: str, dist_a: str, blank_b: str, dist_b: str, seed_key: str) -> str:
     escaped = esc(eng_text)
+    rng = random.Random(seed_key)
+
+    def make_pill(tag: str, ans_w: str, trap_w: str) -> str:
+        ans_clean = esc(ans_w.strip())
+        trap_clean = esc(trap_w.strip()) if trap_w and trap_w.strip() else "opposite"
+        ans_span = f'<span class="ab-correct-opt">{ans_clean}</span>'
+        trap_span = f'<span class="ab-wrong-opt">{trap_clean}</span>'
+        opts = [ans_span, trap_span]
+        rng.shuffle(opts)
+        return f'<span class="ab-choice-pill">({tag}) [ {opts[0]} / {opts[1]} ]</span>'
+
     if blank_a:
-        escaped = re.sub(
-            r'\(\s*A\s*\)\s*' + re.escape(esc(blank_a)),
-            f'<span class="blank-pill">(A) <span class="blank-target-word">{esc(blank_a)}</span></span>',
-            escaped,
-            flags=re.IGNORECASE
-        )
+        pill_a = make_pill("A", blank_a, dist_a)
+        pat_a = r'\(\s*A\s*\)\s*' + re.escape(esc(blank_a))
+        if re.search(pat_a, escaped, flags=re.IGNORECASE):
+            escaped = re.sub(pat_a, pill_a, escaped, count=1, flags=re.IGNORECASE)
+        else:
+            escaped = re.sub(r'\(\s*A\s*\)', pill_a, escaped, count=1)
+
     if blank_b:
-        escaped = re.sub(
-            r'\(\s*B\s*\)\s*' + re.escape(esc(blank_b)),
-            f'<span class="blank-pill">(B) <span class="blank-target-word">{esc(blank_b)}</span></span>',
-            escaped,
-            flags=re.IGNORECASE
-        )
+        pill_b = make_pill("B", blank_b, dist_b)
+        pat_b = r'\(\s*B\s*\)\s*' + re.escape(esc(blank_b))
+        if re.search(pat_b, escaped, flags=re.IGNORECASE):
+            escaped = re.sub(pat_b, pill_b, escaped, count=1, flags=re.IGNORECASE)
+        else:
+            escaped = re.sub(r'\(\s*B\s*\)', pill_b, escaped, count=1)
+
     return escaped
 
 def render_core(p: Dict) -> str:
@@ -1185,30 +1604,39 @@ def render_core(p: Dict) -> str:
     for i, s in enumerate(data.get("summaries", []), start=1):
         ba = s.get("blank_a", "")
         bb = s.get("blank_b", "")
-        sa_syn = esc(s.get("synonyms_a", ""))
-        sb_syn = esc(s.get("synonyms_b", ""))
-        eng_hl = highlight_summary_blanks(s.get("eng", ""), ba, bb)
+        sa_syn = s.get("synonyms_a", "")
+        sb_syn = s.get("synonyms_b", "")
+        dist_a = s.get("distractor_a") or extract_trap_word_fallback(sa_syn, "superficial")
+        dist_b = s.get("distractor_b") or extract_trap_word_fallback(sb_syn, "passivity")
+
+        eng_hl = format_summary_dual_choice(s.get("eng", ""), ba, dist_a, bb, dist_b, seed_key=f"{pid}_sum_{i}")
         summaries_html += f"""
         <div class="summary-card">
             <div class="summary-en"><span class="core-badge" style="background:#0047AB; color:white;">Summary {i}</span> {eng_hl}</div>
             <div class="summary-ko">해석: {esc(s.get('kor', ''))}</div>
             <div class="summary-ans-bar">
-                <div>🎯 <b>(A) 정답: {esc(ba)}</b> <span style="color:#475569;">(대체·변형어: {sa_syn})</span></div>
-                <div>🎯 <b>(B) 정답: {esc(bb)}</b> <span style="color:#475569;">(대체·변형어: {sb_syn})</span></div>
+                <div>🎯 <b>(A) 정답: {esc(ba)}</b> vs 오답: {esc(dist_a)} <span style="color:#475569;">({esc(sa_syn)})</span></div>
+                <div>🎯 <b>(B) 정답: {esc(bb)}</b> vs 오답: {esc(dist_b)} <span style="color:#475569;">({esc(sb_syn)})</span></div>
             </div>
         </div>"""
 
+    tf_list = list(data.get("paraphrased_tf", []))
+    rng_tf = random.Random(f"{pid}_tf_shuffle")
+    rng_tf.shuffle(tf_list)
+
     tf_html = ""
-    for i, tf in enumerate(data.get("paraphrased_tf", []), start=1):
+    tf_ans_summary = []
+    for i, tf in enumerate(tf_list, start=1):
         ans = tf.get("answer", "O")
         badge_cls = "tf-O" if ans == "O" else "tf-X"
+        tf_ans_summary.append(f"{i}.{ans}")
         tf_html += f"""
         <div class="tf-row">
             <div style="flex:1;">
                 <div class="core-en"><b>{i}.</b> {esc(tf.get('eng', ''))}</div>
                 <div class="core-ko">↳ {esc(tf.get('kor', ''))} <span class="tf-ans-reveal" style="color:#b45309; font-weight:700;">| 💡 출제포인트: {esc(tf.get('point', ''))}</span></div>
             </div>
-            <div class="tf-ans-badge {badge_cls}"><span class="tf-ans-reveal">{esc(ans)}</span> ( O / X )</div>
+            <div class="tf-ans-badge {badge_cls}"><span class="tf-ans-reveal">정답: {esc(ans)} | </span>( O / X )</div>
         </div>"""
 
     cv_items = []
@@ -1260,14 +1688,14 @@ def render_core(p: Dict) -> str:
                     <div class="core-card" style="margin-bottom:8px;">{claims_html}</div>
 
                     <div class="core-sec-title">
-                        <span>🎯 실전 요약문 (Summary Variations 3선) & 빈칸 (A), (B) 출제 타겟</span>
-                        <span style="font-size:10.5px; font-weight:500; color:#475569;">객관식 요약문 및 서술형 조건 영작 완벽 대비</span>
+                        <span>🎯 실전 요약문 (Summary 3선) & 빈칸 (A), (B) 양자택일 어휘 추론</span>
+                        <span style="font-size:10.5px; font-weight:500; color:#475569;">문맥에 맞는 알맞은 패러프레이징 어휘를 고르시오</span>
                     </div>
                     {summaries_html}
 
                     <div class="core-sec-title">
-                        <span>🔍 학교 내신 &lt;보기&gt;형 패러프레이징 진위(T/F) 선지 분석</span>
-                        <span style="font-size:10.5px; font-weight:500; color:#475569;">운양고·제일고 특유의 영문 &lt;보기&gt; 함정 완벽 대비</span>
+                        <span>🔍 학교 내신 &lt;보기&gt;형 패러프레이징 진위(T/F) 선지 분석 (순서 랜덤 배치)</span>
+                        <span class="tf-ans-reveal" style="font-size:10.5px; font-weight:700; color:#1e40af;">정답: {' / '.join(tf_ans_summary)}</span>
                     </div>
                     <div style="margin-bottom:8px;">{tf_html}</div>
 
@@ -1281,8 +1709,8 @@ def render_core(p: Dict) -> str:
     </div>
     """
 
-def wrap_full_html_core(body_html, css):
-    return f"""<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8"><title>ANATOMY_CORE_PRINT</title>{css}</head><body>{get_studio_toolbar_html('core')}<main id="book-container">{body_html}</main></body></html>"""
+def wrap_full_html_core(body_html, css, front_html="", back_html=""):
+    return f"""<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8"><title>Anatomy_Core</title>{css}</head><body>{get_studio_toolbar_html('core')}<div id="book-wrapper-all">{front_html}<main id="book-container">{body_html}</main>{back_html}</div></body></html>"""
 
 
 # -----------------------------
@@ -1293,6 +1721,7 @@ def build_css_voca(h_img, f_img):
     @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700;900&display=swap');
     @page {{ size: A4; margin: 12mm 14mm; }}
     body {{ font-family: 'Noto Sans KR', sans-serif; background: #f0f2f5; margin: 0; padding: 0; color: #1e293b; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }}
+    {BOOK_COVER_CSS}
     .voca-wrapper {{ width: 210mm; box-sizing: border-box; padding: 14mm 16mm; margin: 10mm auto; background: white; box-shadow: 0 0 12px rgba(0,0,0,0.1); page-break-after: always; }}
     @media print {{ body {{ background: white; }} .voca-wrapper {{ width: 100%; margin: 0; padding: 0; box-shadow: none; border: none; }} }}
     .voca-master-table {{ width: 100%; border-collapse: collapse; }}
@@ -1448,8 +1877,8 @@ def render_voca(p):
     </div>
     """
 
-def wrap_full_html_voca(body_html, css):
-    return f"""<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8"><title>ANATOMY_VOCA_PRINT</title>{css}</head><body>{get_studio_toolbar_html('voca')}<main id="book-container">{body_html}</main></body></html>"""
+def wrap_full_html_voca(body_html, css, front_html="", back_html=""):
+    return f"""<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8"><title>Anatomy_Voca</title>{css}</head><body>{get_studio_toolbar_html('voca')}<div id="book-wrapper-all">{front_html}<main id="book-container">{body_html}</main>{back_html}</div></body></html>"""
 
 
 # -----------------------------
@@ -1596,11 +2025,13 @@ SCHEMA_CORE = {
                     "eng": {"type": "string"},
                     "kor": {"type": "string"},
                     "blank_a": {"type": "string"},
+                    "distractor_a": {"type": "string"},
                     "blank_b": {"type": "string"},
+                    "distractor_b": {"type": "string"},
                     "synonyms_a": {"type": "string"},
                     "synonyms_b": {"type": "string"}
                 },
-                "required": ["eng", "kor", "blank_a", "blank_b", "synonyms_a", "synonyms_b"]
+                "required": ["eng", "kor", "blank_a", "distractor_a", "blank_b", "distractor_b", "synonyms_a", "synonyms_b"]
             }
         },
         "paraphrased_tf": {
@@ -1734,7 +2165,7 @@ def analyze_passage(label, text, model_name, target_type="victory", core_context
 
     elif target_type == "core":
         prompt = f"""너는 대한민국 고등학교 영어 내신 변형 문제 및 패러프레이징 최고 전문가다.
-아래의 [학교 실제 기출 출제 DNA]를 철저히 적용하여, 이 지문에서 출제될 가능성이 가장 높은 다중 주제문, 제목, 요지/주장문, 요약문(빈칸 A/B 포함), <보기> 진위형 선지, 그리고 여기에 사용된 패러프레이징 핵심 어휘를 JSON으로 반환하라.
+아래의 [학교 실제 기출 출제 DNA]를 철저히 적용하여, 이 지문에서 출제될 가능성이 가장 높은 다중 주제문, 제목, 요지/주장문, 요약문(빈칸 A/B 양자택일 포함), <보기> 진위형 선지, 그리고 여기에 사용된 패러프레이징 핵심 어휘를 JSON으로 반환하라.
 
 {dna_rules}
 
@@ -1745,12 +2176,13 @@ def analyze_passage(label, text, model_name, target_type="victory", core_context
    - 2번(style="의문문(?) 탐구형"): 핵심 쟁점을 묻는 세련된 제목
    - 3번(style="대조/비유 압축형"): 예) From Survival to Surplus: The Dawn of Human Leisure
 3. main_ideas (영문 요지·주장문 3선): 실제 운양고·제일고 요지/주장 선지처럼 완결된 학술 영문 평서문 3개로 패러프레이징 작성 (eng, kor).
-4. summaries (실전 요약문 3선):
-   - 서로 다른 문장 구조(인과관계형, 대조/양보절형, 분사구문/관계절형)로 지문 전체를 요약한 영문 문장 3개 작성.
-   - 반드시 영문 요약문(eng) 안에 `(A) 단어` 와 `(B) 단어` 형태로 빈칸 타겟 어휘를 포함시킬 것!
-   - blank_a, blank_b에는 각각 (A), (B)에 들어간 정확한 영어 단어를 적고, synonyms_a, synonyms_b에는 그 자리에 대신 들어갈 수 있는 동의어 2개와 오답 함정용 반의어 1개를 "동의어1(뜻), 동의어2(뜻) / [함정]반의어(뜻)" 형태로 작성할 것.
+4. summaries (실전 요약문 3선 & 양자택일 어휘):
+   - 서로 다른 문장 구조로 지문 전체를 요약한 영문 문장 3개 작성.
+   - 반드시 영문 요약문(eng) 안에 `(A) 정답단어` 와 `(B) 정답단어` 형태로 표기할 것!
+   - blank_a, blank_b에는 각각 (A), (B)의 정확한 정답 영어 단어를 적고, distractor_a, distractor_b에는 각각 (A), (B) 자리에 들어갈 매력적인 오답 영어 단어(반의어 또는 철자 유사 함정 어휘 1단어, 품사 일치 필수)를 적을 것.
+   - synonyms_a, synonyms_b에는 각각 동의어 2개와 오답 단어의 뜻을 "동의어1(뜻), 동의어2(뜻) / [함정]오답단어(뜻)" 형태로 작성할 것.
 5. paraphrased_tf (내신 <보기>형 패러프레이징 진위 문장 4선):
-   - 2개는 O(True: 원문을 고급 어휘로 패러프레이징한 참 진술), 2개는 X(False: 원문의 인과관계를 뒤집거나 반의어/극단적 한정어를 섞은 매력적인 오답 진술).
+   - 2개는 O(True: 원문을 고급 어휘로 패러프레이징한 참 진술), 2개는 X(False: 원문의 인과관계를 뒤집거나 반의어/극단적 한정어를 섞은 매력적인 오답 진술). 단, O와 X의 배치 순서는 예측할 수 없게 섞어서 작성하라.
    - point에는 어떤 표현이 어떻게 패러프레이징되었거나 왜 함정인지 한 줄 해설 작성.
 6. core_vocab (위 주제/제목/요지/요약문/진위문에서 사용된 핵심 패러프레이징 어휘 8~10개):
    - 지문 원문에 없더라도 위 변형 문장들과 요약문 (A), (B)에 사용된 핵심 상위 개념어 및 변형 1순위 어휘를 추출.
@@ -1907,7 +2339,7 @@ def render_permanent_json_editor(prefix: str, target_type: str, file_path: str, 
             tit_df = st.data_editor(pd.DataFrame(pdata.get("titles", [])), num_rows="dynamic", use_container_width=True, key=f"{prefix}_ctit_{pid}")
             st.markdown("##### 💡 영문 요지·주장 (Main Ideas) 편집")
             mi_df = st.data_editor(pd.DataFrame(pdata.get("main_ideas", [])), num_rows="dynamic", use_container_width=True, key=f"{prefix}_cmi_{pid}")
-            st.markdown("##### 🎯 실전 요약문 (Summaries & 빈칸 A/B) 편집")
+            st.markdown("##### 🎯 실전 요약문 (Summaries & 빈칸 A/B 양자택일) 편집")
             sum_df = st.data_editor(pd.DataFrame(pdata.get("summaries", [])), num_rows="dynamic", use_container_width=True, key=f"{prefix}_csum_{pid}")
             st.markdown("##### 🔍 <보기>형 진위 진술문 (Paraphrased T/F) 편집")
             tf_df = st.data_editor(pd.DataFrame(pdata.get("paraphrased_tf", [])), num_rows="dynamic", use_container_width=True, key=f"{prefix}_ctf_{pid}")
@@ -2010,7 +2442,7 @@ def parse_number_query(query_str: str) -> List[int]:
     return result
 
 @st.fragment
-def render_library_manager(prefix: str, title_name: str, file_path: str, css_str: str, target_type: str, text_model: str, api_delay: int, academy_name: str, school_name: str):
+def render_library_manager(prefix: str, title_name: str, file_path: str, css_str: str, target_type: str, text_model: str, api_delay: int, academy_name: str, school_name: str, h_url: str, f_url: str):
     saved_key = {"victory": "saved_v", "anatomy": "saved_a", "core": "saved_c", "voca": "saved_w"}[target_type]
     sel_key = {"victory": "v_selected", "anatomy": "a_selected", "core": "c_selected", "voca": "w_selected"}[target_type]
     chk_prefix = {"victory": "vchk_", "anatomy": "achk_", "core": "cchk_", "voca": "wchk_"}[target_type]
@@ -2242,56 +2674,68 @@ def render_library_manager(prefix: str, title_name: str, file_path: str, css_str
         render_permanent_json_editor(prefix, target_type, file_path, sel_passages, saved_list)
 
         if target_type == "voca":
-            r_col1, r_col2, r_col3 = st.columns([2, 2.4, 3.6])
+            r_col1, r_col2, r_col3, r_col4 = st.columns([2, 2.2, 2.2, 2.6])
         else:
             r_col1, r_col2 = st.columns([2.4, 5.6])
-            r_col3 = None
+            r_col3, r_col4 = None, None
 
         render_clicked = r_col1.button(
-            f"👁️ 선택한 {title_name} 렌더링 ({len(sel_passages)}지문)",
+            f"👁️ 선택한 {title_name} 단행본 렌더링 ({len(sel_passages)}지문)",
             type="primary",
             use_container_width=True,
             key=f"{prefix}_render_btn"
         )
 
-        if target_type == "voca" and r_col2 is not None:
+        if target_type == "voca" and r_col2 is not None and r_col3 is not None:
             excel_bytes = generate_voca_excel_bytes(sel_passages)
             r_col2.download_button(
-                label="📊 선택 단어장 엑셀(.xlsx) 다운로드 (유의·반의어 하단 셀 배치)",
+                label="📊 선택 단어장 엑셀(.xlsx) 다운로드",
                 data=excel_bytes,
-                file_name="ANATOMY_VOCA_단어장.xlsx",
+                file_name="Anatomy_Voca_단어장.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
                 key=f"{prefix}_excel_dl_btn"
             )
+            csv_bytes = generate_voca_csv_bytes(sel_passages)
+            r_col3.download_button(
+                label="📄 선택 단어장 CSV 다운로드 (지정 양식)",
+                data=csv_bytes,
+                file_name="Anatomy_Voca_단어장.csv",
+                mime="text/csv",
+                use_container_width=True,
+                key=f"{prefix}_csv_dl_btn"
+            )
 
         if render_clicked:
-            with st.spinner(f"{title_name} 교재를 초고속 렌더링 중입니다..."):
+            with st.spinner(f"{title_name} 단행본(표지+공란+본문+저작권) 교재를 렌더링 중입니다..."):
+                front_html, back_html = build_booklet_front_and_back(
+                    target_type, h_url, f_url, academy_name, school_name, len(sel_passages)
+                )
                 if target_type == "victory":
                     body_str = "".join([render_victory(p) for p in sel_passages])
-                    final_html = wrap_full_html_victory(body_str, css_str)
-                    file_name = "victory_final.html"
+                    final_html = wrap_full_html_victory(body_str, css_str, front_html, back_html)
+                    file_name = "Anatomy_One-Shot_Booklet.html"
                 elif target_type == "anatomy":
                     body_str = "".join([render_anatomy(p) for p in sel_passages])
-                    final_html = wrap_full_html_anatomy(body_str, css_str)
-                    file_name = "anatomy_final.html"
+                    final_html = wrap_full_html_anatomy(body_str, css_str, front_html, back_html)
+                    file_name = "Anatomy_Self-Note_Booklet.html"
                 elif target_type == "core":
                     body_str = "".join([render_core(p) for p in sel_passages])
-                    final_html = wrap_full_html_core(body_str, css_str)
-                    file_name = "anatomy_core_final.html"
+                    final_html = wrap_full_html_core(body_str, css_str, front_html, back_html)
+                    file_name = "Anatomy_Core_Booklet.html"
                 else:
                     body_str = "".join([render_voca(p) for p in sel_passages])
-                    final_html = wrap_full_html_voca(body_str, css_str)
-                    file_name = "anatomy_voca_final.html"
+                    final_html = wrap_full_html_voca(body_str, css_str, front_html, back_html)
+                    file_name = "Anatomy_Voca_Booklet.html"
 
                 st.session_state[f"{prefix}_last_html"] = final_html
                 st.session_state[f"{prefix}_last_fname"] = file_name
 
         if f"{prefix}_last_html" in st.session_state:
-            dl_target_col = r_col3 if (target_type == "voca" and r_col3 is not None) else r_col2
+            dl_target_col = r_col4 if (target_type == "voca" and r_col4 is not None) else r_col2
             with dl_target_col:
                 st.download_button(
-                    f"📥 인쇄용 HTML 파일 다운로드 ({title_name})",
+                    f"📥 단행본 인쇄용 HTML 다운로드 ({title_name} - 표지·저작권 포함)",
                     st.session_state[f"{prefix}_last_html"],
                     st.session_state[f"{prefix}_last_fname"],
                     "text/html",
@@ -2312,7 +2756,7 @@ with st.sidebar:
     f_up = st.file_uploader("꼬리말 로고", type=["png", "jpg", "jpeg"], key="f")
     e_up = st.file_uploader("영쌤 로고", type=["png", "jpg", "jpeg"], key="e")
     academy_name = st.text_input("🏫 학원명", "포피엠 입시 영어")
-    school_name = st.text_input("🏫 학교명 (ANATOMY용)", "영어는 영쌤!")
+    school_name = st.text_input("🏫 학교명 (표지 및 ANATOMY용)", "영어는 영쌤!")
     
     text_model = st.selectbox("📦 구글 AI 모델", [
         "gemini-2.5-flash",
@@ -2330,32 +2774,43 @@ with st.sidebar:
     st.markdown("---")
     st.markdown(f"### ☁️ 저장소 상태: {'**클라우드 DB 연결됨 🟢**' if IS_CLOUD_DB else '**로컬 PC 모드 🟡**'}")
     with st.expander("📦 기존 PC 데이터 클라우드 이전 / 백업"):
-        st.caption("구글 드라이브나 기존 PC에 있던 JSON 파일과 이미지를 업로드하면 클라우드 DB에 즉시 병합·저장됩니다.")
+        st.caption("💡 이미지는 Supabase의 [Storage -> image_assets 버킷]에 직접 드래그해 올리거나, 구글 드라이브에서 받은 ZIP 파일 1개로 한 번에 올릴 수 있습니다.")
         up_jsons = st.file_uploader(
             "1) 기존 JSON 파일 업로드 (victory, anatomy, core, voca)",
             type=["json"],
             accept_multiple_files=True,
             key="cloud_mig_json"
         )
-        up_mig_imgs = st.file_uploader(
-            "2) image_assets 폴더 내 이미지 업로드",
-            type=["png", "jpg", "jpeg"],
-            accept_multiple_files=True,
-            key="cloud_mig_imgs"
+        up_zip = st.file_uploader(
+            "2) [선택] image_assets.zip 압축 파일 1개로 통째 업로드",
+            type=["zip"],
+            key="cloud_mig_zip"
         )
         if st.button("🚀 클라우드 DB로 데이터 이식 실행", type="primary", use_container_width=True):
-            with st.spinner("데이터와 이미지를 클라우드 DB로 전송 중입니다..."):
-                if up_mig_imgs:
-                    for u_img in up_mig_imgs:
-                        b64_s = base64.b64encode(u_img.getvalue()).decode()
-                        local_p = os.path.join(IMAGE_DIR, u_img.name)
-                        with open(local_p, "wb") as f:
-                            f.write(u_img.getvalue())
-                        if IS_CLOUD_DB:
-                            supabase.table("app_images").upsert({
-                                "img_id": u_img.name,
-                                "b64_data": f"data:image/png;base64,{b64_s}"
-                            }).execute()
+            with st.spinner("데이터를 클라우드 DB에 동기화 중입니다..."):
+                if up_zip is not None:
+                    with zipfile.ZipFile(up_zip) as zf:
+                        img_entries = [info for info in zf.infolist() if not info.is_dir() and info.filename.lower().endswith((".png", ".jpg", ".jpeg"))]
+                        prog = st.progress(0)
+                        for idx, info in enumerate(img_entries):
+                            fname = os.path.basename(info.filename)
+                            if not fname or fname.startswith("."):
+                                continue
+                            raw_bytes = zf.read(info.filename)
+                            with open(os.path.join(IMAGE_DIR, fname), "wb") as f:
+                                f.write(raw_bytes)
+                            if IS_CLOUD_DB:
+                                try:
+                                    supabase.storage.from_("image_assets").upload(
+                                        path=fname,
+                                        file=raw_bytes,
+                                        file_options={"content-type": "image/png", "upsert": "true"}
+                                    )
+                                except Exception:
+                                    pass
+                            prog.progress((idx + 1) / max(1, len(img_entries)))
+                        prog.empty()
+
                 for uj in (up_jsons or []):
                     j_data = json.load(uj)
                     if isinstance(j_data, list):
@@ -2385,24 +2840,24 @@ CSS_VOCA = build_css_voca(h_url, f_url)
 
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "🚀 엑셀 원클릭 통합 생성",
-    "🏆 한판승 라이브러리",
-    "🦅 ANATOMY 라이브러리",
-    "💎 ANATOMY CORE (주제·요약·패러프레이징)",
-    "📖 ANATOMY VOCA (통합 단어장)",
+    "🏆 Anatomy One-Shot (한판승)",
+    "🦅 Anatomy Self-Note",
+    "💎 Anatomy Core",
+    "📖 Anatomy Voca",
     "🎯 기출 PDF 출제DNA 학습기"
 ])
 
 with tab1:
-    st.info("💡 엑셀과 이미지를 업로드하고 생성 버튼을 누르면, **한판승**, **ANATOMY**, **ANATOMY CORE**, **ANATOMY VOCA**가 동시에 생성되며, **ANATOMY CORE에 쓰인 패러프레이징 어휘들이 ANATOMY VOCA 단어장에 자동으로 포함**됩니다.")
+    st.info("💡 엑셀과 이미지를 업로드하고 생성 버튼을 누르면, **Anatomy One-Shot(한판승)**, **Anatomy Self-Note**, **Anatomy Core**, **Anatomy Voca**가 동시에 생성되며, **Core에 쓰인 패러프레이징 어휘들이 Voca 단어장에 자동으로 포함**됩니다.")
     xlsx = st.file_uploader("📂 엑셀 업로드", type=["xlsx"])
     imgs = st.file_uploader("🖼️ 이미지 대량 업로드", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
     
     st.markdown("##### 🎯 생성할 교재 종류 선택 (원하는 항목만 체크 가능)")
     g_col1, g_col2, g_col3, g_col4 = st.columns(4)
-    do_v = g_col1.checkbox("🏆 한판승 생성", value=True)
-    do_a = g_col2.checkbox("🦅 ANATOMY 생성", value=True)
-    do_c = g_col3.checkbox("💎 ANATOMY CORE 생성", value=True)
-    do_w = g_col4.checkbox("📖 ANATOMY VOCA 생성", value=True)
+    do_v = g_col1.checkbox("🏆 Anatomy One-Shot (한판승)", value=True)
+    do_a = g_col2.checkbox("🦅 Anatomy Self-Note", value=True)
+    do_c = g_col3.checkbox("💎 Anatomy Core", value=True)
+    do_w = g_col4.checkbox("📖 Anatomy Voca", value=True)
 
     if xlsx and st.button("🚀 올인원 통합 생성 시작", type="primary"):
         if not (do_v or do_a or do_c or do_w):
@@ -2452,9 +2907,8 @@ with tab1:
 
                 shared_img_path = save_base64_to_image_file(img_data_url) if img_data_url else ""
 
-                # 1. 한판승 생성
                 if need_v:
-                    progress_text.info(f"⏳ [한판승] 분석 중: {lbl} ({idx + 1}/{len(rows)})")
+                    progress_text.info(f"⏳ [Anatomy One-Shot] 분석 중: {lbl} ({idx + 1}/{len(rows)})")
                     time.sleep(api_delay)
                     v_data = analyze_passage(lbl, r['text'], text_model, "victory")
                     if v_data:
@@ -2470,9 +2924,8 @@ with tab1:
                         v_existing_labels.add(lbl)
                         save_to_file(VICTORY_FILE, st.session_state.saved_v)
 
-                # 2. ANATOMY 생성
                 if need_a:
-                    progress_text.info(f"⏳ [ANATOMY] 분석 중: {lbl} ({idx + 1}/{len(rows)})")
+                    progress_text.info(f"⏳ [Anatomy Self-Note] 분석 중: {lbl} ({idx + 1}/{len(rows)})")
                     time.sleep(api_delay)
                     a_data = analyze_passage(lbl, r['text'], text_model, "anatomy")
                     if a_data:
@@ -2489,10 +2942,9 @@ with tab1:
                         a_existing_labels.add(lbl)
                         save_to_file(ANATOMY_FILE, st.session_state.saved_a)
 
-                # 3. ANATOMY CORE 먼저 생성 -> VOCA에 어휘 전달
                 current_core_data = c_existing_map.get(lbl)
                 if need_c:
-                    progress_text.info(f"⏳ [ANATOMY CORE] 다중 주제·요지·요약문 및 패러프레이징 생성 중: {lbl} ({idx + 1}/{len(rows)})")
+                    progress_text.info(f"⏳ [Anatomy Core] 다중 주제·요지·요약문 및 패러프레이징 생성 중: {lbl} ({idx + 1}/{len(rows)})")
                     time.sleep(api_delay)
                     c_data = analyze_passage(lbl, r['text'], text_model, "core")
                     if c_data:
@@ -2508,9 +2960,8 @@ with tab1:
                         c_existing_map[lbl] = c_data
                         save_to_file(CORE_FILE, st.session_state.saved_c)
 
-                # 4. ANATOMY VOCA 생성 (ANATOMY CORE의 패러프레이징 어휘까지 자동 통합)
                 if need_w:
-                    progress_text.info(f"⏳ [ANATOMY VOCA] 지문 핵심어 + CORE 패러프레이징 통합 단어장 생성 중: {lbl} ({idx + 1}/{len(rows)})")
+                    progress_text.info(f"⏳ [Anatomy Voca] 지문 핵심어 + CORE 패러프레이징 통합 단어장 생성 중: {lbl} ({idx + 1}/{len(rows)})")
                     time.sleep(api_delay)
                     w_data = analyze_passage(lbl, r['text'], text_model, "voca", core_context=current_core_data)
                     if w_data:
@@ -2529,20 +2980,20 @@ with tab1:
 
                 progress_bar.progress((idx + 1) / max(1, len(rows)))
                     
-            progress_text.success("✅ 모든 교재(한판승, ANATOMY, ANATOMY CORE, ANATOMY VOCA) 통합 생성 완료!")
+            progress_text.success("✅ 모든 교재(Anatomy One-Shot, Self-Note, Core, Voca) 통합 생성 완료!")
             progress_bar.empty()
 
 with tab2:
-    render_library_manager("v", "한판승", VICTORY_FILE, CSS_VICTORY, "victory", text_model, api_delay, academy_name, school_name)
+    render_library_manager("v", "Anatomy One-Shot", VICTORY_FILE, CSS_VICTORY, "victory", text_model, api_delay, academy_name, school_name, h_url, f_url)
 
 with tab3:
-    render_library_manager("a", "ANATOMY", ANATOMY_FILE, CSS_ANATOMY, "anatomy", text_model, api_delay, academy_name, school_name)
+    render_library_manager("a", "Anatomy Self-Note", ANATOMY_FILE, CSS_ANATOMY, "anatomy", text_model, api_delay, academy_name, school_name, h_url, f_url)
 
 with tab4:
-    render_library_manager("c", "ANATOMY CORE", CORE_FILE, CSS_CORE, "core", text_model, api_delay, academy_name, school_name)
+    render_library_manager("c", "Anatomy Core", CORE_FILE, CSS_CORE, "core", text_model, api_delay, academy_name, school_name, h_url, f_url)
 
 with tab5:
-    render_library_manager("w", "ANATOMY VOCA", VOCA_FILE, CSS_VOCA, "voca", text_model, api_delay, academy_name, school_name)
+    render_library_manager("w", "Anatomy Voca", VOCA_FILE, CSS_VOCA, "voca", text_model, api_delay, academy_name, school_name, h_url, f_url)
 
 with tab6:
     st.markdown("### 🎯 학교별 기출 시험지 PDF 출제DNA 분석 & 누적 학습기")
@@ -2620,7 +3071,7 @@ with tab6:
 
     with col_dna2:
         st.markdown(f"#### 🧬 현재 활성화된 출제 DNA 프롬프트 규칙 (최근 업데이트: `{st.session_state.exam_dna.get('updated_at', '')}`)")
-        st.caption("이 규칙이 `ANATOMY CORE`와 `ANATOMY VOCA`를 생성할 때 AI에게 자동으로 주입됩니다. 직접 텍스트를 다듬어 저장하실 수도 있습니다.")
+        st.caption("이 규칙이 `Anatomy Core`와 `Anatomy Voca`를 생성할 때 AI에게 자동으로 주입됩니다. 직접 텍스트를 다듬어 저장하실 수도 있습니다.")
         edited_rules = st.text_area(
             "출제 DNA 프롬프트 규칙 편집",
             value=st.session_state.exam_dna.get("rules_text", ""),
