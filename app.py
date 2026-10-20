@@ -65,7 +65,7 @@ def get_genai_client(api_key: str):
 
 client = get_genai_client(API_KEY)
 
-# ☁️ 3) Supabase 클라우드 DB 연결 초기화 (URL 뒤에 /rest/v1 등이 붙어있어도 자동으로 순수 도메인만 추출)
+# ☁️ 3) Supabase 클라우드 DB 연결 초기화 (URL 뒤에 /rest/v1 등이 붙어있어도 자동으로 순수 도메인만 추출하여 PGRST125 에러 원천 차단)
 raw_supabase_url = get_secret("SUPABASE_URL", "https://evwqyfmnqiklxcbwaqee.supabase.co")
 m_url = re.match(r"(https?://[^/\s]+)", raw_supabase_url)
 SUPABASE_URL = m_url.group(1) if m_url else raw_supabase_url
@@ -177,6 +177,7 @@ def extract_question_number(label: str):
     return int(nums[-1]) if nums else None
 
 def save_base64_to_image_file(data_url: str, custom_filename: str = "") -> str:
+    """새로 생성된 이미지를 로컬 폴더 + Supabase Storage(image_assets 버킷) 및 테이블에 저장"""
     if not data_url or "," not in data_url:
         return ""
     try:
@@ -304,7 +305,8 @@ if "w_selected" not in st.session_state:
 if "exam_dna" not in st.session_state:
     st.session_state.exam_dna = load_exam_dna()
 
-@st.cache_data(show_spinner=False)
+# 🚀 메모리 크래시(Oh no.) 방지: 클라우드 환경에서는 무거운 Base64 대신 가벼운 Public URL 직링크 반환!
+@st.cache_data(show_spinner=False, max_entries=30)
 def cached_read_image_base64(img_filename: str) -> str:
     local_p = os.path.join(IMAGE_DIR, img_filename)
     if os.path.exists(local_p):
@@ -312,25 +314,7 @@ def cached_read_image_base64(img_filename: str) -> str:
             return f"data:image/png;base64,{base64.b64encode(f.read()).decode()}"
 
     if IS_CLOUD_DB:
-        for candidate_path in [img_filename, f"image_assets/{img_filename}"]:
-            try:
-                img_bytes = supabase.storage.from_("image_assets").download(candidate_path)
-                if img_bytes:
-                    with open(local_p, "wb") as f:
-                        f.write(img_bytes)
-                    return f"data:image/png;base64,{base64.b64encode(img_bytes).decode()}"
-            except Exception:
-                pass
-        try:
-            res = supabase.table("app_images").select("b64_data").eq("img_id", img_filename).execute()
-            if res.data and res.data[0].get("b64_data"):
-                b64_url = res.data[0]["b64_data"]
-                if "," in b64_url:
-                    with open(local_p, "wb") as f:
-                        f.write(base64.b64decode(b64_url.split(",", 1)[1]))
-                return b64_url
-        except Exception:
-            pass
+        return f"{SUPABASE_URL}/storage/v1/object/public/image_assets/{img_filename}"
     return ""
 
 def get_image_base64(p: Dict) -> str:
@@ -558,11 +542,6 @@ BOOK_COVER_CSS = """
 """
 
 def build_booklet_front_and_back(book_type: str, h_img: str, f_img: str, academy: str, school: str, passage_count: int) -> (str, str):
-    """
-    1페이지: 심플 & 프리미엄 영문 표지 (Anatomy One-Shot / Self-Note / Core / Voca + Created by PQRS Young)
-    2페이지: 공란 (백지 페이지)
-    마지막 페이지: 우측 하단 저작권 및 법적 처벌 경고 문구 페이지
-    """
     meta_map = {
         "victory": {
             "main_first": "Anatomy",
@@ -573,7 +552,7 @@ def build_booklet_front_and_back(book_type: str, h_img: str, f_img: str, academy
         "anatomy": {
             "main_first": "Anatomy",
             "main_Highlight": "Self-Note",
-            "sub_en": " Comprehensive Text Dissection, Grammar & Structure Workbook",
+            "sub_en": "Comprehensive Text Dissection, Grammar & Structure Workbook",
             "sub_ko": "내신과 수능 1등급을 위한 지문 해부 & 자기주도 필기·복습 노트"
         },
         "core": {
@@ -2706,6 +2685,7 @@ def render_library_manager(prefix: str, title_name: str, file_path: str, css_str
                 key=f"{prefix}_csv_dl_btn"
             )
 
+        # 🚀 메모리 초과(Oh no.) 방지를 위해 session_state 중복 저장 없이 즉시 다운로드 버튼 및 프리뷰 제공
         if render_clicked:
             with st.spinner(f"{title_name} 단행본(표지+공란+본문+저작권) 교재를 렌더링 중입니다..."):
                 front_html, back_html = build_booklet_front_and_back(
@@ -2728,21 +2708,17 @@ def render_library_manager(prefix: str, title_name: str, file_path: str, css_str
                     final_html = wrap_full_html_voca(body_str, css_str, front_html, back_html)
                     file_name = "Anatomy_Voca_Booklet.html"
 
-                st.session_state[f"{prefix}_last_html"] = final_html
-                st.session_state[f"{prefix}_last_fname"] = file_name
-
-        if f"{prefix}_last_html" in st.session_state:
-            dl_target_col = r_col4 if (target_type == "voca" and r_col4 is not None) else r_col2
-            with dl_target_col:
-                st.download_button(
-                    f"📥 단행본 인쇄용 HTML 다운로드 ({title_name} - 표지·저작권 포함)",
-                    st.session_state[f"{prefix}_last_html"],
-                    st.session_state[f"{prefix}_last_fname"],
-                    "text/html",
-                    use_container_width=True,
-                    key=f"{prefix}_dl_btn"
-                )
-            components.html(st.session_state[f"{prefix}_last_html"], height=850, scrolling=True)
+                dl_target_col = r_col4 if (target_type == "voca" and r_col4 is not None) else r_col2
+                with dl_target_col:
+                    st.download_button(
+                        f"📥 단행본 인쇄용 HTML 다운로드 ({title_name} - 표지·저작권 포함)",
+                        final_html,
+                        file_name,
+                        "text/html",
+                        use_container_width=True,
+                        key=f"{prefix}_dl_btn"
+                    )
+                components.html(final_html, height=850, scrolling=True)
 
 
 # -----------------------------
