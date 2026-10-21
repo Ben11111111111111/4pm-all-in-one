@@ -308,7 +308,6 @@ if "past_v_selected" not in st.session_state:
 if "exam_dna" not in st.session_state:
     st.session_state.exam_dna = load_exam_dna()
 
-# 메모리 초과(Oh no.) 방지: 클라우드에서는 가벼운 Public URL 직링크 반환
 @st.cache_data(show_spinner=False, max_entries=30)
 def cached_read_image_base64(img_filename: str) -> str:
     local_p = os.path.join(IMAGE_DIR, img_filename)
@@ -546,10 +545,10 @@ def merge_core_vocab_into_voca_item(core_data: Dict, voca_data: Dict) -> int:
 
 
 # -----------------------------
-# 2-C. 엑셀(.xlsx) 및 지정 양식 CSV 생성기
+# 2-C. 엑셀(.xlsx) 및 분리형 CSV 2종(표제어 통합 / 유의어·반의어 전용) 생성기
 # -----------------------------
-def generate_voca_csv_bytes(selected_passages: List[Dict]) -> bytes:
-    """1행 필수 제목: 분류, 단어번호, 영어단어, 발음기호, 뜻, 한글발음, 예문"""
+def generate_voca_main_csv_bytes(selected_passages: List[Dict]) -> bytes:
+    """파일 1: 각 지문의 지문핵심 + ★CORE 패러프레이징(또는 기출 표제어)만 합친 CSV"""
     rows = []
     word_no = 1
     for p in selected_passages:
@@ -563,7 +562,6 @@ def generate_voca_csv_bytes(selected_passages: List[Dict]) -> bytes:
             pron = str(item.get("pronunciation", "")).strip()
             mean = str(item.get("meaning", "")).strip()
             cat = str(item.get("category", "")).strip()
-            # 기출 단어장인 경우 본문/선지 등 상세 출처를 분류에 명확히 기록
             cls_label = f"{lbl} ({cat})" if ("본문" in cat or "선지" in cat) else lbl
             full_mean = f"[{pos}] {mean}" if pos else mean
 
@@ -577,6 +575,25 @@ def generate_voca_csv_bytes(selected_passages: List[Dict]) -> bytes:
                 "예문": str(item.get("example", "")).strip()
             })
             word_no += 1
+
+    columns = ["분류", "단어번호", "영어단어", "발음기호", "뜻", "한글발음", "예문"]
+    df = pd.DataFrame(rows, columns=columns) if rows else pd.DataFrame(columns=columns)
+    return df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+
+
+def generate_voca_rel_csv_bytes(selected_passages: List[Dict]) -> bytes:
+    """파일 2: 각 지문의 유의어(Synonyms)와 반의어(Antonyms)만 따로 모아놓은 CSV"""
+    rows = []
+    word_no = 1
+    for p in selected_passages:
+        lbl = p.get("label", "")
+        voca_list = p.get("data", {}).get("voca_list", [])
+        for item in voca_list:
+            w = str(item.get("word", "")).strip()
+            if not w:
+                continue
+            cat = str(item.get("category", "")).strip()
+            cls_label = f"{lbl} ({cat})" if ("본문" in cat or "선지" in cat) else lbl
 
             for syn in item.get("synonyms", []):
                 sw = str(syn.get("word", "")).strip()
@@ -611,6 +628,7 @@ def generate_voca_csv_bytes(selected_passages: List[Dict]) -> bytes:
     columns = ["분류", "단어번호", "영어단어", "발음기호", "뜻", "한글발음", "예문"]
     df = pd.DataFrame(rows, columns=columns) if rows else pd.DataFrame(columns=columns)
     return df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+
 
 def generate_voca_excel_bytes(selected_passages: List[Dict]) -> bytes:
     rows_3col = []
@@ -2164,7 +2182,6 @@ def render_library_manager(prefix: str, title_name: str, file_path: str, css_str
     selected_ids[:] = [sid for sid in selected_ids if sid in id_to_item]
     selected_set = set(selected_ids)
 
-    # [기출 어휘 전용] 운양고 전체 / 제일고 전체 원클릭 퀵 선택 바
     if target_type == "past_voca":
         q_c1, q_c2, q_c3 = st.columns(3)
         if q_c1.button("🏫 운양고 기출 전체 일괄 선택 (운양고 전체 기출 단어장)", use_container_width=True, key="past_sel_unyang"):
@@ -2328,14 +2345,14 @@ def render_library_manager(prefix: str, title_name: str, file_path: str, css_str
             order_preview += f" ... 외 {len(sel_passages) - preview_limit}개"
         st.markdown(f"🛒 **출력 순서 (총 {len(sel_passages)}개):** {order_preview}")
 
-        # 🛠️ 원본 데이터 영구 수정 에디터 (누락 없이 완벽 탑재)
         render_permanent_json_editor(prefix, target_type, file_path, sel_passages, saved_list)
 
+        # ★ CSV 2종 분리 다운로드 버튼 배치 (표제어 통합 CSV + 유의어·반의어 전용 CSV)
         if target_type in ["voca", "past_voca"]:
-            r_col1, r_col2, r_col3, r_col4 = st.columns([2, 2.2, 2.2, 2.6])
+            r_col1, r_col2, r_col3, r_col4, r_col5 = st.columns([1.8, 1.8, 2.1, 2.1, 2.2])
         else:
             r_col1, r_col2 = st.columns([2.4, 5.6])
-            r_col3, r_col4 = None, None
+            r_col3, r_col4, r_col5 = None, None, None
 
         render_clicked = r_col1.button(
             f"👁️ 선택한 {title_name} 단행본 렌더링 ({len(sel_passages)}개)",
@@ -2344,24 +2361,33 @@ def render_library_manager(prefix: str, title_name: str, file_path: str, css_str
             key=f"{prefix}_render_btn"
         )
 
-        if target_type in ["voca", "past_voca"] and r_col2 is not None and r_col3 is not None:
+        if target_type in ["voca", "past_voca"] and r_col2 is not None and r_col3 is not None and r_col4 is not None:
             excel_bytes = generate_voca_excel_bytes(sel_passages)
             r_col2.download_button(
-                label="📊 선택 단어장 엑셀(.xlsx) 다운로드",
+                label="📊 선택 단어장 엑셀(.xlsx)",
                 data=excel_bytes,
-                file_name=f"{title_name.replace(' ', '_')}_단어장.xlsx",
+                file_name=f"{title_name.replace(' ', '_')}_통합단어장.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
                 key=f"{prefix}_excel_dl_btn"
             )
-            csv_bytes = generate_voca_csv_bytes(sel_passages)
+            csv_main_bytes = generate_voca_main_csv_bytes(sel_passages)
             r_col3.download_button(
-                label="📄 선택 단어장 CSV 다운로드 (지정 양식)",
-                data=csv_bytes,
-                file_name=f"{title_name.replace(' ', '_')}_단어장.csv",
+                label="📄 표제어(핵심+CORE) CSV",
+                data=csv_main_bytes,
+                file_name=f"{title_name.replace(' ', '_')}_표제어_통합.csv",
                 mime="text/csv",
                 use_container_width=True,
-                key=f"{prefix}_csv_dl_btn"
+                key=f"{prefix}_csv_main_dl_btn"
+            )
+            csv_rel_bytes = generate_voca_rel_csv_bytes(sel_passages)
+            r_col4.download_button(
+                label="📄 유의어·반의어 전용 CSV",
+                data=csv_rel_bytes,
+                file_name=f"{title_name.replace(' ', '_')}_유의어_반의어.csv",
+                mime="text/csv",
+                use_container_width=True,
+                key=f"{prefix}_csv_rel_dl_btn"
             )
 
         if render_clicked:
@@ -2386,10 +2412,10 @@ def render_library_manager(prefix: str, title_name: str, file_path: str, css_str
                     final_html = wrap_full_html_voca(body_str, css_str, front_html, back_html)
                     file_name = f"{title_name.replace(' ', '_')}_Booklet.html"
 
-                dl_target_col = r_col4 if (target_type in ["voca", "past_voca"] and r_col4 is not None) else r_col2
+                dl_target_col = r_col5 if (target_type in ["voca", "past_voca"] and r_col5 is not None) else r_col2
                 with dl_target_col:
                     st.download_button(
-                        f"📥 단행본 인쇄용 HTML 다운로드 ({title_name})",
+                        f"📥 단행본 HTML 다운로드 ({title_name})",
                         final_html,
                         file_name,
                         "text/html",
@@ -2400,7 +2426,7 @@ def render_library_manager(prefix: str, title_name: str, file_path: str, css_str
 
 
 # -----------------------------
-# 6. 메인 UI 화면 및 사이드바 구성 (누락 없이 완벽 포함)
+# 6. 메인 UI 화면 및 사이드바 구성
 # -----------------------------
 st.title("🦅 4pm 올인원 교재 통합 시스템")
 
@@ -2726,7 +2752,7 @@ with tab7:
     st.info(
         "💡 **기존 단어장(Tab 5)과 완전히 분리된 독립 보관소(`past_voca_library.json`)**입니다. "
         "운양고·제일고 시험지 PDF 수십 개를 한꺼번에 업로드하면, AI가 각 시험지의 **학교명·연도·학기·학년·문항번호(본문/선지)**를 자동 인식해 문항별로 저장합니다. "
-        "저장된 후에는 아래에서 **[🏫 운양고 기출 전체 선택]** 또는 **[🏫 제일고 기출 전체 선택]** 버튼 하나로 학교별 전체 기출 단어장(CSV / 엑셀 / 단행본 교재)을 즉시 내려받을 수 있습니다."
+        "저장된 후에는 아래에서 **[🏫 운양고 기출 전체 선택]** 또는 **[🏫 제일고 기출 전체 선택]** 버튼 하나로 학교별 전체 기출 단어장(표제어 CSV / 유의어·반의어 CSV / 엑셀 / 단행본 교재)을 즉시 내려받을 수 있습니다."
     )
 
     with st.container(border=True):
