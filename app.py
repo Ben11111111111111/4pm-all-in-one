@@ -154,6 +154,52 @@ def save_exam_dna(dna_data: Dict):
     except Exception:
         pass
 
+# 사이드바 로고·학원명 등 설정을 클라우드에 저장해 로그인할 때마다 다시 올리지 않도록 함
+SETTINGS_FILE = os.path.join(BASE_DIR, "app_settings.json")
+DEFAULT_LOGO_URL = "https://www.genspark.ai/api/files/s/Bvmm1owU"
+
+def load_app_settings() -> Dict:
+    doc_key = filepath_to_doc_key(SETTINGS_FILE)
+    if IS_CLOUD_DB:
+        try:
+            res = supabase.table("app_storage").select("content").eq("doc_key", doc_key).execute()
+            if res.data and isinstance(res.data[0].get("content"), dict):
+                return res.data[0]["content"]
+        except Exception:
+            pass
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def save_app_settings(settings: Dict):
+    doc_key = filepath_to_doc_key(SETTINGS_FILE)
+    if IS_CLOUD_DB:
+        try:
+            supabase.table("app_storage").upsert({"doc_key": doc_key, "content": settings}, on_conflict="doc_key").execute()
+        except Exception as e:
+            st.warning(f"⚠️ 설정 클라우드 저장 실패: {e}")
+    try:
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(settings, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+def logo_upload_to_data_url(uploaded, max_side: int = 400) -> str:
+    """로고는 교재 머리말에 작게 쓰이므로 400px PNG로 줄여서 저장 (투명 배경 유지)"""
+    from PIL import Image
+    try:
+        im = Image.open(io.BytesIO(uploaded.getvalue()))
+        im.thumbnail((max_side, max_side))
+        buf = io.BytesIO()
+        im.save(buf, format="PNG", optimize=True)
+        return f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode()}"
+    except Exception:
+        return logo_to_url(uploaded)
+
 def clean_label(text) -> str:
     if not text:
         return ""
@@ -412,6 +458,9 @@ if "past_v_selected" not in st.session_state:
 if "saved_mock" not in st.session_state:
     st.session_state.saved_mock = load_from_file(MOCK_FILE)
 
+if "app_settings" not in st.session_state:
+    st.session_state.app_settings = load_app_settings()
+
 if "exam_dna" not in st.session_state:
     st.session_state.exam_dna = load_exam_dna()
 
@@ -419,8 +468,9 @@ if "exam_dna" not in st.session_state:
 def cached_read_image_base64(img_filename: str) -> str:
     local_p = os.path.join(IMAGE_DIR, img_filename)
     if os.path.exists(local_p):
+        mime = "image/jpeg" if img_filename.lower().endswith((".jpg", ".jpeg")) else "image/png"
         with open(local_p, "rb") as f:
-            return f"data:image/png;base64,{base64.b64encode(f.read()).decode()}"
+            return f"data:{mime};base64,{base64.b64encode(f.read()).decode()}"
     if IS_CLOUD_DB:
         return f"{SUPABASE_URL}/storage/v1/object/public/image_assets/{img_filename}"
     return ""
@@ -2575,7 +2625,8 @@ def run_all_in_one_generation(rows: List[Dict], img_dict: Dict, do_v: bool, do_a
         excel_school = r['school']
         final_school = excel_school if pd.notna(excel_school) and str(excel_school).strip() not in ["", "nan"] else school_name
 
-        shared_img_path = save_base64_to_image_file(img_data_url) if img_data_url else ""
+        # 모의고사 탭처럼 이미 저장된 이미지 경로가 있으면 그대로 사용
+        shared_img_path = r.get("img_path") or (save_base64_to_image_file(img_data_url) if img_data_url else "")
 
         if need_v:
             progress_text.info(f"⏳ [Anatomy One-Shot] 분석 중: {lbl} ({idx + 1}/{len(rows)})")
@@ -2757,6 +2808,211 @@ def build_mock_excel_bytes(records: List[Dict]) -> bytes:
         except Exception:
             pass
     return output.getvalue()
+
+# ---- 5-C. 지문 이미지 생성 (기존 교재 이미지 스타일 참고) ----
+# 3.1 flash: 장당 약 20초, 교재용으로 충분한 품질에 저렴 / pro: 더 정교하지만 비싸고 느림
+IMAGE_MODELS = ["gemini-3.1-flash-image", "gemini-3-pro-image"]
+IMAGE_PARALLEL = 4
+BOOKLET_IMG_MAX_SIDE = 1280
+
+MOCK_IMAGE_PROMPT = """Create one illustration for a Korean high school English textbook page, based on the English passage below.
+
+[Style - match the attached reference images exactly]
+- Cinematic, photorealistic scene, like a still from a movie, 16:9 landscape.
+- Warm, moody practical lighting (lamps, window light), rich environmental detail and props that tell the story.
+- Real people and objects drawn from the passage's situation or a concrete metaphor of its main idea.
+- Include 2-4 short English text elements inside the scene (a poster, sign, note, board, book cover) that state the passage's key idea or keywords. Spell every word correctly. No Korean text.
+- Do NOT copy the people, places or text of the reference images; use them only for visual style.
+- No watermark, no logo, no border, no caption outside the scene.
+
+[Passage]
+\"\"\"{passage}\"\"\""""
+
+def mock_image_src(p: Dict) -> str:
+    """st.image에 넘길 이미지 위치 (로컬 파일 우선, 없으면 Supabase 공개 URL)"""
+    path = p.get("image_path", "")
+    if not path:
+        return ""
+    fn = os.path.basename(str(path).replace("\\", "/"))
+    local_p = os.path.join(IMAGE_DIR, fn)
+    if os.path.exists(local_p):
+        return local_p
+    if IS_CLOUD_DB:
+        return f"{SUPABASE_URL}/storage/v1/object/public/image_assets/{fn}"
+    return ""
+
+def shrink_image_bytes(raw: bytes, max_side: int = 1024) -> bytes:
+    """스타일 참고용 이미지를 작게 줄여 요청 용량을 줄임 (기존 교재 이미지는 장당 7~9MB)"""
+    from PIL import Image
+    im = Image.open(io.BytesIO(raw)).convert("RGB")
+    im.thumbnail((max_side, max_side))
+    buf = io.BytesIO()
+    im.save(buf, format="JPEG", quality=85)
+    return buf.getvalue()
+
+@st.cache_data(show_spinner=False, max_entries=10)
+def load_style_reference_bytes(img_filename: str) -> bytes:
+    local_p = os.path.join(IMAGE_DIR, img_filename)
+    try:
+        if os.path.exists(local_p):
+            with open(local_p, "rb") as f:
+                raw = f.read()
+        elif IS_CLOUD_DB:
+            import urllib.request
+            raw = urllib.request.urlopen(f"{SUPABASE_URL}/storage/v1/object/public/image_assets/{img_filename}", timeout=60).read()
+        else:
+            return b""
+        return shrink_image_bytes(raw)
+    except Exception:
+        return b""
+
+def default_style_reference_files(limit: int = 2) -> List[str]:
+    """한판승 교재에 쓰인 이미지 중 앞에서부터 참고 이미지로 사용"""
+    files = []
+    for p in st.session_state.saved_v:
+        if p.get("image_path"):
+            fn = os.path.basename(str(p["image_path"]).replace("\\", "/"))
+            if fn not in files:
+                files.append(fn)
+        if len(files) >= limit:
+            break
+    return files
+
+def generate_passage_image(passage: str, style_refs: List[bytes], model_name: str) -> (bytes, str):
+    """(이미지 bytes, 오류 메시지) 반환. 동시 생성 스레드에서 호출되므로 st.* 를 쓰지 않는다."""
+    contents = [types.Part.from_bytes(data=b, mime_type="image/jpeg") for b in style_refs if b]
+    contents.append(MOCK_IMAGE_PROMPT.format(passage=passage))
+    last_err = ""
+    for attempt in range(3):
+        try:
+            res = client.models.generate_content(
+                model=model_name,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    response_modalities=["IMAGE"],
+                    image_config=types.ImageConfig(aspect_ratio="16:9")
+                )
+            )
+            for cand in (res.candidates or []):
+                for part in (cand.content.parts if cand.content else []) or []:
+                    if part.inline_data and part.inline_data.data:
+                        return part.inline_data.data, ""
+            return b"", "모델이 이미지를 반환하지 않았습니다."
+        except Exception as e:
+            last_err = str(e)
+            if attempt < 2 and any(k in last_err.lower() for k in ["503", "429", "overloaded", "unavailable", "quota", "high demand"]):
+                time.sleep(10 + attempt * 10)
+                continue
+            return b"", last_err
+    return b"", last_err
+
+def save_booklet_image(raw: bytes, name_prefix: str) -> str:
+    """교재용으로 1280px JPEG로 줄여 로컬 + Supabase Storage에 저장 (장당 약 200~300KB)"""
+    from PIL import Image
+    try:
+        im = Image.open(io.BytesIO(raw)).convert("RGB")
+        im.thumbnail((BOOKLET_IMG_MAX_SIDE, BOOKLET_IMG_MAX_SIDE))
+        buf = io.BytesIO()
+        im.save(buf, format="JPEG", quality=82, optimize=True)
+        jpg = buf.getvalue()
+    except Exception:
+        return ""
+    # 다시 만들 때 캐시에 옛 이미지가 남지 않도록 매번 새 파일명 사용
+    filename = f"{name_prefix}_{uuid.uuid4().hex[:6]}.jpg"
+    img_path = os.path.join(IMAGE_DIR, filename)
+    with open(img_path, "wb") as f:
+        f.write(jpg)
+    if IS_CLOUD_DB:
+        try:
+            supabase.storage.from_("image_assets").upload(
+                path=filename, file=jpg,
+                file_options={"content-type": "image/jpeg", "upsert": "true"}
+            )
+        except Exception as e:
+            st.warning(f"⚠️ 이미지 클라우드 업로드 실패 ({filename}): {e}")
+    return img_path
+
+def set_mock_image(p: Dict, img_path: str):
+    """모의고사 지문에 이미지를 연결하고, 같은 라벨의 한판승·Self-Note 교재에도 반영
+    (교재 이미지가 비어 있거나 이 지문의 이전 이미지였던 경우에만 교체)"""
+    old_fn = os.path.basename(str(p.get("image_path", "")).replace("\\", "/"))
+    p["image_path"] = img_path
+    for saved_key, fpath in [("saved_v", VICTORY_FILE), ("saved_a", ANATOMY_FILE)]:
+        hit = False
+        for bp in st.session_state[saved_key]:
+            if bp.get("label") != p["label"]:
+                continue
+            bp_fn = os.path.basename(str(bp.get("image_path", "")).replace("\\", "/"))
+            if not bp_fn or (old_fn and bp_fn == old_fn):
+                bp["image_path"] = img_path
+                hit = True
+        if hit:
+            save_to_file(fpath, st.session_state[saved_key])
+
+def render_mock_image_section(selected: List[Dict]):
+    with st.container(border=True):
+        st.markdown("##### 🎨 선택 지문 이미지 생성 (기존 교재 이미지 스타일 그대로)")
+        st.caption("💡 기존 한판승 교재 이미지 2장을 스타일 참고로 자동 사용합니다. 다른 스타일을 원하면 참고 이미지를 직접 올려주세요. 만든 이미지는 이 지문으로 생성하는 한판승·Self-Note 교재에 자동으로 들어갑니다.")
+        i_col1, i_col2 = st.columns([2, 1])
+        ref_uploads = i_col1.file_uploader("🖼️ 스타일 참고 이미지 (선택, 여러 장 가능)", type=["png", "jpg", "jpeg"], accept_multiple_files=True, key="mock_style_refs")
+        img_model = i_col2.selectbox("🎨 이미지 모델", IMAGE_MODELS, key="mock_img_model", help="gemini-3.1-flash-image: 빠르고 저렴(교재용 권장) / gemini-3-pro-image: 더 정교하지만 비싸고 느림")
+        redo = i_col2.checkbox("이미 있는 이미지도 다시 만들기", value=False, key="mock_img_redo")
+
+        if ref_uploads:
+            style_refs = [shrink_image_bytes(u.getvalue()) for u in ref_uploads]
+        else:
+            style_refs = [load_style_reference_bytes(fn) for fn in default_style_reference_files()]
+        style_refs = [b for b in style_refs if b]
+        if style_refs:
+            st.image(style_refs, width=160, caption=[f"참고 {i+1}" for i in range(len(style_refs))])
+        else:
+            st.warning("⚠️ 스타일 참고 이미지를 불러오지 못했습니다. 참고 이미지를 직접 올려주세요.")
+
+        targets = [p for p in selected if redo or not p.get("image_path")]
+        if st.button(f"🎨 이미지 생성 ({len(targets)}개, {IMAGE_PARALLEL}장씩 동시 생성)", type="primary", use_container_width=True, disabled=not targets or not style_refs, key="mock_img_gen_btn"):
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            prog = st.progress(0)
+            status = st.empty()
+            status.info(f"⏳ 이미지 {len(targets)}개 생성 중... ({IMAGE_PARALLEL}장씩 동시에 진행, 장당 약 20초)")
+            done, errors = 0, []
+            with ThreadPoolExecutor(max_workers=IMAGE_PARALLEL) as pool:
+                futures = {pool.submit(generate_passage_image, p.get("body_text", ""), style_refs, img_model): p for p in targets}
+                for n, fut in enumerate(as_completed(futures), start=1):
+                    p = futures[fut]
+                    img_bytes, err = fut.result()
+                    img_path = save_booklet_image(img_bytes, f"mock_{p['id'][:8]}") if img_bytes else ""
+                    if img_path:
+                        set_mock_image(p, img_path)
+                        done += 1
+                    else:
+                        errors.append(f"{p['label']}: {err or '이미지 저장 실패'}")
+                    prog.progress(n / len(targets))
+                    status.info(f"⏳ {n}/{len(targets)} 완료: {p['label']}")
+            save_to_file(MOCK_FILE, st.session_state.saved_mock)
+            prog.empty()
+            status.success(f"✅ 이미지 {done}개를 만들었습니다.")
+            for e in errors:
+                st.error(f"❌ {e}")
+
+        st.markdown(f"**🖼️ 선택 지문 이미지 ({sum(1 for p in selected if mock_image_src(p))}/{len(selected)}개)** · 마음에 안 드는 이미지는 '📤 내 이미지로 교체'로 직접 올릴 수 있습니다.")
+        g_cols = st.columns(3)
+        for i, p in enumerate(selected):
+            with g_cols[i % 3]:
+                src = mock_image_src(p)
+                if src:
+                    st.image(src, caption=p["label"], width="stretch")
+                else:
+                    st.caption(f"🖼️ {p['label']} · 이미지 없음")
+                with st.popover("📤 내 이미지로 교체", use_container_width=True):
+                    up = st.file_uploader("이미지 선택", type=["png", "jpg", "jpeg", "webp"], key=f"mock_own_img_{p['id']}")
+                    if up is not None and st.button("이 이미지로 저장", type="primary", key=f"mock_own_save_{p['id']}"):
+                        img_path = save_booklet_image(up.getvalue(), f"mock_{p['id'][:8]}")
+                        if img_path:
+                            set_mock_image(p, img_path)
+                            save_to_file(MOCK_FILE, st.session_state.saved_mock)
+                            st.rerun()
+                        else:
+                            st.error("❌ 이미지를 읽지 못했습니다.")
 
 def render_mock_exam_tab(text_model: str, api_delay: int, academy_name: str, school_name: str):
     st.markdown("### 📝 모의고사 원문 라이브러리 (PDF 업로드 → 정답 반영 원문 복원 → 번호 클릭으로 교재 생성)")
@@ -2977,6 +3233,8 @@ def render_mock_exam_tab(text_model: str, api_delay: int, academy_name: str, sch
             save_to_file(MOCK_FILE, st.session_state.saved_mock)
             st.success(f"✅ {pick_lbl} 원문을 저장했습니다.")
 
+    render_mock_image_section(selected)
+
     a_col1, a_col2 = st.columns(2)
     a_col1.download_button(
         "📊 선택 지문 엑셀 다운로드 (엑셀 원클릭 생성 탭 형식)",
@@ -3010,7 +3268,7 @@ def render_mock_exam_tab(text_model: str, api_delay: int, academy_name: str, sch
             if not (mdo_v or mdo_a or mdo_c or mdo_w):
                 st.warning("생성할 교재 종류를 최소 1개 이상 체크해주세요.")
             else:
-                rows = [{"label": p["label"], "text": p["body_text"], "school": "", "img_n": ""} for p in selected]
+                rows = [{"label": p["label"], "text": p["body_text"], "school": "", "img_n": "", "img_path": p.get("image_path", "")} for p in selected]
                 run_all_in_one_generation(rows, {}, mdo_v, mdo_a, mdo_c, mdo_w, text_model, api_delay, academy_name, school_name)
                 st.info("👉 생성된 교재는 각 교재 탭(한판승·Self-Note·Core·Voca)에서 같은 이름으로 확인·렌더링할 수 있습니다.")
 
@@ -3022,24 +3280,56 @@ st.title("🦅 4pm 올인원 교재 통합 시스템")
 
 with st.sidebar:
     st.markdown("### 🖼️ 로고 및 정보 설정")
-    h_up = st.file_uploader("머리말 로고", type=["png", "jpg", "jpeg"], key="h")
-    f_up = st.file_uploader("꼬리말 로고", type=["png", "jpg", "jpeg"], key="f")
-    e_up = st.file_uploader("영쌤 로고", type=["png", "jpg", "jpeg"], key="e")
-    academy_name = st.text_input("🏫 학원명", "포피엠 입시 영어")
-    school_name = st.text_input("🏫 학교명 (표지 및 ANATOMY용)", "영어는 영쌤!")
-    
-    text_model = st.selectbox("📦 구글 AI 모델", [
+    st.caption("💾 한 번 올린 로고와 입력한 정보는 자동 저장되어, 바꾸기 전까지 계속 유지됩니다.")
+    app_settings = st.session_state.app_settings
+    settings_changed = False
+
+    logo_urls = {}
+    for slot, label in [("h", "머리말 로고"), ("f", "꼬리말 로고"), ("e", "영쌤 로고")]:
+        up = st.file_uploader(label, type=["png", "jpg", "jpeg"], key=slot)
+        if up is not None:
+            # 같은 파일이 화면을 다시 그릴 때마다 저장되지 않도록 내용 해시로 비교
+            up_hash = hashlib.md5(up.getvalue()).hexdigest()
+            if app_settings.get(f"logo_{slot}_hash") != up_hash:
+                app_settings[f"logo_{slot}"] = logo_upload_to_data_url(up)
+                app_settings[f"logo_{slot}_hash"] = up_hash
+                settings_changed = True
+        logo_urls[slot] = app_settings.get(f"logo_{slot}") or DEFAULT_LOGO_URL
+        if app_settings.get(f"logo_{slot}") and up is None:
+            st.image(app_settings[f"logo_{slot}"], width=48, caption=f"저장된 {label}")
+
+    if any(app_settings.get(f"logo_{s}") for s in "hfe"):
+        if st.button("🔄 저장된 로고 모두 기본값으로", use_container_width=True, key="reset_logos"):
+            for s in "hfe":
+                app_settings.pop(f"logo_{s}", None)
+                app_settings.pop(f"logo_{s}_hash", None)
+            save_app_settings(app_settings)
+            st.rerun()
+
+    academy_name = st.text_input("🏫 학원명", app_settings.get("academy_name", "포피엠 입시 영어"))
+    school_name = st.text_input("🏫 학교명 (표지 및 ANATOMY용)", app_settings.get("school_name", "영어는 영쌤!"))
+
+    model_options = [
         "gemini-2.5-flash",
         "gemini-3.5-flash",
         "gemini-3.1-pro",
         "gemini-3.1-flash-lite",
         "gemini-1.5-flash"
-    ])
+    ]
+    saved_model = app_settings.get("text_model", model_options[0])
+    text_model = st.selectbox("📦 구글 AI 모델", model_options, index=model_options.index(saved_model) if saved_model in model_options else 0)
     api_delay = st.slider(
         "⏱️ 지문 간 API 대기 시간(초)",
-        min_value=1, max_value=10, value=3,
+        min_value=1, max_value=10, value=int(app_settings.get("api_delay", 3)),
         help="유료 Tier 1 이상이면 1~2초로 줄여 생성 속도를 높일 수 있습니다."
     )
+
+    for k, v in [("academy_name", academy_name), ("school_name", school_name), ("text_model", text_model), ("api_delay", api_delay)]:
+        if app_settings.get(k) != v:
+            app_settings[k] = v
+            settings_changed = True
+    if settings_changed:
+        save_app_settings(app_settings)
 
     st.markdown("---")
     st.markdown(f"### ☁️ 저장소 상태: {'**클라우드 DB 연결됨 🟢**' if IS_CLOUD_DB else '**로컬 PC 모드 🟡**'}")
@@ -3109,7 +3399,7 @@ with st.sidebar:
                 st.success("✅ 클라우드 DB로 모든 데이터 이식이 완료되었습니다!")
                 st.rerun()
 
-h_url, f_url, e_url = logo_to_url(h_up), logo_to_url(f_up), logo_to_url(e_up)
+h_url, f_url, e_url = logo_urls["h"], logo_urls["f"], logo_urls["e"]
 CSS_VICTORY = build_css_victory(h_url, f_url, e_url)
 CSS_ANATOMY = build_css_anatomy(h_url, f_url, e_url)
 CSS_CORE = build_css_core(h_url, f_url, e_url)
