@@ -1,0 +1,12 @@
+# 비밀 키 (절대 GitHub에 올리지 않음)
+.streamlit/secrets.toml
+
+# 로컬 실행 시 생기는 데이터 (실제 데이터는 Supabase에 저장됨)
+*_library.json
+exam_dna_rules.json
+image_assets/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
