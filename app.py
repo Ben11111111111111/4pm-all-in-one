@@ -1415,6 +1415,21 @@ def build_css_anatomy(h_logo, f_logo, e_logo):
     .quiz-ko {{ color: #4a4a4a; font-size: 0.92em; line-height: 1.45; word-break: break-word; }}
     .quiz-choice {{ white-space: nowrap; font-weight: bold; color: #0047AB; margin-left: calc(10px * var(--scale)); font-size: calc(12px * var(--scale)); letter-spacing: 1px; flex-shrink: 0; align-self: center; }}
     .quiz-answer-key {{ margin-top: calc(8px * var(--scale)); text-align: right; font-size: calc(10px * var(--scale)); color: #bbb; letter-spacing: 1px; flex: 0 0 auto; }}
+    /* SELF-NOTE 2단 구성: 왼쪽 지문·해석 + 오른쪽 한줄 요약·필기노트·어휘 (기존 파란 상자 스타일 유지) */
+    .sn-cols {{ flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) calc(56mm * var(--scale)); gap: calc(14px * var(--scale)); }}
+    .sn-left, .sn-right {{ display: flex; flex-direction: column; gap: calc(8px * var(--scale)); min-height: 0; overflow: hidden; }}
+    .sn-qtag {{ color: #9a5a00; background: #fff4e5; border: 1px solid #f5c27a; border-radius: 999px; font-weight: 900; font-size: 0.75em; padding: 1px 9px; margin-left: 10px; vertical-align: 1px; white-space: nowrap; }}
+    .sn-passage-fit {{ font-weight: 800; word-break: keep-all; line-height: 2.6 !important; }}
+    /* 제목 줄은 한 줄 유지: 시험 정보가 길면 끝을 …로 줄임 */
+    .sn-left .section-title {{ display: flex; align-items: center; white-space: nowrap; min-width: 0; }}
+    .sn-left .section-title .sn-qtag {{ font-size: 0.68em; padding: 1px 7px; margin-left: 6px; min-width: 0; overflow: hidden; text-overflow: ellipsis; }}
+    .sn-num {{ display: inline-flex; align-items: center; justify-content: center; min-width: 1.3em; height: 1.3em; padding: 0 0.15em; box-sizing: border-box; border-radius: 999px; background: #0047AB; color: white; font-size: 0.72em; font-weight: 900; line-height: 1; margin-right: 0.3em; vertical-align: 0.12em; letter-spacing: -0.03em; }}
+    .sn-trans {{ flex: 0 0 auto; font-size: calc(9.5px * var(--scale)); line-height: 1.7; color: #444; border-left: 5px solid #ddd; padding-left: calc(12px * var(--scale)); word-break: keep-all; }}
+    .sn-trans .sn-num {{ background: #64748b; }}
+    .sn-summary {{ flex: 0 0 auto; background: #0047AB; color: white; padding: calc(12px * var(--scale)); border-radius: calc(12px * var(--scale)); font-weight: bold; line-height: 1.6; font-size: calc(12px * var(--scale)); word-break: keep-all; }}
+    .sn-note {{ flex: 1 1 auto; min-height: calc(120px * var(--scale)); border: 2px dashed #0047AB; border-radius: calc(12px * var(--scale)); background-color: #fcfcfc; background-image: repeating-linear-gradient(to bottom, transparent 0, transparent calc(26px * var(--scale) - 1px), #e2e8f0 calc(26px * var(--scale) - 1px), #e2e8f0 calc(26px * var(--scale))); }}
+    .sn-vocab {{ flex: 0 0 auto; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: calc(8px * var(--scale)); padding: calc(8px * var(--scale)) calc(10px * var(--scale)); display: grid; grid-template-columns: auto 1fr; gap: calc(3px * var(--scale)) calc(8px * var(--scale)); font-size: calc(10px * var(--scale)); line-height: 1.4; }}
+    .sn-vocab b {{ color: #0047AB; font-weight: 900; }}
     .auto-fit-box {{ overflow: hidden; }}
     .auto-fit-target {{ display: block; width: 100%; }}
     @media print {{ .page {{ margin: 0; box-shadow: none; border: none; page-break-after: always; }} }}
@@ -1426,16 +1441,27 @@ def build_css_anatomy(h_logo, f_logo, e_logo):
 
 FIT_SCRIPT = """
 <script>
+function innerHeight(box) {
+    // 상자 안쪽 여백(padding)을 뺀 실제 글자 공간 높이
+    const cs = getComputedStyle(box);
+    return box.clientHeight - parseFloat(cs.paddingTop || 0) - parseFloat(cs.paddingBottom || 0);
+}
 function fitTextBox(box) {
     const target = box.querySelector('.auto-fit-target');
     if (!target) return;
     const max = parseFloat(target.dataset.max || "12.5");
     const min = parseFloat(target.dataset.min || "8");
+    // grow-lh 상자는 가장 좁은 줄 간격에서 글자 크기를 맞추고, 남는 공간은 growLineHeight가 줄 간격으로 채움
+    const growBox = box.classList.contains('grow-lh');
+    const setLh = (size, ratio) => {
+        if (growBox) target.style.setProperty('line-height', box.dataset.minLh || '2.3', 'important');
+        else target.style.lineHeight = (size * ratio) + "px";
+    };
     let size = max, guard = 0;
     target.style.fontSize = size + "px";
-    target.style.lineHeight = (size * 1.40) + "px";
-    while ((target.scrollHeight > box.clientHeight || target.scrollWidth > box.clientWidth) && size > min && guard < 120) {
-        size -= 0.2; target.style.fontSize = size + "px"; target.style.lineHeight = (size * 1.36) + "px"; guard++;
+    setLh(size, 1.40);
+    while ((target.scrollHeight > innerHeight(box) || target.scrollWidth > box.clientWidth) && size > min && guard < 120) {
+        size -= 0.2; target.style.fontSize = size + "px"; setLh(size, 1.36); guard++;
     }
 }
 function fitOnePage(page) {
@@ -1451,13 +1477,28 @@ function fitOnePage(page) {
         scale -= 0.01; page.style.setProperty('--scale', scale.toFixed(2)); guard++;
     }
 }
+function growLineHeight(box) {
+    // 지문이 짧아 아래가 비면 줄 간격을 넓혀 칸을 채움 (필기 공간 확보)
+    const target = box.querySelector('.auto-fit-target');
+    if (!target) return;
+    const minLh = parseFloat(box.dataset.minLh || "2.3"), maxLh = parseFloat(box.dataset.maxLh || "2.9");
+    let lh = minLh;
+    target.style.setProperty('line-height', lh, 'important');
+    while (lh + 0.05 <= maxLh) {
+        target.style.setProperty('line-height', (lh + 0.05).toFixed(2), 'important');
+        if (target.scrollHeight > innerHeight(box)) { target.style.setProperty('line-height', lh.toFixed(2), 'important'); break; }
+        lh += 0.05;
+    }
+}
 function fitAllPages() {
     const pages = document.querySelectorAll('.fit-page');
     pages.forEach(p => p.style.setProperty('--scale', '1'));
+    document.querySelectorAll('.grow-lh').forEach(b => { const t = b.querySelector('.auto-fit-target'); if (t) t.style.setProperty('line-height', b.dataset.minLh || '2.3', 'important'); });
     document.querySelectorAll('.auto-fit-box').forEach(b => fitTextBox(b));
     pages.forEach(p => fitOnePage(p));
     document.querySelectorAll('.auto-fit-box').forEach(b => fitTextBox(b));
     pages.forEach(p => fitOnePage(p));
+    document.querySelectorAll('.grow-lh').forEach(b => growLineHeight(b));
 }
 window.addEventListener('load', function() {
     setTimeout(fitAllPages, 120);
@@ -1477,6 +1518,60 @@ def format_passage_for_display(body_text: str) -> str:
     paragraphs = [re.sub(r'\s+', ' ', para).strip() for para in re.split(r'\n\s*\n', raw) if para.strip()]
     return "<br><br>".join([esc(p) for p in paragraphs])
 
+def circled_num(n: int) -> str:
+    """문장 번호 동그라미. ❶ 같은 원문자는 20까지만 있어서 CSS(.sn-num)로 그려 모든 번호를 같은 모양으로 맞춤"""
+    return f'<span class="sn-num">{n}</span>'
+
+def split_passage_sentences(body_text: str) -> List[str]:
+    """줄바꿈(인사말·서명 등)과 문장부호 기준으로 문장을 나눔 (AI 문장 목록이 없거나 원문과 다를 때 사용)"""
+    out = []
+    for line in re.split(r'\n+', str(body_text or "").replace("\r", "")):
+        line = re.sub(r'\s+', ' ', line).strip()
+        if not line:
+            continue
+        # 문장부호(.!?) 바로 뒤 또는 문장부호+닫는 따옴표/괄호 뒤에서 나눔 (look-behind는 고정 길이만 가능해 두 경우로 나눔)
+        pieces = [s.strip() for s in re.split(r'(?:(?<=[.!?])|(?<=[.!?]["”’)]))\s+(?=["“(]?[A-Z0-9])', line) if s.strip()]
+        # Mr. / Ms. / Dr. 같은 약어 뒤에서 잘린 조각은 다음 조각과 다시 붙임
+        merged = []
+        for piece in pieces:
+            if merged and re.search(r'\b(?:Mr|Mrs|Ms|Dr|Prof|St|Jr|Sr|vs|e\.g|i\.e|U\.S)\.$', merged[-1]):
+                merged[-1] += " " + piece
+            else:
+                merged.append(piece)
+        out.extend(merged)
+    return out
+
+def anatomy_sentence_pairs(p: Dict) -> (List[str], List[str]):
+    """(영어 문장 목록, 해석 목록). AI가 준 문장이 원문과 같을 때만 그 문장·해석을 쓰고, 아니면 원문을 직접 나눔"""
+    body = p.get("body_text", "")
+    ai = [s for s in p.get("data", {}).get("sentences", []) or [] if s.get("eng")]
+    norm = lambda t: re.sub(r'\s+', '', str(t))
+    if ai and norm("".join(s["eng"] for s in ai)) == norm(body):
+        return [s["eng"].strip() for s in ai], [s.get("kor", "").strip() for s in ai]
+    return split_passage_sentences(body), []
+
+def sentence_line_breaks(body_text: str, sents: List[str]) -> List[bool]:
+    """각 문장 뒤에 원문 줄바꿈이 있는지 (편지의 인사말·맺음말·서명을 원문처럼 줄 바꿔 보여주기 위함)"""
+    flat = str(body_text or "").replace("\r", "")
+    breaks, cursor = [], 0
+    for s in sents:
+        # 공백 차이를 무시하고 원문에서 문장 위치를 찾음
+        pat = r'\s+'.join(re.escape(w) for w in s.split())
+        m = re.compile(pat).search(flat, cursor) if pat else None
+        if not m:
+            breaks.append(False)
+            continue
+        cursor = m.end()
+        breaks.append(bool(re.match(r'[ \t]*\n', flat[cursor:])))
+    return breaks
+
+def numbered_sentences_html(sents: List[str], breaks: List[bool]) -> str:
+    parts = []
+    for i, s in enumerate(sents, start=1):
+        sep = "<br>" if i - 1 < len(breaks) and breaks[i - 1] else " "
+        parts.append(f'{circled_num(i)}{esc(s)}{sep if i < len(sents) else ""}')
+    return "".join(parts)
+
 def render_anatomy(p):
     data = p["data"]
     img_url = get_image_base64(p)
@@ -1485,7 +1580,6 @@ def render_anatomy(p):
     school = esc(p.get('school_name', ''))
     label_text = esc(p["label"])
     pid = esc(p.get("id", label_text))
-    meta_html = f'<div class="passage-meta-badge">{label_text}</div>'
     body_html = format_passage_for_display(p.get('body_text', ''))
 
     vocab_html = "".join([
@@ -1506,8 +1600,20 @@ def render_anatomy(p):
     data_attr = f'data-passage-id="{pid}" data-passage-label="{label_text}"'
 
     p1 = f"""<div class="page fit-page" {data_attr}><div class="header"><div class="logo-area"><div class="header-char"></div>ANATOMY PREVIEW</div><div class="info-area"><b>{academy}</b><br>{label_text}</div></div><div class="page-content"><div class="visual-container">{img_html}</div><div class="title-area"><div class="title-en">{esc(data.get("english_title",""))}</div><div class="title-ko">{esc(data.get("korean_title",""))}</div></div><div class="section-title">Topic</div><div class="topic-box">{esc(data.get("topic",""))}</div><div class="section-title">Vocabulary Focus (동의어 뜻 병기)</div><div class="vocab-grid">{vocab_html}</div></div><div class="footer"><div class="footer-char"></div>{footer_left}</div><div class="page-num"></div></div>"""
-    p2 = f"""<div class="page fit-page" {data_attr}><div class="header"><div class="logo-area"><div class="header-char"></div>ANATOMY SELF-NOTE</div><div class="info-area"><b>{academy}</b><br>셀프노트: 너만의 손필기</div></div><div class="page-content"><div class="section-title">■ Original Text (강의용 필기 노트)</div><div class="passage-box auto-fit-box"><div class="passage-fit auto-fit-target" data-max="12.0" data-min="8.0">{meta_html}<div class="passage-body">{body_html}</div></div></div><div class="section-title">■ 지문 해석</div><div class="trans-content">{nl2br(data.get("translation",""))}</div></div><div class="footer"><div class="footer-char"></div>{footer_right}</div><div class="page-num"></div></div>"""
-    p3 = f"""<div class="page fit-page" {data_attr}><div class="header"><div class="logo-area"><div class="header-char"></div>ANATOMY REVIEW-NOTE</div><div class="info-area"><b>{academy}</b><br>리뷰노트: 따라 쓰며 복습!</div></div><div class="page-content"><div class="section-title">■ Original Text (너만의 복습 노트)</div><div class="passage-box auto-fit-box" style="border-color:#0047AB;"><div class="passage-fit auto-fit-target" data-max="12.0" data-min="8.0">{meta_html}<div class="passage-body">{body_html}</div></div></div><div class="section-title">■ 주요 문법 Point 3 정리</div><div class="grammar-box">{grammar_html}</div></div><div class="footer"><div class="footer-char"></div>{footer_left}</div><div class="page-num"></div></div>"""
+    # ---- 2쪽 SELF-NOTE (왼쪽 번호 매긴 지문·해석 + 오른쪽 한줄 요약·필기노트·어휘) ----
+    eng_sents, kor_sents = anatomy_sentence_pairs(p)
+    numbered_passage = numbered_sentences_html(eng_sents, sentence_line_breaks(p.get("body_text", ""), eng_sents))
+    if kor_sents:
+        trans_html = " ".join(f'{circled_num(i)}{esc(k)}' for i, k in enumerate(kor_sents, start=1))
+    else:
+        trans_html = nl2br(data.get("translation", ""))
+    # 시험 정보(예: 2026년 10월 고1 18번)는 지문 상자 대신 제목 옆에 작게 표시
+    exam_tag = f'<span class="sn-qtag">{esc(clean_label(p.get("label", "")).replace("[", "").replace("]", ""))}</span>'
+    one_line = esc(data.get("one_line_summary") or data.get("topic", ""))
+    sn_vocab = "".join(f'<b>{esc(v.get("word", ""))}</b><span>{esc(v.get("meaning", ""))}</span>' for v in data.get("vocab", []))
+
+    p2 = f"""<div class="page fit-page" {data_attr}><div class="header"><div class="logo-area"><div class="header-char"></div>ANATOMY SELF-NOTE</div><div class="info-area"><b>{academy}</b><br>셀프노트: 너만의 손필기</div></div><div class="page-content"><div class="sn-cols"><div class="sn-left"><div class="section-title">■ Original Text (강의용 필기 노트){exam_tag}</div><div class="passage-box sn-passage auto-fit-box grow-lh" data-min-lh="2.2" data-max-lh="3.6"><div class="sn-passage-fit auto-fit-target" data-max="12.5" data-min="8.0"><div>{numbered_passage}</div></div></div><div class="section-title">■ 지문 해석</div><div class="sn-trans">{trans_html}</div></div><div class="sn-right"><div class="section-title">영쌤의 한줄 요약</div><div class="sn-summary">{one_line}</div><div class="section-title">영쌤의 필기노트</div><div class="sn-note"></div><div class="section-title">Vocabulary</div><div class="sn-vocab">{sn_vocab}</div></div></div></div><div class="footer"><div class="footer-char"></div>{footer_right}</div><div class="page-num"></div></div>"""
+    p3 = f"""<div class="page fit-page" {data_attr}><div class="header"><div class="logo-area"><div class="header-char"></div>ANATOMY REVIEW-NOTE</div><div class="info-area"><b>{academy}</b><br>리뷰노트: 따라 쓰며 복습!</div></div><div class="page-content"><div class="section-title">■ Original Text (너만의 복습 노트){exam_tag}</div><div class="passage-box auto-fit-box grow-lh" style="border-color:#0047AB;" data-min-lh="2.3" data-max-lh="3.4"><div class="passage-fit auto-fit-target" data-max="14.5" data-min="8.0"><div class="passage-body">{body_html}</div></div></div><div class="section-title">■ 주요 문법 Point 3 정리</div><div class="grammar-box">{grammar_html}</div></div><div class="footer"><div class="footer-char"></div>{footer_left}</div><div class="page-num"></div></div>"""
     p4 = f"""<div class="page fit-page" {data_attr}><div class="header"><div class="logo-area"><div class="header-char"></div>STRUCTURE & QUIZ</div><div class="info-area"><b>{academy}</b><br>최종 확인 | {school}</div></div><div class="page-content"><div class="section-title">■ 영쌤의 쉬운 지문 설명</div><div class="easy-box"><div class="easy-char"></div><div class="easy-text">{nl2br(data.get('easy_explanation',''))}</div></div><div class="section-title">■ 글의 흐름 (Structure)</div><div class="structure-box">{nl2br(data.get("structure_flow",""))}</div><div class="section-title">■ ANATOMY OX Quiz (5문항)</div><div class="quiz-container">{quiz_html}</div><div class="quiz-answer-key">{esc(answers)}</div></div><div class="footer"><div class="footer-char"></div>{footer_right}</div><div class="page-num"></div></div>"""
     return p1 + p2 + p3 + p4
 
@@ -1964,9 +2070,14 @@ SCHEMA_ANATOMY = {
         "grammar_points": {"type": "array", "items": {"type": "object", "properties": {"title": {"type": "string"}, "explanation": {"type": "string"}}}},
         "easy_explanation": {"type": "string"}, "structure_flow": {"type": "string"},
         "quizzes": {"type": "array", "items": {"type": "object", "properties": {"english_statement": {"type": "string"}, "korean_statement": {"type": "string"}, "answer": {"type": "string", "enum": ["O", "X"]}}}},
-        "visual_guide": {"type": "string"}
+        "visual_guide": {"type": "string"},
+        "one_line_summary": {"type": "string", "description": "지문 전체를 한국어 한 줄(40자 안팎)로 요약"},
+        "sentences": {
+            "type": "array",
+            "items": {"type": "object", "properties": {"eng": {"type": "string"}, "kor": {"type": "string"}}, "required": ["eng", "kor"]}
+        }
     },
-    "required": ["english_title", "korean_title", "topic", "vocab", "translation", "grammar_points", "easy_explanation", "structure_flow", "quizzes", "visual_guide"]
+    "required": ["english_title", "korean_title", "topic", "vocab", "translation", "grammar_points", "easy_explanation", "structure_flow", "quizzes", "visual_guide", "one_line_summary", "sentences"]
 }
 
 SCHEMA_CORE = {
@@ -2081,6 +2192,21 @@ VICTORY_PROMPT = """너는 한국 고등학생 영어 내신용 '한판승' 교�
    - ys: 친근한 구어체 설명(~야, ~지!, ~거거든!), 해석된 한글 문장을 쉽고 간략한 예를 들어서 이해하기 쉽게 다른말로 설명해줘.
 지문: \"\"\"{text}\"\"\""""
 
+ANATOMY_PROMPT = """너는 한국 고등학생용 영어 내신 교재를 만드는 최상급 편집자다. 지문을 분석해 반드시 JSON만 반환하라.
+지문 정보: {label}
+[반환 규칙]
+1. vocab: 정확히 10개 추출. synonyms_text는 반드시 "동의어1(뜻), 동의어2(뜻)" 형식으로 작성.
+2. translation: 지문 전체의 자연스러운 한국어 해석.
+3. grammar_points: 핵심 문법 3개 (title, explanation).
+4. structure_flow: 반드시 '➔'를 사용한 도식형으로 작성.
+5. quizzes: 5개의 OX퀴즈. answer는 'O' 또는 'X'만 사용.
+6. one_line_summary: 지문 전체를 한국어 한 줄(40자 안팎)로 요약. (예: "기상 악화로 인한 현장체험학습 장소 변경 안내")
+7. sentences: 지문을 문장 단위로 나눈 목록.
+   - eng: 원문 문장을 한 글자도 바꾸지 말고 그대로 옮긴다. 모든 eng를 이어 붙이면 원문 전체와 같아야 한다.
+   - kor: 그 문장의 자연스러운 한국어 해석.
+   - 편지의 인사말(Dear ~,), 맺음말(Sincerely,), 서명 줄도 각각 한 문장으로 취급한다.
+지문: \"\"\"{text}\"\"\""""
+
 def analyze_passage(label, text, model_name, target_type="victory", core_context: Dict = None, max_retries=5):
     dna_rules = st.session_state.exam_dna.get("rules_text", DEFAULT_EXAM_DNA["rules_text"])
 
@@ -2089,15 +2215,7 @@ def analyze_passage(label, text, model_name, target_type="victory", core_context
         schema = SCHEMA_VICTORY
 
     elif target_type == "anatomy":
-        prompt = f"""너는 한국 고등학생용 영어 내신 교재를 만드는 최상급 편집자다. 지문을 분석해 반드시 JSON만 반환하라.
-지문 정보: {label}
-[반환 규칙] 
-1. vocab: 정확히 10개 추출. synonyms_text는 반드시 "동의어1(뜻), 동의어2(뜻)" 형식으로 작성.
-2. translation: 지문 전체의 자연스러운 한국어 해석.
-3. grammar_points: 핵심 문법 3개 (title, explanation).
-4. structure_flow: 반드시 '➔'를 사용한 도식형으로 작성.
-5. quizzes: 5개의 OX퀴즈. answer는 'O' 또는 'X'만 사용.
-지문: \"\"\"{text}\"\"\""""
+        prompt = ANATOMY_PROMPT.replace("{label}", label).replace("{text}", text)
         schema = SCHEMA_ANATOMY
 
     elif target_type == "core":
