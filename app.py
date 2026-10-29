@@ -90,6 +90,7 @@ ANATOMY_FILE = os.path.join(BASE_DIR, "anatomy_library.json")
 CORE_FILE = os.path.join(BASE_DIR, "core_library.json")
 VOCA_FILE = os.path.join(BASE_DIR, "voca_library.json")
 PAST_VOCA_FILE = os.path.join(BASE_DIR, "past_voca_library.json")
+MOCK_FILE = os.path.join(BASE_DIR, "mock_exam_library.json")
 DNA_FILE = os.path.join(BASE_DIR, "exam_dna_rules.json")
 IMAGE_DIR = os.path.join(BASE_DIR, "image_assets")
 os.makedirs(IMAGE_DIR, exist_ok=True)
@@ -408,6 +409,9 @@ else:
 if "past_v_selected" not in st.session_state:
     st.session_state.past_v_selected = []
 
+if "saved_mock" not in st.session_state:
+    st.session_state.saved_mock = load_from_file(MOCK_FILE)
+
 if "exam_dna" not in st.session_state:
     st.session_state.exam_dna = load_exam_dna()
 
@@ -441,6 +445,10 @@ def esc(t) -> str:
 
 def nl2br(t) -> str:
     return esc(t).replace("\n", "<br>")
+
+def md_safe(t) -> str:
+    """st.markdown에서 '41~42번'의 ~가 취소선으로 바뀌지 않도록 이스케이프"""
+    return str(t).replace("~", "\\~")
 
 
 # -----------------------------
@@ -2449,7 +2457,7 @@ def render_library_manager(prefix: str, title_name: str, file_path: str, css_str
     else:
         sel_passages = [id_to_item[sid] for sid in selected_ids if sid in id_to_item]
         preview_limit = 15
-        order_preview = " ➔ ".join([f"**[{i+1}]** {p['label']}" for i, p in enumerate(sel_passages[:preview_limit])])
+        order_preview = " ➔ ".join([f"**[{i+1}]** {md_safe(p['label'])}" for i, p in enumerate(sel_passages[:preview_limit])])
         if len(sel_passages) > preview_limit:
             order_preview += f" ... 외 {len(sel_passages) - preview_limit}개"
         st.markdown(f"🛒 **출력 순서 (총 {len(sel_passages)}개):** {order_preview}")
@@ -2539,6 +2547,475 @@ def render_library_manager(prefix: str, title_name: str, file_path: str, css_str
 
 
 # -----------------------------
+# 5-A. 올인원 통합 생성 엔진 (엑셀 탭 & 모의고사 탭 공용)
+# -----------------------------
+def run_all_in_one_generation(rows: List[Dict], img_dict: Dict, do_v: bool, do_a: bool, do_c: bool, do_w: bool, text_model: str, api_delay: int, academy_name: str, school_name: str):
+    """rows: [{"label", "text", "school", "img_n"}] 형식의 지문 목록으로 4종 교재를 생성 (이미 생성된 라벨은 건너뜀)"""
+    v_existing_labels = {p["label"] for p in st.session_state.saved_v}
+    a_existing_labels = {p["label"] for p in st.session_state.saved_a}
+    c_existing_map = {p["label"]: p["data"] for p in st.session_state.saved_c}
+    w_existing_labels = {p["label"] for p in st.session_state.saved_w}
+
+    progress_text = st.empty()
+    progress_bar = st.progress(0)
+
+    for idx, r in enumerate(rows):
+        lbl = r['label']
+        need_v = do_v and (lbl not in v_existing_labels)
+        need_a = do_a and (lbl not in a_existing_labels)
+        need_c = do_c and (lbl not in c_existing_map)
+        need_w = do_w and (lbl not in w_existing_labels)
+
+        if not (need_v or need_a or need_c or need_w):
+            st.toast(f"⏭️ 이미 모두 생성됨 (건너뜀): {lbl}")
+            progress_bar.progress((idx + 1) / max(1, len(rows)))
+            continue
+
+        img_data_url = img_dict.get(r['img_n'], "")
+        excel_school = r['school']
+        final_school = excel_school if pd.notna(excel_school) and str(excel_school).strip() not in ["", "nan"] else school_name
+
+        shared_img_path = save_base64_to_image_file(img_data_url) if img_data_url else ""
+
+        if need_v:
+            progress_text.info(f"⏳ [Anatomy One-Shot] 분석 중: {lbl} ({idx + 1}/{len(rows)})")
+            time.sleep(api_delay)
+            v_data = analyze_passage(lbl, r['text'], text_model, "victory")
+            if v_data:
+                st.session_state.saved_v.append({
+                    "id": str(uuid.uuid4()), "label": lbl, "data": v_data,
+                    "body_text": r['text'], "image_data_url": "",
+                    "image_path": shared_img_path, "academy_name": academy_name
+                })
+                v_existing_labels.add(lbl)
+                save_to_file(VICTORY_FILE, st.session_state.saved_v)
+
+        if need_a:
+            progress_text.info(f"⏳ [Anatomy Self-Note] 분석 중: {lbl} ({idx + 1}/{len(rows)})")
+            time.sleep(api_delay)
+            a_data = analyze_passage(lbl, r['text'], text_model, "anatomy")
+            if a_data:
+                st.session_state.saved_a.append({
+                    "id": str(uuid.uuid4()), "label": lbl, "data": a_data,
+                    "body_text": r['text'], "image_data_url": "",
+                    "image_path": shared_img_path, "academy_name": academy_name, "school_name": final_school
+                })
+                a_existing_labels.add(lbl)
+                save_to_file(ANATOMY_FILE, st.session_state.saved_a)
+
+        current_core_data = c_existing_map.get(lbl)
+        if need_c:
+            progress_text.info(f"⏳ [Anatomy Core] 다중 주제·요지·요약문 및 패러프레이징 생성 중: {lbl} ({idx + 1}/{len(rows)})")
+            time.sleep(api_delay)
+            c_data = analyze_passage(lbl, r['text'], text_model, "core")
+            if c_data:
+                current_core_data = c_data
+                st.session_state.saved_c.append({
+                    "id": str(uuid.uuid4()), "label": lbl, "data": c_data,
+                    "body_text": r['text'], "academy_name": academy_name, "school_name": final_school
+                })
+                c_existing_map[lbl] = c_data
+                save_to_file(CORE_FILE, st.session_state.saved_c)
+
+        if need_w:
+            progress_text.info(f"⏳ [Anatomy Voca] 지문 핵심어 + CORE 패러프레이징 통합 단어장 생성 중: {lbl} ({idx + 1}/{len(rows)})")
+            time.sleep(api_delay)
+            w_data = analyze_passage(lbl, r['text'], text_model, "voca", core_context=current_core_data)
+            if w_data:
+                if current_core_data:
+                    merge_core_vocab_into_voca_item(current_core_data, w_data)
+                st.session_state.saved_w.append({
+                    "id": str(uuid.uuid4()), "label": lbl, "data": w_data,
+                    "body_text": r['text'], "academy_name": academy_name, "school_name": final_school
+                })
+                w_existing_labels.add(lbl)
+                save_to_file(VOCA_FILE, st.session_state.saved_w)
+
+        progress_bar.progress((idx + 1) / max(1, len(rows)))
+
+    progress_text.success("✅ 모든 교재(Anatomy One-Shot, Self-Note, Core, Voca) 통합 생성 완료!")
+    progress_bar.empty()
+
+
+# -----------------------------
+# 5-B. 모의고사 PDF -> 정답 반영 원문 복원 & 년도/월/번호별 원문 라이브러리
+# -----------------------------
+SCHEMA_MOCK_RESTORE = {
+    "type": "object",
+    "properties": {
+        "exam_year": {"type": "string", "description": "시행 연도 4자리 (예: 2026)"},
+        "exam_month": {"type": "string", "description": "시행 월 숫자 (예: 3, 6, 9, 11)"},
+        "grade": {"type": "string", "description": "학년 (예: 고1, 고2, 고3)"},
+        "answer_key_found": {"type": "boolean", "description": "업로드 파일에서 공식 정답표를 찾았는지 여부"},
+        "passages": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "number": {"type": "string", "description": "문항 번호 (예: 18, 31, 41~42, 43~45)"},
+                    "q_type": {"type": "string", "description": "문제 유형 (예: 글의 목적, 빈칸 추론, 글의 순서, 문장 삽입)"},
+                    "answer": {"type": "string", "description": "정답 번호 (예: ③, 41~42는 '41:② 42:④')"},
+                    "restored_text": {"type": "string", "description": "정답이 반영된 원래의 영어 원문"},
+                    "needs_review": {"type": "boolean", "description": "정답표가 없거나 복원이 불확실해 사람 확인이 필요하면 true"},
+                    "note": {"type": "string", "description": "복원 시 적용한 내용 요약 (예: 빈칸에 ③ 표현 삽입, (B)-(A)-(C) 순서로 배열)"}
+                },
+                "required": ["number", "q_type", "answer", "restored_text", "needs_review", "note"]
+            }
+        }
+    },
+    "required": ["exam_year", "exam_month", "grade", "answer_key_found", "passages"]
+}
+
+MOCK_RESTORE_PROMPT = """너는 대한민국 고등학교 영어 모의고사(학력평가·수능 모의평가) 원문 복원 전문가다.
+업로드된 모의고사 시험지 PDF{answer_note}에서 **독해 문항(18번~45번)** 의 지문을 꺼내, 문제로 변형되기 전의 **정답이 모두 반영된 원래 영어 원문**으로 복원해 JSON으로 반환하라. 듣기 문항(1~17번)은 제외한다.
+
+[정답 출처]
+- 별도 정답표 파일이 있으면 그 정답을 최우선으로 사용하라.
+- 정답표 파일이 없으면 시험지 PDF 안(보통 마지막 페이지)의 정답표를 찾아 사용하라.
+- 어디에도 정답표가 없으면 직접 풀어서 복원하되, 해당 문항의 needs_review를 true로 하고 answer_key_found는 false로 하라.
+
+[유형별 복원 규칙]
+- 빈칸 추론(31~34번 등): 빈칸 자리에 정답 선지의 표현을 문법적으로 자연스럽게 넣는다.
+- 무관한 문장(35번): 정답에 해당하는 흐름과 무관한 문장을 삭제한다.
+- 글의 순서(36~37번): 주어진 글 뒤에 (A)(B)(C)를 정답 순서대로 이어 붙인다.
+- 문장 삽입(38~39번): 주어진 문장을 정답 위치(①~⑤)에 넣는다.
+- 요약문(40번): 본문만 원문으로 남기고 요약문 문장은 넣지 않는다. (A)(B) 정답은 note에 적는다.
+- 어법(29번): 틀린 밑줄 표현을 올바른 형태로 고친다. 나머지 밑줄 표현은 그대로 둔다.
+- 어휘(30번, 42번 등): 문맥상 부적절한 낱말을 문맥에 맞는 낱말로 바꾼다.
+- 함축 의미(21번) 등 밑줄 문항: 밑줄 표시만 없애고 문장은 그대로 둔다.
+- 장문 41~42번: 한 지문이므로 number를 "41~42"로 하나만 만든다.
+- 장문 43~45번: (A) 다음에 (B)(C)(D)를 정답 순서대로 배열하고, number를 "43~45"로 하나만 만든다.
+- 도표·안내문·내용 일치 문항(25~28번 등)도 지문 텍스트를 그대로 복원한다.
+
+[공통 규칙]
+- 발문(문제 지시문), 선택지, 문항 번호, 원문자(①~⑤), (A)(B)(C)/(a)~(e) 표시, 밑줄, 하단 어휘 각주(*표시)는 모두 제거한다.
+- 원문 문장을 절대 요약·의역·생략하지 말고 철자와 구두점을 시험지 그대로 옮긴다.
+- 문단 구분은 빈 줄로 표시한다.
+- note에는 어떤 정답을 어떻게 반영했는지 한국어로 짧게 적는다.
+- exam_year, exam_month, grade는 시험지 표지/머리말에서 파악한다."""
+
+def normalize_mock_meta(year: str, month: str, grade: str) -> (str, str, str):
+    y = "".join(re.findall(r'\d+', str(year)))
+    if len(y) == 2:
+        y = "20" + y
+    m = "".join(re.findall(r'\d+', str(month))).lstrip("0")
+    g_digits = re.findall(r'\d', str(grade))
+    g = f"고{g_digits[0]}" if g_digits else str(grade).strip()
+    return y, m, g
+
+def mock_exam_key(year: str, month: str, grade: str) -> str:
+    return f"[{year}년 {month}월 {grade}]"
+
+def extract_mock_exam_passages(pdf_file, answer_file, model_name: str) -> Dict:
+    contents = [types.Part.from_bytes(data=pdf_file.getvalue(), mime_type="application/pdf")]
+    answer_note = ""
+    if answer_file is not None:
+        ans_mime = answer_file.type if getattr(answer_file, "type", None) else "application/pdf"
+        contents.append(types.Part.from_bytes(data=answer_file.getvalue(), mime_type=ans_mime))
+        answer_note = f"(파일명: {pdf_file.name})과 별도 정답표 파일(파일명: {answer_file.name})"
+    else:
+        answer_note = f"(파일명: {pdf_file.name})"
+    contents.append(MOCK_RESTORE_PROMPT.format(answer_note=answer_note))
+
+    for attempt in range(4):
+        try:
+            res = client.models.generate_content(
+                model=model_name,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    temperature=0.1,
+                    response_mime_type="application/json",
+                    response_json_schema=SCHEMA_MOCK_RESTORE
+                )
+            )
+            return json.loads(res.text.strip())
+        except Exception as e:
+            err_s = str(e).lower()
+            if attempt < 3 and any(k in err_s for k in ["503", "429", "overloaded", "unavailable", "quota", "high demand"]):
+                wait_t = 10 + attempt * 10
+                st.toast(f"⏳ 서버 대기 감지 ({pdf_file.name}). {wait_t}초 후 재시도...")
+                time.sleep(wait_t)
+                continue
+            st.error(f"❌ '{pdf_file.name}' 원문 복원 중 오류: {e}")
+            return None
+    return None
+
+def mock_number_sort_key(num: str):
+    nums = re.findall(r'\d+', str(num))
+    return int(nums[0]) if nums else 999
+
+def build_mock_excel_bytes(records: List[Dict]) -> bytes:
+    """기존 '엑셀 원클릭 통합 생성' 탭에 그대로 올릴 수 있는 형식(라벨/지문/학교명/이미지명)"""
+    rows = [{"라벨": p["label"], "지문": p.get("body_text", ""), "학교명": "", "이미지명": ""} for p in records]
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        pd.DataFrame(rows, columns=["라벨", "지문", "학교명", "이미지명"]).to_excel(writer, sheet_name="모의고사_원문", index=False)
+        try:
+            ws = writer.book["모의고사_원문"]
+            ws.column_dimensions["A"].width = 28
+            ws.column_dimensions["B"].width = 120
+        except Exception:
+            pass
+    return output.getvalue()
+
+def render_mock_exam_tab(text_model: str, api_delay: int, academy_name: str, school_name: str):
+    st.markdown("### 📝 모의고사 원문 라이브러리 (PDF 업로드 → 정답 반영 원문 복원 → 번호 클릭으로 교재 생성)")
+    st.info(
+        "💡 모의고사 시험지 PDF와 정답표를 올리면 AI가 **18~45번 지문을 정답이 반영된 원래 원문**으로 복원합니다. "
+        "(빈칸 채움, 순서 재배열, 삽입 문장 반영, 무관한 문장 삭제, 어법·어휘 수정) "
+        "복원 결과를 표에서 확인·수정한 뒤 저장하면, 아래에서 **년도·월·학년별로 번호를 클릭해 원하는 지문만 교재로 생성**할 수 있습니다."
+    )
+
+    # ---- 1) 업로드 & 복원 ----
+    with st.container(border=True):
+        st.markdown("##### 1️⃣ 모의고사 PDF 업로드 & 원문 복원")
+        u_col1, u_col2 = st.columns(2)
+        mock_pdf = u_col1.file_uploader("📄 모의고사 시험지 PDF", type=["pdf"], key="mock_pdf_uploader")
+        mock_ans = u_col2.file_uploader(
+            "✅ 정답표 (PDF 또는 이미지, 시험지 PDF 안에 정답표가 있으면 생략 가능)",
+            type=["pdf", "png", "jpg", "jpeg"], key="mock_ans_uploader"
+        )
+        m_col1, m_col2, m_col3, m_col4 = st.columns([1, 1, 1, 2])
+        in_year = m_col1.text_input("연도 (비우면 자동 인식)", placeholder="예: 2026", key="mock_in_year")
+        in_month = m_col2.text_input("월 (비우면 자동 인식)", placeholder="예: 3", key="mock_in_month")
+        in_grade = m_col3.selectbox("학년", ["자동 인식", "고1", "고2", "고3"], key="mock_in_grade")
+
+        if mock_pdf and m_col4.button("🧠 정답 반영 원문 복원 시작", type="primary", use_container_width=True, key="mock_extract_btn"):
+            with st.spinner(f"'{mock_pdf.name}'의 18~45번 지문을 정답 반영 원문으로 복원 중입니다... (1~2분 소요)"):
+                parsed = extract_mock_exam_passages(mock_pdf, mock_ans, text_model)
+            if parsed:
+                y, m, g = normalize_mock_meta(
+                    in_year.strip() or parsed.get("exam_year", ""),
+                    in_month.strip() or parsed.get("exam_month", ""),
+                    in_grade if in_grade != "자동 인식" else parsed.get("grade", "")
+                )
+                draft_rows = []
+                for ps in sorted(parsed.get("passages", []), key=lambda x: mock_number_sort_key(x.get("number", ""))):
+                    num = re.sub(r'\s*번\s*$', '', str(ps.get("number", "")).strip()).replace("-", "~")
+                    if not num:
+                        continue
+                    draft_rows.append({
+                        "번호": num,
+                        "유형": ps.get("q_type", ""),
+                        "정답": ps.get("answer", ""),
+                        "확인필요": bool(ps.get("needs_review", False)) or not parsed.get("answer_key_found", False),
+                        "복원 원문": ps.get("restored_text", "").strip(),
+                        "복원 메모": ps.get("note", ""),
+                    })
+                for k in ["mock_draft_editor", "mock_draft_year", "mock_draft_month", "mock_draft_grade"]:
+                    st.session_state.pop(k, None)
+                st.session_state.mock_draft = {
+                    "year": y, "month": m, "grade": g,
+                    "answer_key_found": parsed.get("answer_key_found", False),
+                    "source": mock_pdf.name,
+                    "rows": draft_rows
+                }
+                st.rerun()
+
+    # ---- 2) 검수 & 저장 ----
+    draft = st.session_state.get("mock_draft")
+    if draft:
+        with st.container(border=True):
+            st.markdown("##### 2️⃣ 복원 결과 검수 (셀을 더블클릭해 수정 → 저장)")
+            d_col1, d_col2, d_col3 = st.columns(3)
+            draft["year"] = d_col1.text_input("연도", value=draft["year"], key="mock_draft_year")
+            draft["month"] = d_col2.text_input("월", value=draft["month"], key="mock_draft_month")
+            draft["grade"] = d_col3.text_input("학년", value=draft["grade"], key="mock_draft_grade")
+            y, m, g = normalize_mock_meta(draft["year"], draft["month"], draft["grade"])
+            ekey = mock_exam_key(y, m, g)
+
+            if not draft.get("answer_key_found"):
+                st.warning("⚠️ 정답표를 찾지 못해 AI가 직접 푼 정답으로 복원했습니다. **확인필요** 표시된 문항을 꼭 검토해주세요.")
+            review_cnt = sum(1 for r in draft["rows"] if r.get("확인필요"))
+            st.caption(f"📌 저장될 이름: **{ekey}** · 지문 {len(draft['rows'])}개 · 확인필요 {review_cnt}개 · 원본 파일: {draft.get('source', '')}")
+
+            exists = any(p.get("exam_key") == ekey for p in st.session_state.saved_mock)
+            if exists:
+                st.info(f"ℹ️ {ekey} 시험이 이미 라이브러리에 있습니다. 저장하면 같은 번호의 지문은 새 내용으로 교체됩니다.")
+
+            edited = st.data_editor(
+                pd.DataFrame(draft["rows"], columns=["번호", "유형", "정답", "확인필요", "복원 원문", "복원 메모"]),
+                num_rows="dynamic",
+                use_container_width=True,
+                height=420,
+                column_config={
+                    "복원 원문": st.column_config.TextColumn(width="large"),
+                    "확인필요": st.column_config.CheckboxColumn(),
+                },
+                key="mock_draft_editor"
+            )
+
+            with st.expander("🔍 지문 하나씩 크게 보기 (표에서 수정한 내용 반영)", expanded=False):
+                nums = [str(n) for n in edited["번호"].tolist() if str(n).strip() and str(n) != "nan"]
+                if nums:
+                    v_num = st.selectbox("번호", nums, key="mock_draft_view_num")
+                    v_row = edited[edited["번호"].astype(str) == v_num].iloc[0]
+                    st.caption(f"유형: {v_row.get('유형', '')} · 정답: {v_row.get('정답', '')} · 메모: {v_row.get('복원 메모', '')}")
+                    with st.container(border=True):
+                        st.markdown(
+                            f'<div style="white-space:pre-wrap; line-height:1.7; font-size:14px;">{esc(v_row.get("복원 원문", ""))}</div>',
+                            unsafe_allow_html=True
+                        )
+
+            s_col1, s_col2 = st.columns([3, 1])
+            if s_col1.button(f"💾 {ekey} 원문 라이브러리에 저장", type="primary", use_container_width=True, key="mock_draft_save"):
+                if not (y and m and g):
+                    st.error("연도·월·학년을 모두 입력해주세요.")
+                else:
+                    new_records = []
+                    for _, r in edited.iterrows():
+                        num = str(r.get("번호", "")).strip()
+                        body = str(r.get("복원 원문", "")).strip()
+                        if not num or num == "nan" or not body or body == "nan":
+                            continue
+                        new_records.append({
+                            "id": str(uuid.uuid4()),
+                            "label": f"{ekey} {num}번",
+                            "exam_key": ekey,
+                            "year": y, "month": m, "grade": g,
+                            "number": num,
+                            "q_type": str(r.get("유형", "") or ""),
+                            "answer": str(r.get("정답", "") or ""),
+                            "needs_review": bool(r.get("확인필요", False)),
+                            "note": str(r.get("복원 메모", "") or ""),
+                            "body_text": body,
+                        })
+                    new_labels = {p["label"] for p in new_records}
+                    st.session_state.saved_mock = [p for p in st.session_state.saved_mock if p.get("label") not in new_labels] + new_records
+                    save_to_file(MOCK_FILE, st.session_state.saved_mock)
+                    del st.session_state["mock_draft"]
+                    st.success(f"✅ {ekey} 지문 {len(new_records)}개를 저장했습니다!")
+                    st.rerun()
+            if s_col2.button("✖️ 검수 취소", use_container_width=True, key="mock_draft_cancel"):
+                del st.session_state["mock_draft"]
+                st.rerun()
+
+    # ---- 3) 년도/월/학년 → 번호 클릭 선택 ----
+    saved_mock: List[Dict] = st.session_state.saved_mock
+    st.markdown("##### 3️⃣ 모의고사 선택 → 번호 클릭 → 교재 생성")
+    if not saved_mock:
+        st.info("저장된 모의고사 원문이 없습니다. 위에서 모의고사 PDF를 업로드해 복원해주세요.")
+        return
+
+    years = sorted({p.get("year", "") for p in saved_mock if p.get("year")}, reverse=True)
+    f_col1, f_col2, f_col3 = st.columns(3)
+    sel_year = f_col1.selectbox("📅 연도", ["전체"] + years, key="mock_f_year")
+    months = sorted({p.get("month", "") for p in saved_mock if p.get("month") and (sel_year == "전체" or p.get("year") == sel_year)}, key=lambda x: int(x) if x.isdigit() else 99)
+    sel_month = f_col2.selectbox("🗓️ 월", ["전체"] + months, key="mock_f_month")
+    grades = sorted({p.get("grade", "") for p in saved_mock if p.get("grade")})
+    sel_grade = f_col3.selectbox("🎓 학년", ["전체"] + grades, key="mock_f_grade")
+
+    exams: Dict[str, List[Dict]] = {}
+    for p in saved_mock:
+        if sel_year != "전체" and p.get("year") != sel_year:
+            continue
+        if sel_month != "전체" and p.get("month") != sel_month:
+            continue
+        if sel_grade != "전체" and p.get("grade") != sel_grade:
+            continue
+        exams.setdefault(p.get("exam_key", extract_group_prefix(p["label"])), []).append(p)
+
+    def exam_sort_key(k: str):
+        items = exams[k]
+        y = int(items[0].get("year", 0) or 0)
+        m = int(items[0].get("month", 0) or 0)
+        return (-y, -m, items[0].get("grade", ""))
+
+    # 위젯 상태는 화면에 안 그려지면 사라지므로, 시험별 선택 번호를 별도로 보관 (필터를 바꿔도 선택 유지)
+    pick_store: Dict[str, List[str]] = st.session_state.setdefault("mock_pick_store", {})
+
+    with st.container(height=420, border=True):
+        if not exams:
+            st.caption("조건에 맞는 모의고사가 없습니다.")
+        for ekey in sorted(exams.keys(), key=exam_sort_key):
+            items = sorted(exams[ekey], key=lambda x: mock_number_sort_key(x.get("number", "")))
+            num_to_item = {p["number"]: p for p in items}
+            pill_key = f"mock_pick_{ekey}"
+            if pill_key not in st.session_state:
+                st.session_state[pill_key] = [n for n in pick_store.get(ekey, []) if n in num_to_item]
+            h_col1, h_col2, h_col3 = st.columns([4, 1, 1])
+            h_col1.markdown(f"**{ekey}** · 지문 {len(items)}개")
+            if h_col2.button("전체 선택", key=f"mock_all_{ekey}", use_container_width=True):
+                st.session_state[pill_key] = list(num_to_item.keys())
+            if h_col3.button("선택 해제", key=f"mock_none_{ekey}", use_container_width=True):
+                st.session_state[pill_key] = []
+            picked = st.pills(
+                ekey,
+                options=list(num_to_item.keys()),
+                selection_mode="multi",
+                format_func=lambda n, m=num_to_item: f"{n}번 ⚠️" if m[n].get("needs_review") else f"{n}번",
+                key=pill_key,
+                label_visibility="collapsed"
+            )
+            pick_store[ekey] = list(picked or [])
+
+    # 모든 시험의 선택 번호 모으기 (필터로 숨겨진 시험의 선택도 유지)
+    by_label = {p["label"]: p for p in saved_mock}
+    selected: List[Dict] = []
+    for ekey, nums in pick_store.items():
+        for num in nums:
+            item = by_label.get(f"{ekey} {num}번")
+            if item:
+                selected.append(item)
+    selected.sort(key=natural_sort_key)
+
+    if not selected:
+        st.caption("👆 번호를 클릭해 교재로 만들 지문을 선택하세요. (⚠️ = 정답 확인 필요)")
+        return
+
+    st.markdown(f"🛒 **선택된 지문 {len(selected)}개:** " + ", ".join(md_safe(p["label"]) for p in selected[:20]) + (f" ... 외 {len(selected) - 20}개" if len(selected) > 20 else ""))
+
+    with st.expander("🔎 선택 지문 원문 확인·수정", expanded=False):
+        pick_lbl = st.selectbox("지문 선택", [p["label"] for p in selected], key="mock_view_select")
+        target = by_label[pick_lbl]
+        st.caption(f"유형: {target.get('q_type', '')} · 정답: {target.get('answer', '')} · 메모: {target.get('note', '')}")
+        new_body = st.text_area("원문", value=target.get("body_text", ""), height=260, key=f"mock_body_{target['id']}")
+        new_review = st.checkbox("⚠️ 확인필요", value=bool(target.get("needs_review")), key=f"mock_rev_{target['id']}")
+        if st.button("💾 이 지문 수정 저장", key=f"mock_save_one_{target['id']}"):
+            target["body_text"] = new_body.strip()
+            target["needs_review"] = new_review
+            save_to_file(MOCK_FILE, st.session_state.saved_mock)
+            st.success(f"✅ {pick_lbl} 원문을 저장했습니다.")
+
+    a_col1, a_col2 = st.columns(2)
+    a_col1.download_button(
+        "📊 선택 지문 엑셀 다운로드 (엑셀 원클릭 생성 탭 형식)",
+        data=build_mock_excel_bytes(selected),
+        file_name="모의고사_원문.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        key="mock_excel_dl"
+    )
+    with a_col2.popover("🗑️ 선택 지문 삭제", use_container_width=True):
+        st.warning(f"선택한 지문 {len(selected)}개를 원문 라이브러리에서 영구 삭제합니다. (이미 만든 교재는 지워지지 않습니다)")
+        if st.button("삭제 확정", type="primary", key="mock_del_confirm"):
+            del_ids = {p["id"] for p in selected}
+            st.session_state.saved_mock = [p for p in saved_mock if p["id"] not in del_ids]
+            for k in [k for k in st.session_state.keys() if str(k).startswith("mock_pick_")]:
+                del st.session_state[k]
+            st.session_state["mock_pick_store"] = {}
+            save_to_file(MOCK_FILE, st.session_state.saved_mock)
+            st.rerun()
+
+    with st.container(border=True):
+        st.markdown("##### 🎯 선택 지문으로 교재 생성")
+        g_col1, g_col2, g_col3, g_col4 = st.columns(4)
+        mdo_v = g_col1.checkbox("🏆 Anatomy One-Shot (한판승)", value=True, key="mock_do_v")
+        mdo_a = g_col2.checkbox("🦅 Anatomy Self-Note", value=True, key="mock_do_a")
+        mdo_c = g_col3.checkbox("💎 Anatomy Core", value=True, key="mock_do_c")
+        mdo_w = g_col4.checkbox("📖 Anatomy Voca", value=True, key="mock_do_w")
+        if any(p.get("needs_review") for p in selected):
+            st.warning("⚠️ 선택한 지문 중 정답 확인이 필요한 지문이 있습니다. 위 '원문 확인·수정'에서 먼저 검토하는 것을 권장합니다.")
+        if st.button(f"🚀 선택한 {len(selected)}개 지문 교재 생성 시작", type="primary", use_container_width=True, key="mock_gen_btn"):
+            if not (mdo_v or mdo_a or mdo_c or mdo_w):
+                st.warning("생성할 교재 종류를 최소 1개 이상 체크해주세요.")
+            else:
+                rows = [{"label": p["label"], "text": p["body_text"], "school": "", "img_n": ""} for p in selected]
+                run_all_in_one_generation(rows, {}, mdo_v, mdo_a, mdo_c, mdo_w, text_model, api_delay, academy_name, school_name)
+                st.info("👉 생성된 교재는 각 교재 탭(한판승·Self-Note·Core·Voca)에서 같은 이름으로 확인·렌더링할 수 있습니다.")
+
+
+# -----------------------------
 # 6. 메인 UI 화면 및 사이드바 구성
 # -----------------------------
 st.title("🦅 4pm 올인원 교재 통합 시스템")
@@ -2618,6 +3095,9 @@ with st.sidebar:
                         elif "core" in fname:
                             st.session_state.saved_c = j_data
                             save_to_file(CORE_FILE, j_data)
+                        elif "mock" in fname:
+                            st.session_state.saved_mock = j_data
+                            save_to_file(MOCK_FILE, j_data)
                         elif "past" in fname:
                             j_data, _ = consolidate_past_voca_records(j_data)
                             st.session_state.saved_past_voca = j_data
@@ -2635,8 +3115,9 @@ CSS_ANATOMY = build_css_anatomy(h_url, f_url, e_url)
 CSS_CORE = build_css_core(h_url, f_url, e_url)
 CSS_VOCA = build_css_voca(h_url, f_url)
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+tab1, tab_mock, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "🚀 엑셀 원클릭 통합 생성",
+    "📝 모의고사 원문 라이브러리",
     "🏆 Anatomy One-Shot (한판승)",
     "🦅 Anatomy Self-Note",
     "💎 Anatomy Core",
@@ -2666,7 +3147,7 @@ with tab1:
                 i.name: f"data:{i.type if hasattr(i, 'type') and i.type else 'image/png'};base64,{base64.b64encode(i.getvalue()).decode()}"
                 for i in imgs
             } if imgs else {}
-            
+
             rows = []
             for i, r in df.iterrows():
                 raw_text = r.get('passage', r.get('지문', ''))
@@ -2678,91 +3159,11 @@ with tab1:
                     "school": str(r.get('school', r.get('학교명', ''))),
                     "img_n": str(r.get('image_name', r.get('이미지명', ''))).strip()
                 })
-            
-            v_existing_labels = {p["label"] for p in st.session_state.saved_v}
-            a_existing_labels = {p["label"] for p in st.session_state.saved_a}
-            c_existing_map = {p["label"]: p["data"] for p in st.session_state.saved_c}
-            w_existing_labels = {p["label"] for p in st.session_state.saved_w}
 
-            progress_text = st.empty()
-            progress_bar = st.progress(0)
-            
-            for idx, r in enumerate(rows):
-                lbl = r['label']
-                need_v = do_v and (lbl not in v_existing_labels)
-                need_a = do_a and (lbl not in a_existing_labels)
-                need_c = do_c and (lbl not in c_existing_map)
-                need_w = do_w and (lbl not in w_existing_labels)
+            run_all_in_one_generation(rows, img_dict, do_v, do_a, do_c, do_w, text_model, api_delay, academy_name, school_name)
 
-                if not (need_v or need_a or need_c or need_w):
-                    st.toast(f"⏭️ 이미 모두 생성됨 (건너뜀): {lbl}")
-                    progress_bar.progress((idx + 1) / max(1, len(rows)))
-                    continue
-
-                img_data_url = img_dict.get(r['img_n'], "")
-                excel_school = r['school']
-                final_school = excel_school if pd.notna(excel_school) and str(excel_school).strip() not in ["", "nan"] else school_name
-
-                shared_img_path = save_base64_to_image_file(img_data_url) if img_data_url else ""
-
-                if need_v:
-                    progress_text.info(f"⏳ [Anatomy One-Shot] 분석 중: {lbl} ({idx + 1}/{len(rows)})")
-                    time.sleep(api_delay)
-                    v_data = analyze_passage(lbl, r['text'], text_model, "victory")
-                    if v_data:
-                        st.session_state.saved_v.append({
-                            "id": str(uuid.uuid4()), "label": lbl, "data": v_data,
-                            "body_text": r['text'], "image_data_url": "",
-                            "image_path": shared_img_path, "academy_name": academy_name
-                        })
-                        v_existing_labels.add(lbl)
-                        save_to_file(VICTORY_FILE, st.session_state.saved_v)
-
-                if need_a:
-                    progress_text.info(f"⏳ [Anatomy Self-Note] 분석 중: {lbl} ({idx + 1}/{len(rows)})")
-                    time.sleep(api_delay)
-                    a_data = analyze_passage(lbl, r['text'], text_model, "anatomy")
-                    if a_data:
-                        st.session_state.saved_a.append({
-                            "id": str(uuid.uuid4()), "label": lbl, "data": a_data,
-                            "body_text": r['text'], "image_data_url": "",
-                            "image_path": shared_img_path, "academy_name": academy_name, "school_name": final_school
-                        })
-                        a_existing_labels.add(lbl)
-                        save_to_file(ANATOMY_FILE, st.session_state.saved_a)
-
-                current_core_data = c_existing_map.get(lbl)
-                if need_c:
-                    progress_text.info(f"⏳ [Anatomy Core] 다중 주제·요지·요약문 및 패러프레이징 생성 중: {lbl} ({idx + 1}/{len(rows)})")
-                    time.sleep(api_delay)
-                    c_data = analyze_passage(lbl, r['text'], text_model, "core")
-                    if c_data:
-                        current_core_data = c_data
-                        st.session_state.saved_c.append({
-                            "id": str(uuid.uuid4()), "label": lbl, "data": c_data,
-                            "body_text": r['text'], "academy_name": academy_name, "school_name": final_school
-                        })
-                        c_existing_map[lbl] = c_data
-                        save_to_file(CORE_FILE, st.session_state.saved_c)
-
-                if need_w:
-                    progress_text.info(f"⏳ [Anatomy Voca] 지문 핵심어 + CORE 패러프레이징 통합 단어장 생성 중: {lbl} ({idx + 1}/{len(rows)})")
-                    time.sleep(api_delay)
-                    w_data = analyze_passage(lbl, r['text'], text_model, "voca", core_context=current_core_data)
-                    if w_data:
-                        if current_core_data:
-                            merge_core_vocab_into_voca_item(current_core_data, w_data)
-                        st.session_state.saved_w.append({
-                            "id": str(uuid.uuid4()), "label": lbl, "data": w_data,
-                            "body_text": r['text'], "academy_name": academy_name, "school_name": final_school
-                        })
-                        w_existing_labels.add(lbl)
-                        save_to_file(VOCA_FILE, st.session_state.saved_w)
-
-                progress_bar.progress((idx + 1) / max(1, len(rows)))
-                    
-            progress_text.success("✅ 모든 교재(Anatomy One-Shot, Self-Note, Core, Voca) 통합 생성 완료!")
-            progress_bar.empty()
+with tab_mock:
+    render_mock_exam_tab(text_model, api_delay, academy_name, school_name)
 
 with tab2:
     render_library_manager("v", "Anatomy One-Shot", VICTORY_FILE, CSS_VICTORY, "victory", text_model, api_delay, academy_name, school_name, h_url, f_url)
