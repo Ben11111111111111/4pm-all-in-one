@@ -4,9 +4,13 @@
 # 로컬 실행 시 생기는 데이터 (실제 데이터는 Supabase에 저장됨)
 *_library.json
 exam_dna_rules.json
+app_settings.json
 image_assets/
 
 # Python
 __pycache__/
 *.pyc
 .venv/
+
+# 디자인 미리보기 파일
+previews/

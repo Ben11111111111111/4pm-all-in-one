@@ -1226,13 +1226,45 @@ def build_css_victory(h_img, f_img, e_img):
     .ys-box {{ padding: 10px 14px; background: #eef4ff; color: #0047AB; font-weight: 500; border-left: 4px solid #FF8C00 !important; border-right: 1px solid #dee2e6; border-bottom: 1px solid #dee2e6; border-bottom-left-radius: 8px; border-bottom-right-radius: 8px; font-size: 12.5px; line-height: 1.6; word-break: keep-all; }}
     .ys-header {{ display: flex; align-items: center; gap: 6px; margin-bottom: 6px; font-weight: 900; color: #FF8C00; font-size: 11px; }}
     .ys-img {{ width: 22px; height: 22px; background: url('{e_img}') center/cover; border-radius: 50%; border: 1px solid #FF8C00; }}
+    /* 어법 위치 번호 표시 + 오른쪽 어법 POINT 칸 */
+    .sent-row {{ display: flex; gap: 10px; align-items: flex-start; }}
+    .sent-main {{ flex: 1; min-width: 0; }}
+    .sent-no {{ display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 50%; background: #0047AB; color: white; font-size: 11px; font-weight: 900; margin-right: 6px; vertical-align: 2px; }}
+    .essay-badge {{ display: inline-block; background: #e11d48; color: white; font-size: 9.5px; font-weight: 900; padding: 1px 7px; border-radius: 4px; margin-bottom: 4px; line-height: 1.6; }}
+    .eng-box.essay {{ border: 1.5px solid #e11d48; border-bottom: 1px dashed #e2e8f0; }}
+    .gp-mark {{ background: #fff3c4; border-radius: 3px; padding: 1px 2px; -webkit-box-decoration-break: clone; box-decoration-break: clone; }}
+    .gp-num {{ display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; border-radius: 50%; background: #FF8C00; color: white; font-size: 9.5px; font-weight: 900; margin-right: 3px; line-height: 1; vertical-align: 1px; }}
+    .gp-panel {{ flex: 0 0 58mm; box-sizing: border-box; background: #f8fbff; border: 1px solid #d6e2f5; border-radius: 8px; padding: 8px 10px; }}
+    .gp-title {{ display: inline-block; background: #0047AB; color: white; font-size: 10.5px; font-weight: 900; padding: 2px 9px; border-radius: 4px; margin-bottom: 6px; }}
+    .gp-item {{ font-size: 10.5px; line-height: 1.5; color: #334155; margin-bottom: 6px; word-break: keep-all; }}
+    .gp-item:last-child {{ margin-bottom: 0; }}
+    .gp-item b {{ color: #b45309; }}
+    @media print {{ .gp-panel {{ flex-basis: 52mm; }} }}
     </style>"""
 
+GP_MARK_RE = re.compile(r'\{(\d{1,2}):(.*?)\}', re.DOTALL)
+
+def strip_grammar_marks(text: str) -> str:
+    return GP_MARK_RE.sub(r'\2', str(text or ""))
+
 def highlight_syntax(text):
-    text = esc(text)
+    """[어구](S) 구문 표시를 ruby로 바꾸고, {번호:표현} 어법 마커를 번호 하이라이트로 바꿈"""
+    raw = str(text or "")
+
+    def keep_or_drop(m):
+        # 대괄호 경계를 가로지르는 마커는 HTML이 깨지므로 표시만 지우고 단어는 남김
+        inner = m.group(2)
+        if inner.count("[") != inner.count("]"):
+            return inner
+        return "\x00" + m.group(1) + "\x01" + inner + "\x02"
+    raw = GP_MARK_RE.sub(keep_or_drop, raw)
+
+    text = esc(raw)
     pattern = r'\[(.*?)\]\s*\(([SVOCM])\)'
     replacement = r'<ruby class="syntax-ruby st-\2"><span class="syntax-text">\1</span><rt>(\2)</rt></ruby>'
-    return re.sub(pattern, replacement, text, flags=re.DOTALL)
+    text = re.sub(pattern, replacement, text, flags=re.DOTALL)
+    text = re.sub(r'\x00(\d+)\x01(.*?)\x02', r'<span class="gp-mark"><span class="gp-num">\1</span>\2</span>', text, flags=re.DOTALL)
+    return text.replace("\x00", "").replace("\x01", "").replace("\x02", "")
 
 def render_victory(p):
     data = p["data"]
@@ -1254,7 +1286,7 @@ def render_victory(p):
     </div>
     """
     rows_html = ""
-    for row in analysis_list:
+    for sent_idx, row in enumerate(analysis_list, start=1):
         eng_highlighted = highlight_syntax(row.get('eng', ''))
         vocab_list = row.get("sentence_vocab", [])
         vocab_html = ""
@@ -1267,18 +1299,35 @@ def render_victory(p):
                 <div style="font-weight: 700; margin-bottom: 5px; color: #333;">📖 Sentence Vocab</div>
                 <div style="display: flex; flex-wrap: wrap; gap: 4px 15px;">{"".join(v_items)}</div>
             </div>"""
+        # 새 형식: 문장 속 번호 마커 + 오른쪽 어법 POINT 칸 / 예전 데이터: 기존 Grammar Point 상자
+        points = [g for g in row.get("grammar_points", []) or [] if g.get("title") or g.get("explain")]
         grammar_html = ""
-        if row.get("grammar"):
+        panel_html = ""
+        if points:
+            items = "".join(
+                f'<div class="gp-item"><span class="gp-num">{esc(g.get("no", i))}</span><b>{esc(g.get("title", ""))}</b> : {esc(g.get("explain", ""))}</div>'
+                for i, g in enumerate(points, start=1)
+            )
+            panel_html = f'<div class="gp-panel"><div class="gp-title">+ 어법 POINT</div>{items}</div>'
+        elif row.get("grammar"):
             grammar_html = f'<div class="inline-grammar-box"><b>💡 Grammar Point</b> : {esc(row.get("grammar"))}</div>'
+
+        is_essay = bool(row.get("essay_candidate"))
+        essay_badge = '<div class="essay-badge">서술형 출제 가능</div>' if is_essay else ""
 
         rows_html += f"""
         <tr>
             <td>
-                <div class="eng-box"><span style="color:#0047AB; font-weight:900; margin-right:5px; vertical-align: top;">E.</span>{eng_highlighted}</div>
-                {vocab_html}
-                <div class="trans-box"><span style="color:#64748b; font-weight:900; margin-right:5px;">K.</span>{esc(row.get('kor', ''))}</div>
-                {grammar_html}
-                <div class="ys-box"><div class="ys-header"><div class="ys-img"></div>영쌤의 한판승 코칭</div>{esc(row.get('ys', ''))}</div>
+                <div class="sent-row">
+                    <div class="sent-main">
+                        <div class="eng-box{' essay' if is_essay else ''}">{essay_badge}<div><span class="sent-no">{sent_idx}</span>{eng_highlighted}</div></div>
+                        {vocab_html}
+                        <div class="trans-box"><span style="color:#64748b; font-weight:900; margin-right:5px;">K.</span>{esc(row.get('kor', ''))}</div>
+                        {grammar_html}
+                        <div class="ys-box"><div class="ys-header"><div class="ys-img"></div>영쌤의 한판승 코칭</div>{esc(row.get('ys', ''))}</div>
+                    </div>
+                    {panel_html}
+                </div>
             </td>
         </tr>"""
     label_text = esc(p['label'])
@@ -1882,9 +1931,22 @@ SCHEMA_VICTORY = {
                     },
                     "kor": {"type": "string"},
                     "grammar": {"type": "string"},
+                    "grammar_points": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "no": {"type": "integer", "description": "eng 안의 {번호:표현} 마커 번호"},
+                                "title": {"type": "string", "description": "어법 항목 이름 (예: 명사절 접속사 that)"},
+                                "explain": {"type": "string", "description": "구조 + 짧은 해석 (예: show [타동사] + [목적어 명사절] : \"~을 보여준다\")"}
+                            },
+                            "required": ["no", "title", "explain"]
+                        }
+                    },
+                    "essay_candidate": {"type": "boolean", "description": "서술형(영작·어법 고치기) 출제 가능성이 높은 문장이면 true"},
                     "ys": {"type": "string"}
                 },
-                "required": ["eng", "kor", "ys"]
+                "required": ["eng", "kor", "ys", "grammar_points", "essay_candidate"]
             }
         }
     },
@@ -1996,22 +2058,32 @@ SCHEMA_PAST_PDF_VOCA = {
     "required": ["school_name", "exam_year_term", "grade", "questions"]
 }
 
+VICTORY_PROMPT = """너는 한국 고등학생 영어 내신용 '한판승' 교재 편집자다. 지문을 분석해 JSON만 반환하라.
+1. summary: 반드시 '한글(한국어)'로 작성된 핵심 요약 2문장.
+2. keywords: 중요 단어 8개. synonyms는 반드시 "동의어1(뜻), 동의어2(뜻)" 형식으로 2개 작성.
+3. analysis: 모든 문장 분석.
+   - eng: 문장에 끊어 읽기 표시(/)를 삽입해라. 단, 종속절의 자잘한 주어/동사가 아닌 **문장 전체의 메인 주어(S), 본동사(V), 메인 목적어(O), 메인 보어(C)**만 표시하고, 관계대명사절 등 나머지는 묶어서 수식어구(M)로 처리해라.
+   ★(중요) 표시 형태는 반드시 해당 어구를 대괄호로 묶고 바로 뒤에 괄호로 기호를 붙여라.
+   (예시: [Factors](S) / [such as team chemistry, which is related to how well people get along,](M) / [will likely remain](V) / [difficult to measure](C).)
+   ★(어법 위치 표시) 내신 어법·서술형에 나올 만한 핵심 표현 1~4개를 eng 안에서 {번호:표현} 형태로 감싸라. 번호는 문장마다 1부터 시작한다.
+     · 마커는 반드시 하나의 [ ](X) 대괄호 안쪽에만 넣거나, 대괄호 묶음 전체를 바깥에서 감싸야 한다. 대괄호 경계를 가로지르면 안 된다.
+     · 마커 안의 단어는 원문 그대로 두고, 마커를 지우면 원래 eng와 똑같아야 한다.
+     (예시: [Many real-world situations](S) / [{1:show that}](V) [strategies {2:based on self-interest} can {3:lead to bad outcomes}](O) / [for the individual {4:as well as the group}](M).)
+   - grammar_points: eng의 마커 번호마다 하나씩, 번호 순서대로 작성.
+     · title: 어법 항목 이름 (예: "명사절 접속사 that", "과거분사 (명사 수식)", "A as well as B")
+     · explain: 구조를 [ ]로 짧게 보여주고 콜론 뒤에 짧은 해석 (예: "show [타동사] + [목적어로 쓰인 명사절 접속사 that] : \\"전략이 ~할 수 있다는 것을 보여준다\\"")
+   - essay_candidate: 서술형(영작, 어법 고치기, 배열)으로 출제될 가능성이 높은 문장이면 true, 아니면 false. 지문 전체에서 2~4문장만 true로 하라.
+   - sentence_vocab: 해당 문장에서 사용된 주요 단어들을 추출. 유의어 없이 딱 문장에 쓰인 의미만 작성. (word: 영어단어, pronunciation: 한글발음기호 예:나이스, pos: 품사 약어(n, v, a, ad 등), meaning: 뜻)
+   - kor: 직독직해.
+   - grammar: 빈 문자열로 둔다. (어법 설명은 grammar_points에 작성)
+   - ys: 친근한 구어체 설명(~야, ~지!, ~거거든!), 해석된 한글 문장을 쉽고 간략한 예를 들어서 이해하기 쉽게 다른말로 설명해줘.
+지문: \"\"\"{text}\"\"\""""
+
 def analyze_passage(label, text, model_name, target_type="victory", core_context: Dict = None, max_retries=5):
     dna_rules = st.session_state.exam_dna.get("rules_text", DEFAULT_EXAM_DNA["rules_text"])
 
     if target_type == "victory":
-        prompt = f"""너는 한국 고등학생 영어 내신용 '한판승' 교재 편집자다. 지문을 분석해 JSON만 반환하라.
-1. summary: 반드시 '한글(한국어)'로 작성된 핵심 요약 2문장.
-2. keywords: 중요 단어 8개. synonyms는 반드시 "동의어1(뜻), 동의어2(뜻)" 형식으로 2개 작성.
-3. analysis: 모든 문장 분석. 
-   - eng: 문장에 끊어 읽기 표시(/)를 삽입해라. 단, 종속절의 자잘한 주어/동사가 아닌 **문장 전체의 메인 주어(S), 본동사(V), 메인 목적어(O), 메인 보어(C)**만 표시하고, 관계대명사절 등 나머지는 묶어서 수식어구(M)로 처리해라.
-   ★(중요) 표시 형태는 반드시 해당 어구를 대괄호로 묶고 바로 뒤에 괄호로 기호를 붙여라.
-   (예시: [Factors](S) / [such as team chemistry, which is related to how well people get along,](M) / [will likely remain](V) / [difficult to measure](C).)
-   - sentence_vocab: 해당 문장에서 사용된 주요 단어들을 추출. 유의어 없이 딱 문장에 쓰인 의미만 작성. (word: 영어단어, pronunciation: 한글발음기호 예:나이스, pos: 품사 약어(n, v, a, ad 등), meaning: 뜻)
-   - kor: 직독직해.
-   - grammar: 해당 문장에서 중요한 문법이나 구문 설명 (없으면 빈 문자열).
-   - ys: 친근한 구어체 설명(~야, ~지!, ~거거든!), 해석된 한글 문장을 쉽고 간략한 예를 들어서 이해하기 쉽게 다른말로 설명해줘.
-지문: \"\"\"{text}\"\"\""""
+        prompt = VICTORY_PROMPT.replace("{text}", text)
         schema = SCHEMA_VICTORY
 
     elif target_type == "anatomy":
@@ -2223,11 +2295,13 @@ def render_permanent_json_editor(prefix: str, target_type: str, file_path: str, 
                 orig_analysis = pdata.get("analysis", [])
                 updated_analysis = []
                 for idx, r in ana_df.iterrows():
-                    sc_vocab = orig_analysis[idx].get("sentence_vocab", []) if idx < len(orig_analysis) else []
+                    orig_row = orig_analysis[idx] if idx < len(orig_analysis) else {}
                     updated_analysis.append({
                         "eng": str(r.get("eng", "")), "kor": str(r.get("kor", "")),
                         "grammar": str(r.get("grammar", "")), "ys": str(r.get("ys", "")),
-                        "sentence_vocab": sc_vocab
+                        "sentence_vocab": orig_row.get("sentence_vocab", []),
+                        "grammar_points": orig_row.get("grammar_points", []),
+                        "essay_candidate": orig_row.get("essay_candidate", False)
                     })
                 pdata["analysis"] = updated_analysis
                 save_to_file(file_path, all_saved)
