@@ -1232,7 +1232,9 @@ def build_css_victory(h_img, f_img, e_img):
     .sent-no {{ display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 50%; background: #0047AB; color: white; font-size: 11px; font-weight: 900; margin-right: 6px; vertical-align: 2px; }}
     .essay-badge {{ display: inline-block; background: #e11d48; color: white; font-size: 9.5px; font-weight: 900; padding: 1px 7px; border-radius: 4px; margin-bottom: 4px; line-height: 1.6; }}
     .eng-box.essay {{ border: 1.5px solid #e11d48; border-bottom: 1px dashed #e2e8f0; }}
-    .gp-mark {{ background: #fff3c4; border-radius: 3px; padding: 1px 2px; -webkit-box-decoration-break: clone; box-decoration-break: clone; }}
+    /* 형광펜은 글자 아래쪽만 칠해 윗줄의 (S)(V) 표시를 덮지 않게 하고, rt는 항상 형광펜 위에 그림 */
+    .gp-mark {{ background: linear-gradient(transparent 40%, #ffe58a 40%, #ffe58a 92%, transparent 92%); padding: 0 1px; -webkit-box-decoration-break: clone; box-decoration-break: clone; }}
+    .eng-box ruby.syntax-ruby rt {{ position: relative; z-index: 2; }}
     .gp-num {{ display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; border-radius: 50%; background: #FF8C00; color: white; font-size: 9.5px; font-weight: 900; margin-right: 3px; line-height: 1; vertical-align: 1px; }}
     .gp-panel {{ flex: 0 0 58mm; box-sizing: border-box; background: #f8fbff; border: 1px solid #d6e2f5; border-radius: 8px; padding: 8px 10px; }}
     .gp-title {{ display: inline-block; background: #0047AB; color: white; font-size: 10.5px; font-weight: 900; padding: 2px 9px; border-radius: 4px; margin-bottom: 6px; }}
