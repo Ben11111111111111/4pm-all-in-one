@@ -2797,56 +2797,85 @@ def _job_update(sb, fn):
     _store_put(sb, GEN_JOB_FILE, job)
     return job
 
-def _generate_item(sb, gclient, item: Dict, opts: Dict, dna_rules: str, logs: List[str], heartbeat=lambda: None) -> (bool, str):
-    """지문 하나에 대해 요청된 교재 종류를 차례로 생성. 이미 있는 종류는 건너뜀.
-    heartbeat: 오래 걸리는 동안 '아직 처리 중'임을 기록해 다른 서버가 넘겨받지 않게 함"""
+def _generate_one_type(sb, gclient, item: Dict, t: str, opts: Dict, dna_rules: str, logs: List[str]) -> (bool, str):
+    """지문 하나의 교재 1종을 생성해 저장. 이미 있으면 건너뜀. (동시 실행되므로 각자 받은 DB 연결만 사용)"""
+    fpath, tname = next((fp, nm) for tt, fp, nm in GEN_TYPES if tt == t)
     lbl, text = item["label"], item["text"]
     note = lambda msg, level="info": logs.append(msg)
-    for t, fpath, tname in GEN_TYPES:
-        if t not in item.get("types", []):
-            continue
-        heartbeat()
-        if any(p.get("label") == lbl for p in (_store_get(sb, fpath, []) or [])):
-            continue
-        core_ctx = None
-        if t == "voca":
-            core_ctx = next((p.get("data") for p in (_store_get(sb, CORE_FILE, []) or []) if p.get("label") == lbl), None)
+    if any(p.get("label") == lbl for p in (_store_get(sb, fpath, []) or [])):
+        return True, ""
+    core_ctx = None
+    if t == "voca":
+        core_ctx = next((p.get("data") for p in (_store_get(sb, CORE_FILE, []) or []) if p.get("label") == lbl), None)
 
-        data = None
-        for round_idx in range(len(GEN_RETRY_WAITS) + 1):
-            time.sleep(opts.get("api_delay", 3))
-            data = analyze_passage(lbl, text, opts["model"], t, core_context=core_ctx,
-                                   dna_rules=dna_rules, notify=note, gen_client=gclient)
-            if data:
-                break
-            if round_idx < len(GEN_RETRY_WAITS):
-                wait = GEN_RETRY_WAITS[round_idx]
-                logs.append(f"⏳ {tname} 생성 실패 → {wait // 60}분 뒤 다시 시도 ({round_idx + 1}/{len(GEN_RETRY_WAITS)})")
-                heartbeat()
-                time.sleep(wait)
-                heartbeat()
-        if not data:
-            return False, f"{tname} 생성 실패"
+    data = None
+    for round_idx in range(len(GEN_RETRY_WAITS) + 1):
+        time.sleep(opts.get("api_delay", 3))
+        data = analyze_passage(lbl, text, opts["model"], t, core_context=core_ctx,
+                               dna_rules=dna_rules, notify=note, gen_client=gclient)
+        if data:
+            break
+        if round_idx < len(GEN_RETRY_WAITS):
+            wait = GEN_RETRY_WAITS[round_idx]
+            logs.append(f"⏳ {tname} 생성 실패 → {wait // 60}분 뒤 다시 시도 ({round_idx + 1}/{len(GEN_RETRY_WAITS)})")
+            time.sleep(wait)
+    if not data:
+        return False, f"{tname} 생성 실패"
 
-        if t == "voca" and core_ctx:
-            merge_core_vocab_into_voca_item(core_ctx, data)
-        record = {"id": str(uuid.uuid4()), "label": lbl, "data": data, "body_text": text,
-                  "academy_name": opts.get("academy_name", "포피엠 입시 영어")}
-        if t in ("victory", "anatomy"):
-            record.update({"image_data_url": "", "image_path": item.get("img_path", "")})
-        if t != "victory":
-            record["school_name"] = item.get("school") or opts.get("school_name", "")
-        lib = _store_get(sb, fpath, []) or []
-        if not any(p.get("label") == lbl for p in lib):
-            lib.append(record)
-            _store_put(sb, fpath, lib)
-        if t == "core":
-            # 이미 만들어진 Voca 단어장이 있으면 Core 패러프레이징 어휘를 병합
-            voca = _store_get(sb, VOCA_FILE, []) or []
-            if sum(merge_core_vocab_into_voca_item(data, vp.get("data", {})) for vp in voca if vp.get("label") == lbl):
-                _store_put(sb, VOCA_FILE, voca)
-        logs.append(f"✅ {tname} 완료: {lbl}")
+    if t == "voca" and core_ctx:
+        merge_core_vocab_into_voca_item(core_ctx, data)
+    record = {"id": str(uuid.uuid4()), "label": lbl, "data": data, "body_text": text,
+              "academy_name": opts.get("academy_name", "포피엠 입시 영어")}
+    if t in ("victory", "anatomy"):
+        record.update({"image_data_url": "", "image_path": item.get("img_path", "")})
+    if t != "victory":
+        record["school_name"] = item.get("school") or opts.get("school_name", "")
+    lib = _store_get(sb, fpath, []) or []
+    if not any(p.get("label") == lbl for p in lib):
+        lib.append(record)
+        _store_put(sb, fpath, lib)
+    if t == "core":
+        # 이미 만들어진 Voca 단어장이 있으면 Core 패러프레이징 어휘를 병합
+        voca = _store_get(sb, VOCA_FILE, []) or []
+        if sum(merge_core_vocab_into_voca_item(data, vp.get("data", {})) for vp in voca if vp.get("label") == lbl):
+            _store_put(sb, VOCA_FILE, voca)
+    logs.append(f"✅ {tname} 완료: {lbl}")
     return True, ""
+
+def _generate_item(sb_factory, gclient, item: Dict, opts: Dict, dna_rules: str, logs: List[str], heartbeat=lambda: None) -> (bool, str):
+    """지문 하나에 대해 요청된 교재를 생성.
+    한판승·Self-Note·Core는 서로 독립이라 동시에 만들고, Voca는 Core 어휘를 넣어야 하므로 Core가 끝난 뒤 만듦.
+    sb_factory: 동시 작업마다 DB 연결을 따로 열기 위한 함수 (연결 하나를 여러 작업이 같이 쓰면 끊길 수 있음)
+    heartbeat: 기다리는 동안 몇 분마다 '아직 처리 중'임을 기록해 다른 서버가 넘겨받지 않게 함"""
+    from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+    wanted = item.get("types", [])
+
+    def run_parallel(type_list):
+        errors = []
+        if not type_list:
+            return errors
+        with ThreadPoolExecutor(max_workers=len(type_list)) as pool:
+            futures = {pool.submit(_generate_one_type, sb_factory(), gclient, item, t, opts, dna_rules, logs): t for t in type_list}
+            pending = set(futures)
+            while pending:
+                heartbeat()
+                done, pending = wait(pending, timeout=240, return_when=FIRST_COMPLETED)
+                for fut in done:
+                    try:
+                        ok, err = fut.result()
+                    except Exception as e:
+                        ok, err = False, f"{GEN_TYPE_NAMES[futures[fut]]} 처리 중 오류: {str(e)[:150]}"
+                    if not ok:
+                        errors.append(err)
+        return errors
+
+    errors = run_parallel([t for t in ("victory", "anatomy", "core") if t in wanted])
+    core_failed = "core" in wanted and any(GEN_TYPE_NAMES["core"] in e for e in errors)
+    if "voca" in wanted and not core_failed:
+        errors += run_parallel(["voca"])
+    elif "voca" in wanted:
+        errors.append("Anatomy Voca: Core 실패로 다음 재시도 때 함께 생성")
+    return (False, " / ".join(errors)) if errors else (True, "")
 
 def gen_worker_main(api_key: str, sb_url: str, sb_key: str):
     """서버 스레드: 작업 목록에서 대기 중인 지문을 하나씩 처리"""
@@ -2879,7 +2908,8 @@ def gen_worker_main(api_key: str, sb_url: str, sb_key: str):
             _job_update(sb, lambda j: (j.update(current=item["label"]), claim(j)))
             logs = []
             try:
-                ok, err = _generate_item(sb, gclient, item, job.get("opts", {}), dna_rules, logs,
+                sb_factory = (lambda: create_client(sb_url, sb_key)) if sb is not None else (lambda: None)
+                ok, err = _generate_item(sb_factory, gclient, item, job.get("opts", {}), dna_rules, logs,
                                          heartbeat=lambda: _job_update(sb, claim))
             except Exception as e:
                 ok, err = False, f"처리 중 오류: {str(e)[:200]}"
