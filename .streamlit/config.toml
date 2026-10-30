@@ -1,0 +1,12 @@
+# 앱 화면 테마: 교재와 같은 파란색(#0047AB)과 둥근 모서리로 통일 (CSS 없이 Streamlit 기본 기능만 사용해 성능 영향 없음)
+[theme]
+base = "light"
+primaryColor = "#0047AB"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F3F6FB"
+textColor = "#0F172A"
+borderColor = "#DCE3EE"
+showWidgetBorder = true
+baseRadius = "0.6rem"
+buttonRadius = "0.6rem"
+redColor = "#E11D48"

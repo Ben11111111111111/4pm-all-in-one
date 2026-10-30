@@ -9,6 +9,7 @@ import uuid
 import random
 import hashlib
 import zipfile
+import threading
 import pandas as pd
 from typing import List, Dict
 
@@ -2207,8 +2208,14 @@ ANATOMY_PROMPT = """너는 한국 고등학생용 영어 내신 교재를 만드
    - 편지의 인사말(Dear ~,), 맺음말(Sincerely,), 서명 줄도 각각 한 문장으로 취급한다.
 지문: \"\"\"{text}\"\"\""""
 
-def analyze_passage(label, text, model_name, target_type="victory", core_context: Dict = None, max_retries=5):
-    dna_rules = st.session_state.exam_dna.get("rules_text", DEFAULT_EXAM_DNA["rules_text"])
+def analyze_passage(label, text, model_name, target_type="victory", core_context: Dict = None, max_retries=5,
+                    dna_rules: str = None, notify=None, gen_client=None):
+    """notify(msg, level), gen_client: 백그라운드 생성 작업(스레드)에서 st.* 없이 호출할 때 사용"""
+    if dna_rules is None:
+        dna_rules = st.session_state.exam_dna.get("rules_text", DEFAULT_EXAM_DNA["rules_text"])
+    if notify is None:
+        notify = lambda msg, level="info": (st.error if level == "error" else st.toast)(msg)
+    gen_client = gen_client or client
 
     if target_type == "victory":
         prompt = VICTORY_PROMPT.replace("{text}", text)
@@ -2272,7 +2279,7 @@ def analyze_passage(label, text, model_name, target_type="victory", core_context
 
     for attempt in range(max_retries):
         try:
-            res = client.models.generate_content(
+            res = gen_client.models.generate_content(
                 model=model_name,
                 contents=prompt,
                 config=types.GenerateContentConfig(
@@ -2284,13 +2291,13 @@ def analyze_passage(label, text, model_name, target_type="victory", core_context
             return json.loads(res.text.strip())
         except Exception as e:
             error_str = str(e).lower()
-            if any(k in error_str for k in ["503", "high demand", "429", "unavailable", "quota", "overloaded"]):
+            if any(k in error_str for k in ["503", "high demand", "429", "unavailable", "quota", "overloaded", "timeout", "timed out", "connection", "500", "internal"]):
                 if attempt < max_retries - 1:
                     wait_time = 10 + (attempt * 10)
-                    st.toast(f"⏳ 서버 대기 감지 ({label} - {target_type}). {wait_time}초 후 재시도... ({attempt + 1}/{max_retries})")
+                    notify(f"⏳ 서버 대기 감지 ({label} - {target_type}). {wait_time}초 후 재시도... ({attempt + 1}/{max_retries})", "info")
                     time.sleep(wait_time)
                     continue
-            st.error(f"❌ 오류 발생 ({label} - {target_type}): {e}")
+            notify(f"❌ 오류 발생 ({label} - {target_type}): {e}", "error")
             return None
     return None
 
@@ -2497,32 +2504,10 @@ def render_library_manager(prefix: str, title_name: str, file_path: str, css_str
                         f"💡 **엑셀 재업로드 불필요!** 기존 저장된 지문 중 **{title_name} 데이터가 아직 없는 지문이 `{len(source_pool)}개`** 있습니다."
                     )
                     if col_sync2.button(f"🔄 누락된 {len(source_pool)}개 지문 {title_name} 자동 생성", type="primary", use_container_width=True, key=f"sync_{prefix}_btn"):
-                        p_bar = st.progress(0)
-                        p_txt = st.empty()
-                        pool_items = list(source_pool.values())
-                        for idx, sp in enumerate(pool_items):
-                            lbl = sp["label"]
-                            p_txt.info(f"⏳ [{title_name}] 기출 DNA 기반 생성 중: {lbl} ({idx + 1}/{len(pool_items)})")
-                            time.sleep(api_delay)
-                            c_ctx = core_by_label.get(lbl) if target_type == "voca" else None
-                            gen_data = analyze_passage(lbl, sp["body_text"], text_model, target_type, core_context=c_ctx)
-                            if gen_data:
-                                st.session_state[saved_key].append({
-                                    "id": str(uuid.uuid4()),
-                                    "label": lbl,
-                                    "data": gen_data,
-                                    "body_text": sp["body_text"],
-                                    "academy_name": sp.get("academy_name", academy_name),
-                                    "school_name": sp.get("school_name", school_name)
-                                })
-                                save_to_file(file_path, st.session_state[saved_key])
-                                if target_type == "core":
-                                    for vp in st.session_state.saved_w:
-                                        if vp.get("label") == lbl:
-                                            merge_core_vocab_into_voca_item(gen_data, vp.get("data", {}))
-                                    save_to_file(VOCA_FILE, st.session_state.saved_w)
-                            p_bar.progress((idx + 1) / len(pool_items))
-                        p_txt.success(f"✅ {title_name} 자동 생성 및 어휘 연동 완료!")
+                        rows = [{"label": sp["label"], "text": sp["body_text"], "school": sp.get("school_name", ""), "img_path": sp.get("image_path", "")}
+                                for sp in source_pool.values()]
+                        n_added = enqueue_generation(rows, [target_type], text_model, api_delay, academy_name, school_name)
+                        st.session_state.gen_flash = f"✅ {n_added}개 지문의 {title_name} 생성을 작업에 추가했습니다. 창을 닫아도 서버에서 계속 진행됩니다."
                         st.rerun()
 
                 if target_type == "voca" and core_by_label and saved_list:
@@ -2546,28 +2531,14 @@ def render_library_manager(prefix: str, title_name: str, file_path: str, css_str
     if target_type == "past_voca":
         q_c1, q_c2, q_c3 = st.columns(3)
         if q_c1.button("🏫 운양고 기출 시험지 전체 일괄 선택", use_container_width=True, key="past_sel_unyang"):
-            selected_ids.clear()
-            selected_set.clear()
-            for p in saved_list:
-                is_unyang = "운양" in p.get("label", "") or "운양" in p.get("school_name", "")
-                st.session_state[f"{chk_prefix}{p['id']}"] = is_unyang
-                if is_unyang:
-                    selected_ids.append(p["id"])
-                    selected_set.add(p["id"])
+            selected_ids[:] = [p["id"] for p in saved_list if "운양" in p.get("label", "") or "운양" in p.get("school_name", "")]
+            selected_set = set(selected_ids)
         if q_c2.button("🏫 제일고 기출 시험지 전체 일괄 선택", use_container_width=True, key="past_sel_jeil"):
-            selected_ids.clear()
-            selected_set.clear()
-            for p in saved_list:
-                is_jeil = "제일" in p.get("label", "") or "제일" in p.get("school_name", "")
-                st.session_state[f"{chk_prefix}{p['id']}"] = is_jeil
-                if is_jeil:
-                    selected_ids.append(p["id"])
-                    selected_set.add(p["id"])
+            selected_ids[:] = [p["id"] for p in saved_list if "제일" in p.get("label", "") or "제일" in p.get("school_name", "")]
+            selected_set = set(selected_ids)
         if q_c3.button("📚 저장된 모든 학교 기출 시험지 전체 선택", use_container_width=True, key="past_sel_all_schools"):
             selected_ids[:] = [p["id"] for p in saved_list]
             selected_set = set(selected_ids)
-            for p in saved_list:
-                st.session_state[f"{chk_prefix}{p['id']}"] = True
 
     groups = sorted(list({extract_group_prefix(p["label"]) for p in saved_list}), key=natural_sort_key)
     f_col1, f_col2, f_col3, f_col4 = st.columns([2, 2.5, 2.5, 1.5])
@@ -2599,7 +2570,6 @@ def render_library_manager(prefix: str, title_name: str, file_path: str, css_str
             if pid not in selected_set:
                 selected_ids.append(pid)
                 selected_set.add(pid)
-            st.session_state[f"{chk_prefix}{pid}"] = True
 
     if b_col2.button("⚡ 입력한 번호만 선택 추가", use_container_width=True, key=f"{prefix}_apply_nums"):
         target_nums = parse_number_query(num_query)
@@ -2611,7 +2581,6 @@ def render_library_manager(prefix: str, title_name: str, file_path: str, css_str
                         if pid not in selected_set:
                             selected_ids.append(pid)
                             selected_set.add(pid)
-                        st.session_state[f"{chk_prefix}{pid}"] = True
         else:
             st.toast("💡 먼저 '번호 퀵 선택' 칸에 숫자를 입력해주세요.")
 
@@ -2619,17 +2588,14 @@ def render_library_manager(prefix: str, title_name: str, file_path: str, css_str
         selected_ids.sort(key=lambda sid: natural_sort_key(id_to_item[sid]))
 
     if b_col4.button("⬜ 전체 선택 해제", use_container_width=True, key=f"{prefix}_desel_all"):
-        for sid in list(selected_ids):
-            st.session_state[f"{chk_prefix}{sid}"] = False
         selected_ids.clear()
         selected_set.clear()
 
-    if b_col5.button("🗑️ 선택 항목 영구 삭제", type="primary", use_container_width=True, key=f"{prefix}_del"):
-        if selected_ids:
+    # 영구 삭제는 실수 방지를 위해 한 번 더 확인
+    with b_col5.popover(f"🗑️ 선택 항목 삭제 ({len(selected_ids)})", use_container_width=True, disabled=not selected_ids):
+        st.warning(f"선택한 {len(selected_ids)}개를 {title_name}에서 영구 삭제합니다. 되돌릴 수 없습니다.")
+        if st.button("삭제 확정", type="primary", use_container_width=True, key=f"{prefix}_del"):
             st.session_state[saved_key] = [p for p in saved_list if p["id"] not in selected_set]
-            for sid in list(selected_ids):
-                if f"{chk_prefix}{sid}" in st.session_state:
-                    del st.session_state[f"{chk_prefix}{sid}"]
             selected_ids.clear()
             save_to_file(file_path, st.session_state[saved_key])
             st.rerun()
@@ -2651,50 +2617,36 @@ def render_library_manager(prefix: str, title_name: str, file_path: str, css_str
     st.caption(f"📊 {cur_page_info} | 🎯 **현재 선택된 시험지/지문: {len(selected_ids)}개**")
 
     def on_card_toggle(pid: str):
-        chk_val = st.session_state.get(f"{chk_prefix}{pid}", False)
-        if chk_val and pid not in st.session_state[sel_key]:
-            st.session_state[sel_key].append(pid)
-        elif not chk_val and pid in st.session_state[sel_key]:
-            st.session_state[sel_key].remove(pid)
+        # 카드 버튼을 누를 때마다 선택/해제 (누른 순서가 곧 출력 순서)
+        sel = st.session_state[sel_key]
+        if pid in sel:
+            sel.remove(pid)
+        else:
+            sel.append(pid)
 
     order_map = {sid: idx + 1 for idx, sid in enumerate(selected_ids)}
 
+    st.caption("👆 카드를 누르면 선택되고, 다시 누르면 해제됩니다. 누른 순서대로 출력됩니다.")
     with st.container(height=400, border=True):
         cols = st.columns(6)
         for i, p in enumerate(paged_items):
             pid = p["id"]
             is_sel = pid in order_map
-            lbl = p["label"]
-            order_idx = order_map.get(pid, 0)
-            
-            chk_key = f"{chk_prefix}{pid}"
-            if chk_key not in st.session_state or st.session_state[chk_key] != is_sel:
-                st.session_state[chk_key] = is_sel
-
+            sub_info = ""
+            if target_type in ["voca", "past_voca"]:
+                sub_info = f" · {len(p.get('data', {}).get('voca_list', []))}단어"
+            elif target_type == "core":
+                sub_info = f" · 요약 {len(p.get('data', {}).get('summaries', []))}선"
+            card_label = f"{order_map[pid]}. {p['label']}{sub_info}" if is_sel else f"{p['label']}{sub_info}"
             with cols[i % 6]:
-                badge = (
-                    f'<div style="position:absolute; top:-8px; right:-8px; background:#FF4B4B; color:white; '
-                    f'border-radius:50%; width:22px; height:22px; font-size:11px; display:flex; '
-                    f'align-items:center; justify-content:center; font-weight:bold; box-shadow:0 2px 4px rgba(0,0,0,0.2);">{order_idx}</div>'
-                    if is_sel else ""
+                st.button(
+                    md_safe(card_label),
+                    key=f"{chk_prefix}card_{pid}",
+                    type="primary" if is_sel else "secondary",
+                    use_container_width=True,
+                    on_click=on_card_toggle,
+                    args=(pid,)
                 )
-                sub_info = ""
-                if target_type in ["voca", "past_voca"]:
-                    v_list = p.get("data", {}).get("voca_list", [])
-                    sub_info = f'<div style="font-size:9.5px; color:#64748b; margin-top:3px;">(총 {len(v_list)}단어 수록)</div>'
-                elif target_type == "core":
-                    s_cnt = len(p.get("data", {}).get("summaries", []))
-                    sub_info = f'<div style="font-size:9.5px; color:#0284c7; margin-top:3px;">(요약 {s_cnt}선·주제·T/F)</div>'
-
-                st.markdown(
-                    f'<div style="position:relative; background:{"#e8f0fe" if is_sel else "white"}; '
-                    f'border:2px solid {"#0047AB" if is_sel else "#ddd"}; border-radius:10px; '
-                    f'padding:10px 8px; text-align:center; font-weight:bold; color:#0047AB; '
-                    f'min-height:45px; font-size:11px; display:flex; flex-direction:column; align-items:center; justify-content:center;">'
-                    f'{badge}<div>{esc(lbl)}</div>{sub_info}</div>',
-                    unsafe_allow_html=True
-                )
-                st.checkbox("선택", key=chk_key, on_change=on_card_toggle, args=(pid,))
 
     if not selected_ids:
         st.info("👆 위 목록에서 출력하거나 다운로드할 시험지/지문을 선택해주세요.")
@@ -2791,95 +2743,303 @@ def render_library_manager(prefix: str, title_name: str, file_path: str, css_str
 
 
 # -----------------------------
-# 5-A. 올인원 통합 생성 엔진 (엑셀 탭 & 모의고사 탭 공용)
+# 5-A. 백그라운드 교재 생성 작업 (작업 목록을 DB에 저장하고 서버 스레드가 하나씩 처리)
+#   - 브라우저를 닫거나 연결이 끊겨도 서버에서 계속 진행
+#   - 오류가 나면 기다렸다가 다시 시도, 그래도 안 되면 '실패'로 표시하고 다음 지문으로 넘어감
+#   - '생성 중단'은 지금 처리 중인 지문을 끝낸 뒤 멈추고, '다시 시작'은 남은 지문부터 이어서 진행
+#   - 서버가 재시작돼도 작업 목록이 남아 있어 앱을 다시 열면 자동으로 이어감
 # -----------------------------
-def run_all_in_one_generation(rows: List[Dict], img_dict: Dict, do_v: bool, do_a: bool, do_c: bool, do_w: bool, text_model: str, api_delay: int, academy_name: str, school_name: str):
-    """rows: [{"label", "text", "school", "img_n"}] 형식의 지문 목록으로 4종 교재를 생성 (이미 생성된 라벨은 건너뜀)"""
-    v_existing_labels = {p["label"] for p in st.session_state.saved_v}
-    a_existing_labels = {p["label"] for p in st.session_state.saved_a}
-    c_existing_map = {p["label"]: p["data"] for p in st.session_state.saved_c}
-    w_existing_labels = {p["label"] for p in st.session_state.saved_w}
+GEN_JOB_FILE = os.path.join(BASE_DIR, "gen_job.json")
+GEN_TYPES = [
+    ("victory", VICTORY_FILE, "Anatomy One-Shot"),
+    ("anatomy", ANATOMY_FILE, "Anatomy Self-Note"),
+    ("core", CORE_FILE, "Anatomy Core"),
+    ("voca", VOCA_FILE, "Anatomy Voca"),
+]
+GEN_TYPE_NAMES = {t: name for t, _, name in GEN_TYPES}
+GEN_RETRY_WAITS = [60, 180, 600]  # 분석 실패 시 1분 → 3분 → 10분 기다렸다가 다시 시도
+GEN_WORKER_LEASE_SEC = 1200  # 작업 담당 서버가 이 시간 동안 소식이 없으면 다른 서버가 넘겨받음
 
-    progress_text = st.empty()
-    progress_bar = st.progress(0)
+def _store_get(sb, filepath, default=None):
+    """스레드에서도 쓸 수 있는 DB 읽기 (st.* 를 쓰지 않음)"""
+    doc_key = filepath_to_doc_key(filepath)
+    if sb is not None:
+        res = sb.table("app_storage").select("content").eq("doc_key", doc_key).execute()
+        if res.data:
+            return res.data[0]["content"]
+        return default
+    if os.path.exists(filepath):
+        with open(filepath, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return default
 
-    for idx, r in enumerate(rows):
-        lbl = r['label']
-        need_v = do_v and (lbl not in v_existing_labels)
-        need_a = do_a and (lbl not in a_existing_labels)
-        need_c = do_c and (lbl not in c_existing_map)
-        need_w = do_w and (lbl not in w_existing_labels)
+def _store_put(sb, filepath, content):
+    doc_key = filepath_to_doc_key(filepath)
+    if isinstance(content, list):
+        content.sort(key=natural_sort_key)
+    if sb is not None:
+        sb.table("app_storage").upsert({"doc_key": doc_key, "content": content}, on_conflict="doc_key").execute()
+    try:
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(content, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 
-        if not (need_v or need_a or need_c or need_w):
-            st.toast(f"⏭️ 이미 모두 생성됨 (건너뜀): {lbl}")
-            progress_bar.progress((idx + 1) / max(1, len(rows)))
+def _job_log(job: Dict, msg: str):
+    job.setdefault("log", []).append(f"{time.strftime('%m-%d %H:%M:%S')} {msg}")
+    job["log"] = job["log"][-60:]
+
+def _job_update(sb, fn):
+    """작업 문서를 새로 읽어 fn으로 고친 뒤 저장 (화면에서 누른 중단·추가가 덮어써지지 않게 매번 새로 읽음)"""
+    job = _store_get(sb, GEN_JOB_FILE) or {}
+    fn(job)
+    job["updated_at"] = time.time()
+    _store_put(sb, GEN_JOB_FILE, job)
+    return job
+
+def _generate_item(sb, gclient, item: Dict, opts: Dict, dna_rules: str, logs: List[str], heartbeat=lambda: None) -> (bool, str):
+    """지문 하나에 대해 요청된 교재 종류를 차례로 생성. 이미 있는 종류는 건너뜀.
+    heartbeat: 오래 걸리는 동안 '아직 처리 중'임을 기록해 다른 서버가 넘겨받지 않게 함"""
+    lbl, text = item["label"], item["text"]
+    note = lambda msg, level="info": logs.append(msg)
+    for t, fpath, tname in GEN_TYPES:
+        if t not in item.get("types", []):
             continue
+        heartbeat()
+        if any(p.get("label") == lbl for p in (_store_get(sb, fpath, []) or [])):
+            continue
+        core_ctx = None
+        if t == "voca":
+            core_ctx = next((p.get("data") for p in (_store_get(sb, CORE_FILE, []) or []) if p.get("label") == lbl), None)
 
-        img_data_url = img_dict.get(r['img_n'], "")
-        excel_school = r['school']
-        final_school = excel_school if pd.notna(excel_school) and str(excel_school).strip() not in ["", "nan"] else school_name
+        data = None
+        for round_idx in range(len(GEN_RETRY_WAITS) + 1):
+            time.sleep(opts.get("api_delay", 3))
+            data = analyze_passage(lbl, text, opts["model"], t, core_context=core_ctx,
+                                   dna_rules=dna_rules, notify=note, gen_client=gclient)
+            if data:
+                break
+            if round_idx < len(GEN_RETRY_WAITS):
+                wait = GEN_RETRY_WAITS[round_idx]
+                logs.append(f"⏳ {tname} 생성 실패 → {wait // 60}분 뒤 다시 시도 ({round_idx + 1}/{len(GEN_RETRY_WAITS)})")
+                heartbeat()
+                time.sleep(wait)
+                heartbeat()
+        if not data:
+            return False, f"{tname} 생성 실패"
 
-        # 모의고사 탭처럼 이미 저장된 이미지 경로가 있으면 그대로 사용
-        shared_img_path = r.get("img_path") or (save_base64_to_image_file(img_data_url) if img_data_url else "")
+        if t == "voca" and core_ctx:
+            merge_core_vocab_into_voca_item(core_ctx, data)
+        record = {"id": str(uuid.uuid4()), "label": lbl, "data": data, "body_text": text,
+                  "academy_name": opts.get("academy_name", "포피엠 입시 영어")}
+        if t in ("victory", "anatomy"):
+            record.update({"image_data_url": "", "image_path": item.get("img_path", "")})
+        if t != "victory":
+            record["school_name"] = item.get("school") or opts.get("school_name", "")
+        lib = _store_get(sb, fpath, []) or []
+        if not any(p.get("label") == lbl for p in lib):
+            lib.append(record)
+            _store_put(sb, fpath, lib)
+        if t == "core":
+            # 이미 만들어진 Voca 단어장이 있으면 Core 패러프레이징 어휘를 병합
+            voca = _store_get(sb, VOCA_FILE, []) or []
+            if sum(merge_core_vocab_into_voca_item(data, vp.get("data", {})) for vp in voca if vp.get("label") == lbl):
+                _store_put(sb, VOCA_FILE, voca)
+        logs.append(f"✅ {tname} 완료: {lbl}")
+    return True, ""
 
-        if need_v:
-            progress_text.info(f"⏳ [Anatomy One-Shot] 분석 중: {lbl} ({idx + 1}/{len(rows)})")
-            time.sleep(api_delay)
-            v_data = analyze_passage(lbl, r['text'], text_model, "victory")
-            if v_data:
-                st.session_state.saved_v.append({
-                    "id": str(uuid.uuid4()), "label": lbl, "data": v_data,
-                    "body_text": r['text'], "image_data_url": "",
-                    "image_path": shared_img_path, "academy_name": academy_name
-                })
-                v_existing_labels.add(lbl)
-                save_to_file(VICTORY_FILE, st.session_state.saved_v)
+def gen_worker_main(api_key: str, sb_url: str, sb_key: str):
+    """서버 스레드: 작업 목록에서 대기 중인 지문을 하나씩 처리"""
+    sb = create_client(sb_url, sb_key) if (sb_url and sb_key and create_client is not None and IS_CLOUD_DB) else None
+    gclient = genai.Client(api_key=api_key)
+    dna = _store_get(sb, DNA_FILE, {}) or {}
+    dna_rules = dna.get("rules_text") or DEFAULT_EXAM_DNA["rules_text"]
+    # PC 앱과 배포된 앱이 동시에 열려 있어도 한 곳에서만 처리하도록 '작업 담당자'를 기록 (20분 동안 소식 없으면 넘겨받음)
+    my_id = str(uuid.uuid4())
+    def claim(j):
+        j["worker"] = {"id": my_id, "ts": time.time()}
+    while True:
+        try:
+            job = _store_get(sb, GEN_JOB_FILE) or {}
+            lease = job.get("worker") or {}
+            if lease.get("id") not in (None, my_id) and time.time() - float(lease.get("ts", 0)) < GEN_WORKER_LEASE_SEC:
+                return  # 다른 서버가 처리 중
+            if job.get("status") == "stopping":
+                _job_update(sb, lambda j: (j.update(status="stopped", current="", worker=None), _job_log(j, "⏸️ 요청대로 멈췄습니다. '다시 시작'을 누르면 남은 지문부터 이어서 진행합니다.")))
+                return
+            if job.get("status") != "running":
+                if lease.get("id") == my_id:
+                    _job_update(sb, lambda j: j.update(worker=None))
+                return
+            pending = [it for it in job.get("items", []) if it.get("state") == "pending"]
+            if not pending:
+                _job_update(sb, lambda j: (j.update(status="done", current="", worker=None), _job_log(j, "🎉 모든 작업을 마쳤습니다.")))
+                return
+            item = pending[0]
+            _job_update(sb, lambda j: (j.update(current=item["label"]), claim(j)))
+            logs = []
+            try:
+                ok, err = _generate_item(sb, gclient, item, job.get("opts", {}), dna_rules, logs,
+                                         heartbeat=lambda: _job_update(sb, claim))
+            except Exception as e:
+                ok, err = False, f"처리 중 오류: {str(e)[:200]}"
 
-        if need_a:
-            progress_text.info(f"⏳ [Anatomy Self-Note] 분석 중: {lbl} ({idx + 1}/{len(rows)})")
-            time.sleep(api_delay)
-            a_data = analyze_passage(lbl, r['text'], text_model, "anatomy")
-            if a_data:
-                st.session_state.saved_a.append({
-                    "id": str(uuid.uuid4()), "label": lbl, "data": a_data,
-                    "body_text": r['text'], "image_data_url": "",
-                    "image_path": shared_img_path, "academy_name": academy_name, "school_name": final_school
-                })
-                a_existing_labels.add(lbl)
-                save_to_file(ANATOMY_FILE, st.session_state.saved_a)
+            def finish(j):
+                for it in j.get("items", []):
+                    if it.get("id") == item["id"]:
+                        it["state"] = "done" if ok else "failed"
+                        it["error"] = err
+                for m in logs[-8:]:
+                    _job_log(j, m)
+                if not ok:
+                    _job_log(j, f"❌ {item['label']}: {err} (나중에 '실패한 지문 다시 시도'로 재시도할 수 있어요)")
+                j["current"] = ""
+                claim(j)
+            _job_update(sb, finish)
+        except Exception as e:
+            # DB 연결이 잠깐 끊기는 등 예상 못 한 오류: 1분 쉬었다가 같은 지점부터 다시
+            time.sleep(60)
 
-        current_core_data = c_existing_map.get(lbl)
-        if need_c:
-            progress_text.info(f"⏳ [Anatomy Core] 다중 주제·요지·요약문 및 패러프레이징 생성 중: {lbl} ({idx + 1}/{len(rows)})")
-            time.sleep(api_delay)
-            c_data = analyze_passage(lbl, r['text'], text_model, "core")
-            if c_data:
-                current_core_data = c_data
-                st.session_state.saved_c.append({
-                    "id": str(uuid.uuid4()), "label": lbl, "data": c_data,
-                    "body_text": r['text'], "academy_name": academy_name, "school_name": final_school
-                })
-                c_existing_map[lbl] = c_data
-                save_to_file(CORE_FILE, st.session_state.saved_c)
+@st.cache_resource
+def get_gen_runner() -> Dict:
+    return {"thread": None, "lock": threading.Lock()}
 
-        if need_w:
-            progress_text.info(f"⏳ [Anatomy Voca] 지문 핵심어 + CORE 패러프레이징 통합 단어장 생성 중: {lbl} ({idx + 1}/{len(rows)})")
-            time.sleep(api_delay)
-            w_data = analyze_passage(lbl, r['text'], text_model, "voca", core_context=current_core_data)
-            if w_data:
-                if current_core_data:
-                    merge_core_vocab_into_voca_item(current_core_data, w_data)
-                st.session_state.saved_w.append({
-                    "id": str(uuid.uuid4()), "label": lbl, "data": w_data,
-                    "body_text": r['text'], "academy_name": academy_name, "school_name": final_school
-                })
-                w_existing_labels.add(lbl)
-                save_to_file(VOCA_FILE, st.session_state.saved_w)
+def gen_thread_alive() -> bool:
+    t = get_gen_runner()["thread"]
+    return bool(t and t.is_alive())
 
-        progress_bar.progress((idx + 1) / max(1, len(rows)))
+def start_gen_thread() -> bool:
+    runner = get_gen_runner()
+    with runner["lock"]:
+        if runner["thread"] and runner["thread"].is_alive():
+            return False
+        t = threading.Thread(target=gen_worker_main, args=(API_KEY, SUPABASE_URL, SUPABASE_KEY), daemon=True, name="gen-worker")
+        t.start()
+        runner["thread"] = t
+        return True
 
-    progress_text.success("✅ 모든 교재(Anatomy One-Shot, Self-Note, Core, Voca) 통합 생성 완료!")
-    progress_bar.empty()
+def load_gen_job() -> Dict:
+    try:
+        return _store_get(supabase if IS_CLOUD_DB else None, GEN_JOB_FILE) or {}
+    except Exception:
+        return {}
+
+def enqueue_generation(rows: List[Dict], types_list: List[str], text_model: str, api_delay: int, academy_name: str, school_name: str) -> int:
+    """rows: [{"label", "text", "school", "img_path"}] → 작업 목록에 추가하고 서버 작업을 시작. 추가된 지문 수를 반환."""
+    sb = supabase if IS_CLOUD_DB else None
+    added = {"n": 0}
+
+    def add(job):
+        if job.get("status") not in ("running", "stopping"):
+            # 끝났거나 멈춘 작업에 새로 추가하면 남은 지문과 함께 다시 시작
+            job["status"] = "running"
+            job.setdefault("items", [])
+            job["items"] = [it for it in job["items"] if it.get("state") in ("pending", "failed")]
+            job["created_at"] = time.time()
+            job["worker"] = None
+        job["opts"] = {"model": text_model, "api_delay": api_delay, "academy_name": academy_name, "school_name": school_name}
+        queued = {(it["label"], tuple(it.get("types", []))) for it in job["items"] if it.get("state") == "pending"}
+        for r in rows:
+            key = (r["label"], tuple(types_list))
+            if key in queued:
+                continue
+            job["items"].append({"id": str(uuid.uuid4()), "label": r["label"], "text": r["text"],
+                                 "school": r.get("school", ""), "img_path": r.get("img_path", ""),
+                                 "types": list(types_list), "state": "pending", "error": ""})
+            added["n"] += 1
+        _job_log(job, f"➕ {added['n']}개 지문 추가 ({', '.join(GEN_TYPE_NAMES[t] for t in types_list)})")
+    _job_update(sb, add)
+    start_gen_thread()
+    return added["n"]
+
+def reload_libraries_from_db():
+    st.session_state.saved_v = load_from_file(VICTORY_FILE)
+    st.session_state.saved_a = load_from_file(ANATOMY_FILE)
+    st.session_state.saved_c = load_from_file(CORE_FILE)
+    st.session_state.saved_w = load_from_file(VOCA_FILE)
+    st.session_state.saved_mock = load_from_file(MOCK_FILE)
+
+def _gen_job_counts(job: Dict) -> Dict:
+    items = job.get("items", [])
+    return {s: sum(1 for it in items if it.get("state") == s) for s in ("pending", "done", "failed")} | {"total": len(items)}
+
+def _render_gen_job_body(job: Dict):
+    c = _gen_job_counts(job)
+    status = job.get("status", "")
+    status_text = {
+        "running": "🟢 생성 중 · 창을 닫아도 서버에서 계속 진행됩니다",
+        "stopping": "🟡 멈추는 중 · 지금 지문을 끝낸 뒤 멈춥니다",
+        "stopped": "⏸️ 멈춤 · '다시 시작'을 누르면 남은 지문부터 이어서 진행합니다",
+        "done": "✅ 완료",
+    }.get(status, status)
+    finished = c["done"] + c["failed"]
+    st.markdown(f"**⚙️ 교재 생성 작업** — {status_text}")
+    st.progress(finished / max(1, c["total"]), text=f"{finished}/{c['total']} 지문 처리 · 실패 {c['failed']}개 · 남음 {c['pending']}개")
+    if job.get("current"):
+        st.caption(f"⏳ 지금 처리 중: {job['current']}")
+
+    b1, b2, b3, b4 = st.columns(4)
+    if status == "running":
+        if b1.button("⏸️ 생성 중단 (지금 지문 끝내고 멈춤)", use_container_width=True, key="gen_stop"):
+            _job_update(supabase if IS_CLOUD_DB else None, lambda j: (j.update(status="stopping"), _job_log(j, "⏸️ 중단 요청 — 지금 지문을 끝낸 뒤 멈춥니다.")))
+            st.rerun()
+    elif status in ("stopped", "stopping") and c["pending"]:
+        if b1.button("▶️ 다시 시작", type="primary", use_container_width=True, key="gen_resume"):
+            _job_update(supabase if IS_CLOUD_DB else None, lambda j: (j.update(status="running"), _job_log(j, "▶️ 다시 시작")))
+            start_gen_thread()
+            st.rerun()
+    if c["failed"] and status != "stopping":
+        if b2.button(f"🔁 실패한 {c['failed']}개 다시 시도", use_container_width=True, key="gen_retry_failed"):
+            def retry(j):
+                for it in j.get("items", []):
+                    if it.get("state") == "failed":
+                        it["state"], it["error"] = "pending", ""
+                j["status"] = "running"
+                _job_log(j, "🔁 실패한 지문 다시 시도")
+            _job_update(supabase if IS_CLOUD_DB else None, retry)
+            start_gen_thread()
+            st.rerun()
+    if b3.button("🔄 교재 목록 새로고침", use_container_width=True, key="gen_reload_libs"):
+        reload_libraries_from_db()
+        st.rerun()
+    if status in ("done", "stopped") and b4.button("🧹 작업 기록 지우기", use_container_width=True, key="gen_clear"):
+        _store_put(supabase if IS_CLOUD_DB else None, GEN_JOB_FILE, {})
+        st.rerun()
+
+    with st.expander("📜 작업 기록 / 실패한 지문", expanded=False):
+        failed = [it for it in job.get("items", []) if it.get("state") == "failed"]
+        for it in failed:
+            st.caption(f"❌ {it['label']} — {it.get('error', '')}")
+        st.code("\n".join(reversed(job.get("log", [])[-30:])) or "기록 없음", language=None)
+
+@st.fragment(run_every=5)
+def render_gen_job_live():
+    """작업이 진행 중일 때만 5초마다 상태를 새로 읽어 보여줌"""
+    job = load_gen_job()
+    c = _gen_job_counts(job)
+    # 지문이 완료될 때마다 화면의 교재 목록을 DB에서 다시 불러와, 화면이 오래된 목록으로 덮어쓰지 않게 함
+    seen = st.session_state.get("gen_seen_done")
+    if seen is not None and seen != c["done"]:
+        reload_libraries_from_db()
+    st.session_state.gen_seen_done = c["done"]
+    if job.get("status") in ("running", "stopping") and not gen_thread_alive():
+        start_gen_thread()  # 서버가 재시작된 경우 자동으로 이어서 진행
+    _render_gen_job_body(job)
+    if job.get("status") not in ("running", "stopping"):
+        st.rerun()  # 끝나면 자동 새로고침을 멈추고 일반 화면으로
+
+def render_gen_job_panel():
+    flash = st.session_state.pop("gen_flash", None)
+    if flash:
+        st.success(flash)
+    job = load_gen_job()
+    if not job.get("items"):
+        return
+    with st.container(border=True):
+        if job.get("status") in ("running", "stopping"):
+            render_gen_job_live()
+        else:
+            _render_gen_job_body(job)
 
 
 # -----------------------------
@@ -2951,8 +3111,23 @@ def normalize_mock_meta(year: str, month: str, grade: str) -> (str, str, str):
 def mock_exam_key(year: str, month: str, grade: str) -> str:
     return f"[{year}년 {month}월 {grade}]"
 
+PDF_INLINE_MAX_BYTES = 15_000_000  # 이보다 큰 PDF(교과서 전체 등)는 Gemini 파일 업로드로 보냄
+
+def pdf_to_part(uploaded):
+    """작은 PDF는 바로 첨부, 큰 PDF는 Gemini Files API로 올린 뒤 처리 완료를 기다려 첨부"""
+    data = uploaded.getvalue()
+    if len(data) <= PDF_INLINE_MAX_BYTES:
+        return types.Part.from_bytes(data=data, mime_type="application/pdf")
+    f = client.files.upload(file=io.BytesIO(data), config=types.UploadFileConfig(mime_type="application/pdf", display_name=uploaded.name[:100]))
+    for _ in range(60):
+        if str(getattr(f, "state", "")).upper().endswith("ACTIVE"):
+            break
+        time.sleep(3)
+        f = client.files.get(name=f.name)
+    return f
+
 def extract_mock_exam_passages(pdf_file, answer_file, model_name: str) -> Dict:
-    contents = [types.Part.from_bytes(data=pdf_file.getvalue(), mime_type="application/pdf")]
+    contents = [pdf_to_part(pdf_file)]
     answer_note = ""
     if answer_file is not None:
         ans_mime = answer_file.type if getattr(answer_file, "type", None) else "application/pdf"
@@ -2986,8 +3161,73 @@ def extract_mock_exam_passages(pdf_file, answer_file, model_name: str) -> Dict:
     return None
 
 def mock_number_sort_key(num: str):
+    """'18' → (18,), '41~42' → (41, 42), 교과서 '4-2' → (4, 2) 순서로 정렬"""
     nums = re.findall(r'\d+', str(num))
-    return int(nums[0]) if nums else 999
+    return tuple(int(n) for n in nums) if nums else (999,)
+
+# ---- 교과서 PDF → 단락(섹션)별 본문 원문 ----
+SCHEMA_TEXTBOOK = {
+    "type": "object",
+    "properties": {
+        "subject": {"type": "string", "description": "과목명 (예: 공통영어2, 영어I)"},
+        "publisher": {"type": "string", "description": "출판사(저자) (예: 능률(오), 천재(조), YBM(박))"},
+        "unit": {"type": "string", "description": "단원 (예: 4과)"},
+        "sections": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "number": {"type": "string", "description": "단원번호-순서 (예: 4-1, 4-2)"},
+                    "title": {"type": "string", "description": "섹션 제목 또는 소제목 (없으면 본문 / Read More 등)"},
+                    "text": {"type": "string", "description": "섹션의 영어 본문 원문"},
+                    "needs_review": {"type": "boolean"},
+                    "note": {"type": "string"}
+                },
+                "required": ["number", "title", "text", "needs_review", "note"]
+            }
+        }
+    },
+    "required": ["subject", "publisher", "unit", "sections"]
+}
+
+TEXTBOOK_PROMPT = """너는 대한민국 고등학교 영어 교과서 본문 정리 전문가다.
+업로드된 교과서 PDF(파일명: {fname})에서 **본문 읽기 지문(Reading)** 을 찾아 원문 그대로 옮기고, 교과서가 나눈 단락·페이지 구획대로 섹션을 나눠 JSON으로 반환하라.
+{hint}
+[포함]
+- 단원의 메인 본문(Reading)과 추가 읽기 지문(Read More, Further Reading 등). 추가 읽기 지문은 title에 그 이름을 적는다.
+[제외]
+- 듣기·말하기 대화문, 문제·활동(Check Up, Think & Talk 등), 어휘 목록, 한국어 해석, 각주(*), 그림 설명, 페이지 번호, 머리말·꼬리말.
+[나누는 규칙]
+- 교과서에 표시된 단락 번호·소제목·페이지 구획이 있으면 그대로 따른다. 없으면 내용 흐름에 따라 한 섹션이 5~10문장 정도가 되게 나눈다.
+- number는 "단원번호-순서" 형식(예: 4과의 첫 섹션 → "4-1", 둘째 → "4-2")으로 쓴다.
+- text는 원문 문장을 요약·의역·생략 없이 철자와 구두점 그대로 옮기고, 문단 구분은 빈 줄로 표시한다.
+- 글자가 흐리거나 페이지가 잘려 확실하지 않은 섹션은 needs_review를 true로 하고 note에 이유를 적는다.
+- subject, publisher, unit은 PDF 표지·머리말에서 파악한다."""
+
+def textbook_exam_key(subject: str, publisher: str, unit: str) -> str:
+    return "[" + re.sub(r'\s+', ' ', f"{subject} {publisher} {unit}").strip() + "]"
+
+def extract_textbook_sections(pdf_file, model_name: str, subject: str, publisher: str, unit: str) -> Dict:
+    known = ", ".join(f"{k}: {v}" for k, v in [("과목", subject), ("출판사", publisher), ("단원", unit)] if v)
+    hint = f"(사용자가 알려준 정보 → {known}. 이 정보를 우선 사용하라.)" if known else ""
+    contents = [pdf_to_part(pdf_file), TEXTBOOK_PROMPT.format(fname=pdf_file.name, hint=hint)]
+    for attempt in range(4):
+        try:
+            res = client.models.generate_content(
+                model=model_name, contents=contents,
+                config=types.GenerateContentConfig(temperature=0.1, response_mime_type="application/json", response_json_schema=SCHEMA_TEXTBOOK)
+            )
+            return json.loads(res.text.strip())
+        except Exception as e:
+            err_s = str(e).lower()
+            if attempt < 3 and any(k in err_s for k in ["503", "429", "overloaded", "unavailable", "quota", "high demand"]):
+                wait_t = 10 + attempt * 10
+                st.toast(f"⏳ 서버 대기 감지 ({pdf_file.name}). {wait_t}초 후 재시도...")
+                time.sleep(wait_t)
+                continue
+            st.error(f"❌ '{pdf_file.name}' 교과서 본문 추출 중 오류: {e}")
+            return None
+    return None
 
 def build_mock_excel_bytes(records: List[Dict]) -> bytes:
     """기존 '엑셀 원클릭 통합 생성' 탭에 그대로 올릴 수 있는 형식(라벨/지문/학교명/이미지명)"""
@@ -3209,87 +3449,141 @@ def render_mock_image_section(selected: List[Dict]):
                             st.error("❌ 이미지를 읽지 못했습니다.")
 
 def render_mock_exam_tab(text_model: str, api_delay: int, academy_name: str, school_name: str):
-    st.markdown("### 📝 모의고사 원문 라이브러리 (PDF 업로드 → 정답 반영 원문 복원 → 번호 클릭으로 교재 생성)")
-    st.info(
-        "💡 모의고사 시험지 PDF와 정답표를 올리면 AI가 **18~45번 지문을 정답이 반영된 원래 원문**으로 복원합니다. "
-        "(빈칸 채움, 순서 재배열, 삽입 문장 반영, 무관한 문장 삭제, 어법·어휘 수정) "
-        "복원 결과를 표에서 확인·수정한 뒤 저장하면, 아래에서 **년도·월·학년별로 번호를 클릭해 원하는 지문만 교재로 생성**할 수 있습니다."
-    )
-
-    # ---- 1) 업로드 & 복원 ----
-    with st.container(border=True):
-        st.markdown("##### 1️⃣ 모의고사 PDF 업로드 & 원문 복원")
-        u_col1, u_col2 = st.columns(2)
-        mock_pdf = u_col1.file_uploader("📄 모의고사 시험지 PDF", type=["pdf"], key="mock_pdf_uploader")
-        mock_ans = u_col2.file_uploader(
-            "✅ 정답표 (PDF 또는 이미지, 시험지 PDF 안에 정답표가 있으면 생략 가능)",
-            type=["pdf", "png", "jpg", "jpeg"], key="mock_ans_uploader"
+    st.markdown("### 📝 원문 라이브러리 (모의고사·교과서 PDF → 원문 저장 → 번호 클릭으로 교재 생성)")
+    kind_label = st.segmented_control("자료 종류", ["모의고사", "교과서"], default="모의고사", key="src_kind") or "모의고사"
+    is_textbook = kind_label == "교과서"
+    if is_textbook:
+        st.info(
+            "💡 교과서 PDF를 올리면 AI가 **본문(Reading)을 단락별로 나눠** `공통영어2 능률(오) 4과 4-1, 4-2…`처럼 원문을 저장합니다. "
+            "단원 하나만 담긴 PDF가 가장 정확하고, 교과서 전체 PDF도 올릴 수 있습니다(단원을 적어 주세요)."
         )
-        m_col1, m_col2, m_col3, m_col4 = st.columns([1, 1, 1, 2])
-        in_year = m_col1.text_input("연도 (비우면 자동 인식)", placeholder="예: 2026", key="mock_in_year")
-        in_month = m_col2.text_input("월 (비우면 자동 인식)", placeholder="예: 3", key="mock_in_month")
-        in_grade = m_col3.selectbox("학년", ["자동 인식", "고1", "고2", "고3"], key="mock_in_grade")
+    else:
+        st.info(
+            "💡 모의고사 시험지 PDF와 정답표를 올리면 AI가 **18~45번 지문을 정답이 반영된 원래 원문**으로 복원합니다. "
+            "(빈칸 채움, 순서 재배열, 삽입 문장 반영, 무관한 문장 삭제, 어법·어휘 수정) "
+            "복원 결과를 표에서 확인·수정한 뒤 저장하면, 아래에서 **년도·월·학년별로 번호를 클릭해 원하는 지문만 교재로 생성**할 수 있습니다."
+        )
 
-        if mock_pdf and m_col4.button("🧠 정답 반영 원문 복원 시작", type="primary", use_container_width=True, key="mock_extract_btn"):
-            with st.spinner(f"'{mock_pdf.name}'의 18~45번 지문을 정답 반영 원문으로 복원 중입니다... (1~2분 소요)"):
-                parsed = extract_mock_exam_passages(mock_pdf, mock_ans, text_model)
-            if parsed:
-                y, m, g = normalize_mock_meta(
-                    in_year.strip() or parsed.get("exam_year", ""),
-                    in_month.strip() or parsed.get("exam_month", ""),
-                    in_grade if in_grade != "자동 인식" else parsed.get("grade", "")
-                )
-                draft_rows = []
-                for ps in sorted(parsed.get("passages", []), key=lambda x: mock_number_sort_key(x.get("number", ""))):
-                    num = re.sub(r'\s*번\s*$', '', str(ps.get("number", "")).strip()).replace("-", "~")
-                    if not num:
-                        continue
-                    draft_rows.append({
-                        "번호": num,
-                        "유형": ps.get("q_type", ""),
-                        "정답": ps.get("answer", ""),
-                        "확인필요": bool(ps.get("needs_review", False)) or not parsed.get("answer_key_found", False),
-                        "복원 원문": ps.get("restored_text", "").strip(),
-                        "복원 메모": ps.get("note", ""),
-                    })
-                for k in ["mock_draft_editor", "mock_draft_year", "mock_draft_month", "mock_draft_grade"]:
-                    st.session_state.pop(k, None)
-                st.session_state.mock_draft = {
-                    "year": y, "month": m, "grade": g,
-                    "answer_key_found": parsed.get("answer_key_found", False),
-                    "source": mock_pdf.name,
-                    "rows": draft_rows
-                }
-                st.rerun()
+    # ---- 1) 업로드 & 원문 추출 ----
+    if is_textbook:
+        with st.container(border=True):
+            st.markdown("##### 1️⃣ 교과서 PDF 업로드 & 단락별 본문 추출")
+            tb_pdf = st.file_uploader("📘 교과서 PDF (단원 단위 권장)", type=["pdf"], key="tb_pdf_uploader")
+            t_col1, t_col2, t_col3, t_col4 = st.columns([1.2, 1.2, 1, 2])
+            tb_subject = t_col1.text_input("과목 (비우면 자동 인식)", placeholder="예: 공통영어2", key="tb_in_subject")
+            tb_publisher = t_col2.text_input("출판사(저자)", placeholder="예: 능률(오)", key="tb_in_publisher")
+            tb_unit = t_col3.text_input("단원", placeholder="예: 4과", key="tb_in_unit")
+            if tb_pdf and t_col4.button("📘 단락별 본문 추출 시작", type="primary", use_container_width=True, key="tb_extract_btn"):
+                with st.spinner(f"'{tb_pdf.name}'에서 본문을 단락별로 추출 중입니다... (1~3분 소요)"):
+                    parsed = extract_textbook_sections(tb_pdf, text_model, tb_subject.strip(), tb_publisher.strip(), tb_unit.strip())
+                if parsed:
+                    draft_rows = []
+                    for sec in sorted(parsed.get("sections", []), key=lambda x: mock_number_sort_key(x.get("number", ""))):
+                        num = str(sec.get("number", "")).strip()
+                        if not num:
+                            continue
+                        draft_rows.append({
+                            "번호": num, "유형": sec.get("title", ""), "정답": "",
+                            "확인필요": bool(sec.get("needs_review", False)),
+                            "복원 원문": sec.get("text", "").strip(), "복원 메모": sec.get("note", ""),
+                        })
+                    for k in ["mock_draft_editor", "tb_draft_subject", "tb_draft_publisher", "tb_draft_unit"]:
+                        st.session_state.pop(k, None)
+                    st.session_state.mock_draft = {
+                        "kind": "textbook",
+                        "subject": tb_subject.strip() or parsed.get("subject", ""),
+                        "publisher": tb_publisher.strip() or parsed.get("publisher", ""),
+                        "unit": tb_unit.strip() or parsed.get("unit", ""),
+                        "source": tb_pdf.name,
+                        "rows": draft_rows,
+                    }
+                    st.rerun()
+
+    if not is_textbook:
+        with st.container(border=True):
+            st.markdown("##### 1️⃣ 모의고사 PDF 업로드 & 원문 복원")
+            u_col1, u_col2 = st.columns(2)
+            mock_pdf = u_col1.file_uploader("📄 모의고사 시험지 PDF", type=["pdf"], key="mock_pdf_uploader")
+            mock_ans = u_col2.file_uploader(
+                "✅ 정답표 (PDF 또는 이미지, 시험지 PDF 안에 정답표가 있으면 생략 가능)",
+                type=["pdf", "png", "jpg", "jpeg"], key="mock_ans_uploader"
+            )
+            m_col1, m_col2, m_col3, m_col4 = st.columns([1, 1, 1, 2])
+            in_year = m_col1.text_input("연도 (비우면 자동 인식)", placeholder="예: 2026", key="mock_in_year")
+            in_month = m_col2.text_input("월 (비우면 자동 인식)", placeholder="예: 3", key="mock_in_month")
+            in_grade = m_col3.selectbox("학년", ["자동 인식", "고1", "고2", "고3"], key="mock_in_grade")
+
+            if mock_pdf and m_col4.button("🧠 정답 반영 원문 복원 시작", type="primary", use_container_width=True, key="mock_extract_btn"):
+                with st.spinner(f"'{mock_pdf.name}'의 18~45번 지문을 정답 반영 원문으로 복원 중입니다... (1~2분 소요)"):
+                    parsed = extract_mock_exam_passages(mock_pdf, mock_ans, text_model)
+                if parsed:
+                    y, m, g = normalize_mock_meta(
+                        in_year.strip() or parsed.get("exam_year", ""),
+                        in_month.strip() or parsed.get("exam_month", ""),
+                        in_grade if in_grade != "자동 인식" else parsed.get("grade", "")
+                    )
+                    draft_rows = []
+                    for ps in sorted(parsed.get("passages", []), key=lambda x: mock_number_sort_key(x.get("number", ""))):
+                        num = re.sub(r'\s*번\s*$', '', str(ps.get("number", "")).strip()).replace("-", "~")
+                        if not num:
+                            continue
+                        draft_rows.append({
+                            "번호": num,
+                            "유형": ps.get("q_type", ""),
+                            "정답": ps.get("answer", ""),
+                            "확인필요": bool(ps.get("needs_review", False)) or not parsed.get("answer_key_found", False),
+                            "복원 원문": ps.get("restored_text", "").strip(),
+                            "복원 메모": ps.get("note", ""),
+                        })
+                    for k in ["mock_draft_editor", "mock_draft_year", "mock_draft_month", "mock_draft_grade"]:
+                        st.session_state.pop(k, None)
+                    st.session_state.mock_draft = {
+                        "kind": "mock",
+                        "year": y, "month": m, "grade": g,
+                        "answer_key_found": parsed.get("answer_key_found", False),
+                        "source": mock_pdf.name,
+                        "rows": draft_rows
+                    }
+                    st.rerun()
 
     # ---- 2) 검수 & 저장 ----
     draft = st.session_state.get("mock_draft")
     if draft:
+        draft_is_tb = draft.get("kind") == "textbook"
         with st.container(border=True):
-            st.markdown("##### 2️⃣ 복원 결과 검수 (셀을 더블클릭해 수정 → 저장)")
+            st.markdown("##### 2️⃣ " + ("교과서 본문 검수" if draft_is_tb else "복원 결과 검수") + " (셀을 더블클릭해 수정 → 저장)")
             d_col1, d_col2, d_col3 = st.columns(3)
-            draft["year"] = d_col1.text_input("연도", value=draft["year"], key="mock_draft_year")
-            draft["month"] = d_col2.text_input("월", value=draft["month"], key="mock_draft_month")
-            draft["grade"] = d_col3.text_input("학년", value=draft["grade"], key="mock_draft_grade")
-            y, m, g = normalize_mock_meta(draft["year"], draft["month"], draft["grade"])
-            ekey = mock_exam_key(y, m, g)
+            if draft_is_tb:
+                draft["subject"] = d_col1.text_input("과목", value=draft["subject"], key="tb_draft_subject")
+                draft["publisher"] = d_col2.text_input("출판사(저자)", value=draft["publisher"], key="tb_draft_publisher")
+                draft["unit"] = d_col3.text_input("단원", value=draft["unit"], key="tb_draft_unit")
+                meta_ok = bool(draft["subject"].strip() and draft["publisher"].strip() and draft["unit"].strip())
+                ekey = textbook_exam_key(draft["subject"], draft["publisher"], draft["unit"])
+            else:
+                draft["year"] = d_col1.text_input("연도", value=draft["year"], key="mock_draft_year")
+                draft["month"] = d_col2.text_input("월", value=draft["month"], key="mock_draft_month")
+                draft["grade"] = d_col3.text_input("학년", value=draft["grade"], key="mock_draft_grade")
+                y, m, g = normalize_mock_meta(draft["year"], draft["month"], draft["grade"])
+                meta_ok = bool(y and m and g)
+                ekey = mock_exam_key(y, m, g)
+                if not draft.get("answer_key_found"):
+                    st.warning("⚠️ 정답표를 찾지 못해 AI가 직접 푼 정답으로 복원했습니다. **확인필요** 표시된 문항을 꼭 검토해주세요.")
 
-            if not draft.get("answer_key_found"):
-                st.warning("⚠️ 정답표를 찾지 못해 AI가 직접 푼 정답으로 복원했습니다. **확인필요** 표시된 문항을 꼭 검토해주세요.")
             review_cnt = sum(1 for r in draft["rows"] if r.get("확인필요"))
-            st.caption(f"📌 저장될 이름: **{ekey}** · 지문 {len(draft['rows'])}개 · 확인필요 {review_cnt}개 · 원본 파일: {draft.get('source', '')}")
+            st.caption(f"📌 저장될 이름: **{md_safe(ekey)}** · 지문 {len(draft['rows'])}개 · 확인필요 {review_cnt}개 · 원본 파일: {draft.get('source', '')}")
 
-            exists = any(p.get("exam_key") == ekey for p in st.session_state.saved_mock)
-            if exists:
-                st.info(f"ℹ️ {ekey} 시험이 이미 라이브러리에 있습니다. 저장하면 같은 번호의 지문은 새 내용으로 교체됩니다.")
+            if any(p.get("exam_key") == ekey for p in st.session_state.saved_mock):
+                st.info(f"ℹ️ {md_safe(ekey)} 자료가 이미 라이브러리에 있습니다. 저장하면 같은 번호의 지문은 새 내용으로 교체됩니다.")
 
+            editor_cols = ["번호", "유형", "확인필요", "복원 원문", "복원 메모"] if draft_is_tb else ["번호", "유형", "정답", "확인필요", "복원 원문", "복원 메모"]
             edited = st.data_editor(
-                pd.DataFrame(draft["rows"], columns=["번호", "유형", "정답", "확인필요", "복원 원문", "복원 메모"]),
+                pd.DataFrame(draft["rows"], columns=editor_cols),
                 num_rows="dynamic",
                 use_container_width=True,
                 height=420,
                 column_config={
-                    "복원 원문": st.column_config.TextColumn(width="large"),
+                    "유형": st.column_config.TextColumn("단락 제목" if draft_is_tb else "유형"),
+                    "복원 원문": st.column_config.TextColumn("본문 원문" if draft_is_tb else "복원 원문", width="large"),
                     "확인필요": st.column_config.CheckboxColumn(),
                 },
                 key="mock_draft_editor"
@@ -3300,7 +3594,11 @@ def render_mock_exam_tab(text_model: str, api_delay: int, academy_name: str, sch
                 if nums:
                     v_num = st.selectbox("번호", nums, key="mock_draft_view_num")
                     v_row = edited[edited["번호"].astype(str) == v_num].iloc[0]
-                    st.caption(f"유형: {v_row.get('유형', '')} · 정답: {v_row.get('정답', '')} · 메모: {v_row.get('복원 메모', '')}")
+                    meta_bits = [f"{'단락 제목' if draft_is_tb else '유형'}: {v_row.get('유형', '')}"]
+                    if not draft_is_tb:
+                        meta_bits.append(f"정답: {v_row.get('정답', '')}")
+                    meta_bits.append(f"메모: {v_row.get('복원 메모', '')}")
+                    st.caption(" · ".join(meta_bits))
                     with st.container(border=True):
                         st.markdown(
                             f'<div style="white-space:pre-wrap; line-height:1.7; font-size:14px;">{esc(v_row.get("복원 원문", ""))}</div>',
@@ -3308,9 +3606,9 @@ def render_mock_exam_tab(text_model: str, api_delay: int, academy_name: str, sch
                         )
 
             s_col1, s_col2 = st.columns([3, 1])
-            if s_col1.button(f"💾 {ekey} 원문 라이브러리에 저장", type="primary", use_container_width=True, key="mock_draft_save"):
-                if not (y and m and g):
-                    st.error("연도·월·학년을 모두 입력해주세요.")
+            if s_col1.button(f"💾 {md_safe(ekey)} 원문 라이브러리에 저장", type="primary", use_container_width=True, key="mock_draft_save"):
+                if not meta_ok:
+                    st.error("과목·출판사·단원을 모두 입력해주세요." if draft_is_tb else "연도·월·학년을 모두 입력해주세요.")
                 else:
                     new_records = []
                     for _, r in edited.iterrows():
@@ -3318,65 +3616,75 @@ def render_mock_exam_tab(text_model: str, api_delay: int, academy_name: str, sch
                         body = str(r.get("복원 원문", "")).strip()
                         if not num or num == "nan" or not body or body == "nan":
                             continue
-                        new_records.append({
+                        rec = {
                             "id": str(uuid.uuid4()),
-                            "label": f"{ekey} {num}번",
                             "exam_key": ekey,
-                            "year": y, "month": m, "grade": g,
                             "number": num,
                             "q_type": str(r.get("유형", "") or ""),
-                            "answer": str(r.get("정답", "") or ""),
                             "needs_review": bool(r.get("확인필요", False)),
                             "note": str(r.get("복원 메모", "") or ""),
                             "body_text": body,
-                        })
+                        }
+                        if draft_is_tb:
+                            # 교과서: [공통영어2 능률(오) 4과] 4-1
+                            rec.update({"label": f"{ekey} {num}", "source_type": "textbook",
+                                        "subject": draft["subject"].strip(), "publisher": draft["publisher"].strip(), "unit": draft["unit"].strip()})
+                        else:
+                            rec.update({"label": f"{ekey} {num}번", "source_type": "mock",
+                                        "year": y, "month": m, "grade": g, "answer": str(r.get("정답", "") or "")})
+                        new_records.append(rec)
                     new_labels = {p["label"] for p in new_records}
                     st.session_state.saved_mock = [p for p in st.session_state.saved_mock if p.get("label") not in new_labels] + new_records
                     save_to_file(MOCK_FILE, st.session_state.saved_mock)
                     del st.session_state["mock_draft"]
-                    st.success(f"✅ {ekey} 지문 {len(new_records)}개를 저장했습니다!")
+                    st.session_state.gen_flash = f"✅ {ekey} 지문 {len(new_records)}개를 원문 라이브러리에 저장했습니다!"
                     st.rerun()
             if s_col2.button("✖️ 검수 취소", use_container_width=True, key="mock_draft_cancel"):
                 del st.session_state["mock_draft"]
                 st.rerun()
 
-    # ---- 3) 년도/월/학년 → 번호 클릭 선택 ----
+    # ---- 3) 모의고사(연도/월/학년) 또는 교과서(과목/출판사/단원) → 번호 클릭 선택 ----
     saved_mock: List[Dict] = st.session_state.saved_mock
-    st.markdown("##### 3️⃣ 모의고사 선택 → 번호 클릭 → 교재 생성")
-    if not saved_mock:
-        st.info("저장된 모의고사 원문이 없습니다. 위에서 모의고사 PDF를 업로드해 복원해주세요.")
-        return
-
-    years = sorted({p.get("year", "") for p in saved_mock if p.get("year")}, reverse=True)
-    f_col1, f_col2, f_col3 = st.columns(3)
-    sel_year = f_col1.selectbox("📅 연도", ["전체"] + years, key="mock_f_year")
-    months = sorted({p.get("month", "") for p in saved_mock if p.get("month") and (sel_year == "전체" or p.get("year") == sel_year)}, key=lambda x: int(x) if x.isdigit() else 99)
-    sel_month = f_col2.selectbox("🗓️ 월", ["전체"] + months, key="mock_f_month")
-    grades = sorted({p.get("grade", "") for p in saved_mock if p.get("grade")})
-    sel_grade = f_col3.selectbox("🎓 학년", ["전체"] + grades, key="mock_f_grade")
+    kind_items = [p for p in saved_mock if (p.get("source_type") == "textbook") == is_textbook]
+    st.markdown(f"##### 3️⃣ {kind_label} 선택 → 번호 클릭 → 교재 생성")
+    if not kind_items:
+        st.info(f"저장된 {kind_label} 원문이 없습니다. 위에서 {kind_label} PDF를 업로드해 저장해주세요.")
 
     exams: Dict[str, List[Dict]] = {}
-    for p in saved_mock:
-        if sel_year != "전체" and p.get("year") != sel_year:
-            continue
-        if sel_month != "전체" and p.get("month") != sel_month:
-            continue
-        if sel_grade != "전체" and p.get("grade") != sel_grade:
+    f_col1, f_col2, f_col3 = st.columns(3)
+    if is_textbook:
+        subjects = sorted({p.get("subject", "") for p in kind_items if p.get("subject")})
+        sel_a = f_col1.selectbox("📘 과목", ["전체"] + subjects, key="tb_f_subject")
+        publishers = sorted({p.get("publisher", "") for p in kind_items if p.get("publisher") and sel_a in ("전체", p.get("subject"))})
+        sel_b = f_col2.selectbox("🏢 출판사", ["전체"] + publishers, key="tb_f_publisher")
+        units = sorted({p.get("unit", "") for p in kind_items if p.get("unit")}, key=natural_sort_key)
+        sel_c = f_col3.selectbox("📑 단원", ["전체"] + units, key="tb_f_unit")
+        fields = ("subject", "publisher", "unit")
+    else:
+        years = sorted({p.get("year", "") for p in kind_items if p.get("year")}, reverse=True)
+        sel_a = f_col1.selectbox("📅 연도", ["전체"] + years, key="mock_f_year")
+        months = sorted({p.get("month", "") for p in kind_items if p.get("month") and sel_a in ("전체", p.get("year"))}, key=lambda x: int(x) if x.isdigit() else 99)
+        sel_b = f_col2.selectbox("🗓️ 월", ["전체"] + months, key="mock_f_month")
+        grades = sorted({p.get("grade", "") for p in kind_items if p.get("grade")})
+        sel_c = f_col3.selectbox("🎓 학년", ["전체"] + grades, key="mock_f_grade")
+        fields = ("year", "month", "grade")
+    for p in kind_items:
+        if any(sel != "전체" and p.get(fld) != sel for sel, fld in zip((sel_a, sel_b, sel_c), fields)):
             continue
         exams.setdefault(p.get("exam_key", extract_group_prefix(p["label"])), []).append(p)
 
     def exam_sort_key(k: str):
-        items = exams[k]
-        y = int(items[0].get("year", 0) or 0)
-        m = int(items[0].get("month", 0) or 0)
-        return (-y, -m, items[0].get("grade", ""))
+        first = exams[k][0]
+        if is_textbook:
+            return (first.get("subject", ""), first.get("publisher", ""), natural_sort_key(first.get("unit", "")))
+        return (-int(first.get("year", 0) or 0), -int(first.get("month", 0) or 0), first.get("grade", ""))
 
     # 위젯 상태는 화면에 안 그려지면 사라지므로, 시험별 선택 번호를 별도로 보관 (필터를 바꿔도 선택 유지)
     pick_store: Dict[str, List[str]] = st.session_state.setdefault("mock_pick_store", {})
 
     with st.container(height=420, border=True):
         if not exams:
-            st.caption("조건에 맞는 모의고사가 없습니다.")
+            st.caption(f"조건에 맞는 {kind_label}가 없습니다.")
         for ekey in sorted(exams.keys(), key=exam_sort_key):
             items = sorted(exams[ekey], key=lambda x: mock_number_sort_key(x.get("number", "")))
             num_to_item = {p["number"]: p for p in items}
@@ -3384,7 +3692,7 @@ def render_mock_exam_tab(text_model: str, api_delay: int, academy_name: str, sch
             if pill_key not in st.session_state:
                 st.session_state[pill_key] = [n for n in pick_store.get(ekey, []) if n in num_to_item]
             h_col1, h_col2, h_col3 = st.columns([4, 1, 1])
-            h_col1.markdown(f"**{ekey}** · 지문 {len(items)}개")
+            h_col1.markdown(f"**{md_safe(ekey)}** · 지문 {len(items)}개")
             if h_col2.button("전체 선택", key=f"mock_all_{ekey}", use_container_width=True):
                 st.session_state[pill_key] = list(num_to_item.keys())
             if h_col3.button("선택 해제", key=f"mock_none_{ekey}", use_container_width=True):
@@ -3393,18 +3701,19 @@ def render_mock_exam_tab(text_model: str, api_delay: int, academy_name: str, sch
                 ekey,
                 options=list(num_to_item.keys()),
                 selection_mode="multi",
-                format_func=lambda n, m=num_to_item: f"{n}번 ⚠️" if m[n].get("needs_review") else f"{n}번",
+                format_func=lambda n, m=num_to_item, tb=is_textbook: (n if tb else f"{n}번") + (" ⚠️" if m[n].get("needs_review") else ""),
                 key=pill_key,
                 label_visibility="collapsed"
             )
             pick_store[ekey] = list(picked or [])
 
-    # 모든 시험의 선택 번호 모으기 (필터로 숨겨진 시험의 선택도 유지)
+    # 모든 시험·교과서의 선택 번호 모으기 (필터·종류를 바꿔도 선택 유지, 모의고사와 교과서를 섞어 선택 가능)
     by_label = {p["label"]: p for p in saved_mock}
+    by_key_num = {(p.get("exam_key"), p.get("number")): p for p in saved_mock}
     selected: List[Dict] = []
     for ekey, nums in pick_store.items():
         for num in nums:
-            item = by_label.get(f"{ekey} {num}번")
+            item = by_key_num.get((ekey, num))
             if item:
                 selected.append(item)
     selected.sort(key=natural_sort_key)
@@ -3462,9 +3771,12 @@ def render_mock_exam_tab(text_model: str, api_delay: int, academy_name: str, sch
             if not (mdo_v or mdo_a or mdo_c or mdo_w):
                 st.warning("생성할 교재 종류를 최소 1개 이상 체크해주세요.")
             else:
-                rows = [{"label": p["label"], "text": p["body_text"], "school": "", "img_n": "", "img_path": p.get("image_path", "")} for p in selected]
-                run_all_in_one_generation(rows, {}, mdo_v, mdo_a, mdo_c, mdo_w, text_model, api_delay, academy_name, school_name)
-                st.info("👉 생성된 교재는 각 교재 탭(한판승·Self-Note·Core·Voca)에서 같은 이름으로 확인·렌더링할 수 있습니다.")
+                rows = [{"label": p["label"], "text": p["body_text"], "school": "", "img_path": p.get("image_path", "")} for p in selected]
+                types_list = [t for t, on in [("victory", mdo_v), ("anatomy", mdo_a), ("core", mdo_c), ("voca", mdo_w)] if on]
+                n_added = enqueue_generation(rows, types_list, text_model, api_delay, academy_name, school_name)
+                st.session_state.gen_flash = f"✅ {n_added}개 지문을 생성 작업에 추가했습니다. 창을 닫아도 서버에서 계속 진행됩니다."
+                st.rerun()
+        st.caption("👉 생성된 교재는 각 교재 탭(한판승·Self-Note·Core·Voca)에서 같은 이름으로 확인·렌더링할 수 있습니다.")
 
 
 # -----------------------------
@@ -3599,9 +3911,14 @@ CSS_ANATOMY = build_css_anatomy(h_url, f_url, e_url)
 CSS_CORE = build_css_core(h_url, f_url, e_url)
 CSS_VOCA = build_css_voca(h_url, f_url)
 
+# 진행 중이거나 남아 있는 교재 생성 작업 (어느 탭에서든 보이도록 탭 위에 표시)
+# 작업이 없어도 빈 칸을 항상 만들어 두어, 작업 칸이 생기거나 사라질 때 보고 있던 탭이 첫 탭으로 돌아가지 않게 함
+with st.container():
+    render_gen_job_panel()
+
 tab1, tab_mock, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "🚀 엑셀 원클릭 통합 생성",
-    "📝 모의고사 원문 라이브러리",
+    "📝 원문 라이브러리 (모의고사·교과서)",
     "🏆 Anatomy One-Shot (한판승)",
     "🦅 Anatomy Self-Note",
     "💎 Anatomy Core",
@@ -3637,14 +3954,24 @@ with tab1:
                 raw_text = r.get('passage', r.get('지문', ''))
                 if pd.isna(raw_text) or not str(raw_text).strip():
                     continue
+                excel_school = r.get('school', r.get('학교명', ''))
+                img_name = str(r.get('image_name', r.get('이미지명', ''))).strip()
+                img_path = ""
+                if img_dict.get(img_name):
+                    # 업로드한 이미지는 교재용 크기(1280px JPEG)로 줄여 저장
+                    raw_img = base64.b64decode(img_dict[img_name].split(",", 1)[1])
+                    img_path = save_booklet_image(raw_img, f"xl_{hashlib.md5(raw_img).hexdigest()[:10]}")
                 rows.append({
                     "label": clean_label(r.get('label', r.get('라벨', f'지문_{i+1}'))),
                     "text": str(raw_text).strip(),
-                    "school": str(r.get('school', r.get('학교명', ''))),
-                    "img_n": str(r.get('image_name', r.get('이미지명', ''))).strip()
+                    "school": str(excel_school).strip() if pd.notna(excel_school) and str(excel_school).strip() not in ["", "nan"] else "",
+                    "img_path": img_path,
                 })
 
-            run_all_in_one_generation(rows, img_dict, do_v, do_a, do_c, do_w, text_model, api_delay, academy_name, school_name)
+            types_list = [t for t, on in [("victory", do_v), ("anatomy", do_a), ("core", do_c), ("voca", do_w)] if on]
+            n_added = enqueue_generation(rows, types_list, text_model, api_delay, academy_name, school_name)
+            st.session_state.gen_flash = f"✅ {n_added}개 지문을 생성 작업에 추가했습니다. 창을 닫아도 서버에서 계속 진행됩니다."
+            st.rerun()
 
 with tab_mock:
     render_mock_exam_tab(text_model, api_delay, academy_name, school_name)
