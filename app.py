@@ -1219,7 +1219,8 @@ def build_css_victory(h_img, f_img, e_img):
     .analysis-table td {{ padding-bottom: 15px; }} 
     .eng-box {{ padding: 10px 14px 15px 14px; font-weight: 700; color: #1e293b; background: #fdfdfd; border-top: 1px solid #dee2e6; border-left: 1px solid #dee2e6; border-right: 1px solid #dee2e6; border-top-left-radius: 8px; border-top-right-radius: 8px; border-bottom: 1px dashed #e2e8f0; font-size: 13px; line-height: 2.3; word-break: keep-all; }}
     ruby.syntax-ruby {{ ruby-position: under; ruby-align: center; margin: 0 2px; }}
-    ruby.syntax-ruby rt {{ font-weight: 900; font-size: 0.7em; line-height: 1; margin-top: 2px; }}
+    ruby.syntax-ruby rt {{ font-weight: 900; font-size: 0.7em; line-height: 1; margin-top: 2px; white-space: nowrap; overflow-wrap: normal; word-break: keep-all; }}
+    .gp-num, .sent-no {{ white-space: nowrap; overflow-wrap: normal; }}
     .st-S span.syntax-text {{ border-bottom: 2px solid #e11d48; padding-bottom: 1px; }} .st-S rt {{ color: #e11d48; }}
     .st-V span.syntax-text {{ border-bottom: 2px solid #2563eb; padding-bottom: 1px; }} .st-V rt {{ color: #2563eb; }}
     .st-O span.syntax-text {{ border-bottom: 2px solid #16a34a; padding-bottom: 1px; }} .st-O rt {{ color: #16a34a; }}
