@@ -2930,6 +2930,20 @@ def _generate_item(sb_factory, gclient, item: Dict, opts: Dict, dna_rules: str, 
                         errors.append(err)
         return errors
 
+    # 엑셀 탭에서 'AI 이미지 생성'을 켠 지문: 한판승·Self-Note에 넣을 이미지를 먼저 만듦 (실패해도 교재는 이미지 없이 계속 생성)
+    sb_check = sb_factory() if item.get("gen_image") and not item.get("img_path") else None
+    needs_picture = [t for t, fp, _ in GEN_TYPES if t in ("victory", "anatomy") and t in wanted
+                     and not any(p.get("label") == item["label"] for p in (_store_get(sb_check, fp, []) or []))] if item.get("gen_image") and not item.get("img_path") else []
+    if needs_picture:
+        heartbeat()
+        raw, img_err = generate_passage_image(item["text"], [], item.get("image_model") or IMAGE_MODELS[0], item.get("image_style", ""))
+        img_path = save_booklet_image(raw, f"xl_{hashlib.md5(item['label'].encode()).hexdigest()[:10]}", sb_client=sb_factory(), quiet=True) if raw else ""
+        if img_path:
+            item["img_path"] = img_path
+            logs.append(f"🎨 이미지 생성 완료: {item['label']}")
+        else:
+            logs.append(f"⚠️ 이미지 생성 실패({(img_err or '저장 실패')[:80]}) → 이미지 없이 교재 생성: {item['label']}")
+
     errors = run_parallel([t for t in ("victory", "anatomy", "core") if t in wanted])
     core_failed = "core" in wanted and any(GEN_TYPE_NAMES["core"] in e for e in errors)
     if "voca" in wanted and not core_failed:
@@ -2980,6 +2994,9 @@ def gen_worker_main(api_key: str, sb_url: str, sb_key: str):
                     if it.get("id") == item["id"]:
                         it["state"] = "done" if ok else "failed"
                         it["error"] = err
+                        # 만든 이미지를 기억해 두어 '실패한 지문 다시 시도' 때 이미지를 또 만들지 않게 함
+                        if item.get("img_path"):
+                            it["img_path"] = item["img_path"]
                 for m in logs[-8:]:
                     _job_log(j, m)
                 if not ok:
@@ -3036,6 +3053,8 @@ def enqueue_generation(rows: List[Dict], types_list: List[str], text_model: str,
                 continue
             job["items"].append({"id": str(uuid.uuid4()), "label": r["label"], "text": r["text"],
                                  "school": r.get("school", ""), "img_path": r.get("img_path", ""),
+                                 "gen_image": bool(r.get("gen_image")), "image_style": r.get("image_style", ""),
+                                 "image_model": r.get("image_model", ""),
                                  "types": list(types_list), "state": "pending", "error": ""})
             added["n"] += 1
         _job_log(job, f"➕ {added['n']}개 지문 추가 ({', '.join(GEN_TYPE_NAMES[t] for t in types_list)})")
@@ -3340,18 +3359,43 @@ IMAGE_MODELS = ["gemini-3.1-flash-image", "gemini-3-pro-image"]
 IMAGE_PARALLEL = 4
 BOOKLET_IMG_MAX_SIDE = 1280
 
-MOCK_IMAGE_PROMPT = """Create one illustration for a Korean high school English textbook page, based on the English passage below.
+# 지문마다 화풍을 바꿔 학생들이 지루하지 않게 함 (화면 이름, 프롬프트 지시)
+IMAGE_STYLES = [
+    ("영화 같은 실사 장면", "a cinematic photorealistic still shot on location (outdoors or in the real place where the story happens), dramatic natural light"),
+    ("수채화 동화 일러스트", "a soft, colorful storybook watercolor illustration with hand-drawn charm"),
+    ("3D 애니메이션 장면", "a bright, expressive 3D animated movie still, playful character acting and vivid colors"),
+    ("클레이 / 미니어처", "a cute claymation / tilt-shift miniature diorama with tactile handmade textures"),
+    ("포스터 일러스트", "a bold flat vector poster illustration with strong shapes and a limited vibrant palette"),
+    ("초현실 은유 아트", "a surreal conceptual artwork that turns the main idea into one striking visual metaphor"),
+    ("다큐멘터리 사진", "a documentary / National Geographic style photograph of the real subject (nature, science, history or society)"),
+    ("그래픽 노블 한 컷", "a dynamic graphic-novel panel with ink lines, dramatic angle and cel shading"),
+]
+IMAGE_STYLE_AUTO = "자동 (지문마다 다양하게)"
 
-[Style - match the attached reference images exactly]
-- Cinematic, photorealistic scene, like a still from a movie, 16:9 landscape.
-- Warm, moody practical lighting (lamps, window light), rich environmental detail and props that tell the story.
-- Real people and objects drawn from the passage's situation or a concrete metaphor of its main idea.
-- Include 2-4 short English text elements inside the scene (a poster, sign, note, board, book cover) that state the passage's key idea or keywords. Spell every word correctly. No Korean text.
-- Do NOT copy the people, places or text of the reference images; use them only for visual style.
-- No watermark, no logo, no border, no caption outside the scene.
+MOCK_IMAGE_PROMPT = """Create one picture for a Korean high school English textbook page that makes the English passage below easy and fun to grasp at a glance.
+
+[What to show]
+- First decide the single most vivid, concrete image of this passage: the actual situation, place, event, creature, object or experiment it talks about, or one clear visual metaphor of its main idea.
+- Show it in the place where it really happens (outdoors, nature, city, lab, stadium, history, space, ocean, etc.).
+- Avoid generic office or study scenes: NO people sitting around a desk or table, NO meetings, NO laptops or paperwork, NO classroom or library, unless the passage is literally about that place.
+
+[Style]
+- Render it as {style}.
+- 16:9 landscape, one clear focal point, readable at a small size on a printed page, cheerful or intriguing mood.
+- Do not put any words, letters or numbers in the picture (no signs, labels or speech bubbles), so nothing can be misspelled.
+- No watermark, no logo, no border, no caption outside the picture.{ref_note}
 
 [Passage]
 \"\"\"{passage}\"\"\""""
+
+def pick_image_styles(n: int, choice: str) -> List[str]:
+    """선택한 화풍을 n개 지문에 배정. '자동'이면 섞어서 돌아가며 배정해 이웃한 지문끼리 화풍이 겹치지 않게 함."""
+    if choice != IMAGE_STYLE_AUTO:
+        directive = next((d for name, d in IMAGE_STYLES if name == choice), IMAGE_STYLES[0][1])
+        return [directive] * n
+    order = [d for _, d in IMAGE_STYLES]
+    random.shuffle(order)
+    return [order[i % len(order)] for i in range(n)]
 
 def mock_image_src(p: Dict) -> str:
     """st.image에 넘길 이미지 위치 (로컬 파일 우선, 없으면 Supabase 공개 URL)"""
@@ -3403,10 +3447,12 @@ def default_style_reference_files(limit: int = 2) -> List[str]:
             break
     return files
 
-def generate_passage_image(passage: str, style_refs: List[bytes], model_name: str) -> (bytes, str):
-    """(이미지 bytes, 오류 메시지) 반환. 동시 생성 스레드에서 호출되므로 st.* 를 쓰지 않는다."""
+def generate_passage_image(passage: str, style_refs: List[bytes], model_name: str, style: str = "") -> (bytes, str):
+    """(이미지 bytes, 오류 메시지) 반환. 동시 생성 스레드에서 호출되므로 st.* 를 쓰지 않는다.
+    참고 이미지는 직접 올린 경우에만 보냄 (입력이 줄어 비용도 적음)."""
     contents = [types.Part.from_bytes(data=b, mime_type="image/jpeg") for b in style_refs if b]
-    contents.append(MOCK_IMAGE_PROMPT.format(passage=passage))
+    ref_note = "\n- Match the color, lighting and rendering feel of the attached reference images, but draw a completely new scene for this passage (do not copy their people, places or text)." if contents else ""
+    contents.append(MOCK_IMAGE_PROMPT.format(passage=passage, style=style or IMAGE_STYLES[0][1], ref_note=ref_note))
     last_err = ""
     for attempt in range(3):
         try:
@@ -3431,8 +3477,9 @@ def generate_passage_image(passage: str, style_refs: List[bytes], model_name: st
             return b"", last_err
     return b"", last_err
 
-def save_booklet_image(raw: bytes, name_prefix: str) -> str:
-    """교재용으로 1280px JPEG로 줄여 로컬 + Supabase Storage에 저장 (장당 약 200~300KB)"""
+def save_booklet_image(raw: bytes, name_prefix: str, sb_client=None, quiet: bool = False) -> str:
+    """교재용으로 1280px JPEG로 줄여 로컬 + Supabase Storage에 저장 (장당 약 200~300KB)
+    sb_client/quiet: 백그라운드 생성 작업에서 호출할 때 자기 DB 연결을 쓰고 st.* 를 쓰지 않기 위함"""
     from PIL import Image
     try:
         im = Image.open(io.BytesIO(raw)).convert("RGB")
@@ -3449,11 +3496,13 @@ def save_booklet_image(raw: bytes, name_prefix: str) -> str:
         f.write(jpg)
     if IS_CLOUD_DB:
         try:
-            supabase.storage.from_("image_assets").upload(
+            (sb_client or supabase).storage.from_("image_assets").upload(
                 path=filename, file=jpg,
                 file_options={"content-type": "image/jpeg", "upsert": "true"}
             )
         except Exception as e:
+            if quiet:
+                return ""  # 클라우드에 못 올린 이미지는 배포 서버에서 사라지므로 연결하지 않음
             st.warning(f"⚠️ 이미지 클라우드 업로드 실패 ({filename}): {e}")
     return img_path
 
@@ -3476,32 +3525,37 @@ def set_mock_image(p: Dict, img_path: str):
 
 def render_mock_image_section(selected: List[Dict]):
     with st.container(border=True):
-        st.markdown("##### 🎨 선택 지문 이미지 생성 (기존 교재 이미지 스타일 그대로)")
-        st.caption("💡 기존 한판승 교재 이미지 2장을 스타일 참고로 자동 사용합니다. 다른 스타일을 원하면 참고 이미지를 직접 올려주세요. 만든 이미지는 이 지문으로 생성하는 한판승·Self-Note 교재에 자동으로 들어갑니다.")
+        st.markdown("##### 🎨 선택 지문 이미지 생성")
+        st.caption("💡 지문 내용을 가장 잘 보여주는 장면을 지문마다 다른 화풍(실사·수채화·3D 애니메이션·클레이·포스터 등)으로 그립니다. 만든 이미지는 이 지문으로 생성하는 한판승·Self-Note 교재에 자동으로 들어갑니다.")
         i_col1, i_col2 = st.columns([2, 1])
-        ref_uploads = i_col1.file_uploader("🖼️ 스타일 참고 이미지 (선택, 여러 장 가능)", type=["png", "jpg", "jpeg"], accept_multiple_files=True, key="mock_style_refs")
+        img_style = i_col1.selectbox("🖌️ 화풍", [IMAGE_STYLE_AUTO] + [name for name, _ in IMAGE_STYLES], key="mock_img_style")
+        with i_col1.expander("🖼️ 원하는 느낌의 참고 이미지 올리기 (선택)", expanded=False):
+            ref_uploads = st.file_uploader("참고 이미지 (여러 장 가능)", type=["png", "jpg", "jpeg"], accept_multiple_files=True, key="mock_style_refs")
+            use_book_style = st.checkbox("기존 한판승 교재 이미지 느낌 따라하기 (참고 이미지 2장 자동 첨부)", value=False, key="mock_use_book_style")
         img_model = i_col2.selectbox("🎨 이미지 모델", IMAGE_MODELS, key="mock_img_model", help="gemini-3.1-flash-image: 빠르고 저렴(교재용 권장) / gemini-3-pro-image: 더 정교하지만 비싸고 느림")
         redo = i_col2.checkbox("이미 있는 이미지도 다시 만들기", value=False, key="mock_img_redo")
 
+        # 참고 이미지는 직접 고른 경우에만 첨부 (없으면 입력이 줄어 비용이 적고 화풍도 자유로움)
         if ref_uploads:
             style_refs = [shrink_image_bytes(u.getvalue()) for u in ref_uploads]
-        else:
+        elif use_book_style:
             style_refs = [load_style_reference_bytes(fn) for fn in default_style_reference_files()]
+        else:
+            style_refs = []
         style_refs = [b for b in style_refs if b]
         if style_refs:
-            st.image(style_refs, width=160, caption=[f"참고 {i+1}" for i in range(len(style_refs))])
-        else:
-            st.warning("⚠️ 스타일 참고 이미지를 불러오지 못했습니다. 참고 이미지를 직접 올려주세요.")
+            st.image(style_refs, width=120, caption=[f"참고 {i+1}" for i in range(len(style_refs))])
 
         targets = [p for p in selected if redo or not p.get("image_path")]
-        if st.button(f"🎨 이미지 생성 ({len(targets)}개, {IMAGE_PARALLEL}장씩 동시 생성)", type="primary", use_container_width=True, disabled=not targets or not style_refs, key="mock_img_gen_btn"):
+        styles_for = dict(zip([p["id"] for p in targets], pick_image_styles(len(targets), img_style)))
+        if st.button(f"🎨 이미지 생성 ({len(targets)}개, {IMAGE_PARALLEL}장씩 동시 생성)", type="primary", use_container_width=True, disabled=not targets, key="mock_img_gen_btn"):
             from concurrent.futures import ThreadPoolExecutor, as_completed
             prog = st.progress(0)
             status = st.empty()
             status.info(f"⏳ 이미지 {len(targets)}개 생성 중... ({IMAGE_PARALLEL}장씩 동시에 진행, 장당 약 20초)")
             done, errors = 0, []
             with ThreadPoolExecutor(max_workers=IMAGE_PARALLEL) as pool:
-                futures = {pool.submit(generate_passage_image, p.get("body_text", ""), style_refs, img_model): p for p in targets}
+                futures = {pool.submit(generate_passage_image, p.get("body_text", ""), style_refs, img_model, styles_for[p["id"]]): p for p in targets}
                 for n, fut in enumerate(as_completed(futures), start=1):
                     p = futures[fut]
                     img_bytes, err = fut.result()
@@ -4021,8 +4075,17 @@ tab1, tab_mock, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
 with tab1:
     st.info("💡 엑셀과 이미지를 업로드하고 생성 버튼을 누르면, **Anatomy One-Shot(한판승)**, **Anatomy Self-Note**, **Anatomy Core**, **Anatomy Voca**가 동시에 생성되며, **Core에 쓰인 패러프레이징 어휘들이 Voca 단어장에 자동으로 포함**됩니다.")
     xlsx = st.file_uploader("📂 엑셀 업로드", type=["xlsx"])
-    imgs = st.file_uploader("🖼️ 이미지 대량 업로드", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
-    
+    imgs = st.file_uploader("🖼️ 이미지 대량 업로드 (선택)", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
+
+    with st.container(border=True):
+        x_col1, x_col2, x_col3 = st.columns([2.2, 1.4, 1.4])
+        xl_gen_image = x_col1.checkbox(
+            "🎨 이미지가 없는 지문은 AI가 지문 내용으로 이미지 생성 (한판승·Self-Note에 사용)", value=True, key="xl_gen_image",
+            help="엑셀의 이미지명에 맞는 이미지를 올린 지문은 그 이미지를 쓰고, 나머지 지문만 새로 만듭니다. 장당 약 10초, 생성 작업 안에서 함께 진행됩니다."
+        )
+        xl_img_style = x_col2.selectbox("🖌️ 화풍", [IMAGE_STYLE_AUTO] + [name for name, _ in IMAGE_STYLES], key="xl_img_style", disabled=not xl_gen_image)
+        xl_img_model = x_col3.selectbox("🎨 이미지 모델", IMAGE_MODELS, key="xl_img_model", disabled=not xl_gen_image)
+
     st.markdown("##### 🎯 생성할 교재 종류 선택 (원하는 항목만 체크 가능)")
     g_col1, g_col2, g_col3, g_col4 = st.columns(4)
     do_v = g_col1.checkbox("🏆 Anatomy One-Shot (한판승)", value=True)
@@ -4057,7 +4120,12 @@ with tab1:
                     "text": str(raw_text).strip(),
                     "school": str(excel_school).strip() if pd.notna(excel_school) and str(excel_school).strip() not in ["", "nan"] else "",
                     "img_path": img_path,
+                    "gen_image": xl_gen_image and not img_path,
+                    "image_model": xl_img_model,
                 })
+            # 화풍은 지문마다 돌아가며 배정 (자동이면 이웃한 지문끼리 겹치지 않게)
+            for r, style in zip(rows, pick_image_styles(len(rows), xl_img_style)):
+                r["image_style"] = style
 
             types_list = [t for t, on in [("victory", do_v), ("anatomy", do_a), ("core", do_c), ("voca", do_w)] if on]
             n_added = enqueue_generation(rows, types_list, text_model, api_delay, academy_name, school_name)
