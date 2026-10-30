@@ -2195,6 +2195,7 @@ VICTORY_PROMPT = """너는 한국 고등학생 영어 내신용 '한판승' 교�
    - kor: 직독직해.
    - grammar: 빈 문자열로 둔다. (어법 설명은 grammar_points에 작성)
    - ys: 친근한 구어체 설명(~야, ~지!, ~거거든!), 해석된 한글 문장을 쉽고 간략한 예를 들어서 이해하기 쉽게 다른말로 설명해줘.
+     ★ ys는 반드시 2~3문장, 150자 이내로 쓰고 같은 말을 반복하지 마라. (그 문장 하나에 대한 설명이며 지문 전체 요약이 아니다)
 지문: \"\"\"{text}\"\"\""""
 
 ANATOMY_PROMPT = """너는 한국 고등학생용 영어 내신 교재를 만드는 최상급 편집자다. 지문을 분석해 반드시 JSON만 반환하라.
@@ -2215,9 +2216,26 @@ ANATOMY_PROMPT = """너는 한국 고등학생용 영어 내신 교재를 만드
 # AI가 가끔 같은 글자를 수천 번 반복하는 결과를 내는데(예: '구구구구…'), 그대로 저장하면 교재 페이지가 옆으로 넓어져 인쇄가 작아짐
 DEGENERATE_REPEAT_RE = re.compile(r"(.{1,6}?)\1{14,}", re.S)
 
+# 칸별 최대 글자 수: 저장된 교재 737개 실측 상위 1% 값의 약 4~6배. 띄어쓰기를 넣어 가며 비슷한 문장을 끝없이 되풀이하는 오류를 잡기 위함
+# (예: 정상 코칭은 99%가 125자 이하인데 오류 코칭은 4,500~33,000자)
+FIELD_MAX_CHARS = {
+    "ys": 700, "kor": 800, "eng": 1500, "grammar": 700, "explain": 600, "summary": 900, "title": 300,
+    "meaning": 300, "synonyms": 400, "synonyms_text": 400, "topic": 800, "easy_explanation": 1800,
+    "structure_flow": 1200, "explanation": 1000, "english_statement": 700, "korean_statement": 500,
+    "point": 1500, "one_line_summary": 300,
+}
+FIELD_MAX_DEFAULT = 4000  # 위에 없는 칸 (translation처럼 원래 긴 칸은 제외)
+FIELD_NO_LIMIT = {"translation", "visual_guide", "text", "restored_text", "body_text"}
+
 def find_degenerate_text(obj, path: str = "") -> str:
     """반복 오류가 있는 칸의 위치를 반환 (없으면 빈 문자열). 교재에 쓰이지 않는 visual_guide는 검사하지 않음."""
     if isinstance(obj, str):
+        field = path.split(".")[-1] if path else ""
+        if field.isdigit():  # 목록 안의 문자열이면 목록 이름으로 판단
+            parts = [p for p in path.split(".") if not p.isdigit()]
+            field = parts[-1] if parts else ""
+        if field not in FIELD_NO_LIMIT and len(obj) > FIELD_MAX_CHARS.get(field, FIELD_MAX_DEFAULT):
+            return path or "text"
         if max((len(w) for w in obj.split()), default=0) > 60:
             return path or "text"
         m = DEGENERATE_REPEAT_RE.search(obj)
