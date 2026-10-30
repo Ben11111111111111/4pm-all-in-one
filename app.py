@@ -573,8 +573,12 @@ BOOK_COVER_CSS = """
 .copyright-title-en { font-size: 12px; font-weight: 900; color: #0f172a; letter-spacing: 1.5px; margin-bottom: 6px; }
 .copyright-ko-legal { font-size: 10.5px; font-weight: 700; color: #334155; line-height: 1.65; word-break: keep-all; margin-bottom: 6px; }
 .copyright-en-sub { font-size: 9px; color: #94a3b8; letter-spacing: 0.4px; line-height: 1.4; }
+/* 표지·공란·뒤표지는 본문 페이지 여백과 상관없이 여백 0인 A4 한 장 전체로 인쇄
+   (본문 @page 여백 안에 210mm 표지를 넣으면 넘쳐서 크롬이 문서 전체를 축소함) */
+@page bookcover { size: A4; margin: 0; }
 @media print {
     .book-special-page {
+        page: bookcover;
         width: 210mm !important; height: 296mm !important; margin: 0 !important;
         box-shadow: none !important; border: none !important;
         page-break-after: always !important; break-after: page !important;
@@ -1188,7 +1192,7 @@ def build_css_victory(h_img, f_img, e_img):
     return f"""<style>
     @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;700;900&display=swap');
     @page {{ size: A4; margin: 12mm 15mm; }} 
-    body {{ font-family: 'Noto Sans KR', sans-serif; background: #f0f2f5; margin: 0; padding: 0; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }}
+    body {{ font-family: 'Noto Sans KR', sans-serif; overflow-wrap: anywhere;background: #f0f2f5; margin: 0; padding: 0; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }}
     {BOOK_COVER_CSS}
     .passage-wrapper {{ width: 210mm; box-sizing: border-box; padding: 15mm 18mm; margin: 10mm auto; background: white; box-shadow: 0 0 10px rgba(0,0,0,0.1); page-break-after: always; }}
     @media print {{ body {{ background: white; }} .passage-wrapper {{ width: 100%; margin: 0; padding: 0; box-shadow: none; border: none; }} }}
@@ -1377,7 +1381,7 @@ def build_css_anatomy(h_logo, f_logo, e_logo):
     return f"""<style>
     @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;700;900&display=swap');
     @page {{ size: A4; margin: 0; }}
-    body {{ font-family: 'Noto Sans KR', sans-serif; margin: 0; padding: 0; background: #f4f7fa; color: #333; -webkit-print-color-adjust: exact; print-color-adjust: exact; counter-reset: pagenum; }}
+    body {{ font-family: 'Noto Sans KR', sans-serif; overflow-wrap: anywhere;margin: 0; padding: 0; background: #f4f7fa; color: #333; -webkit-print-color-adjust: exact; print-color-adjust: exact; counter-reset: pagenum; }}
     {BOOK_COVER_CSS}
     #book-container {{ counter-reset: pagenum; }}
     .page {{ --scale: 1; width: 210mm; height: 297mm; padding: calc(15mm * var(--scale)) calc(18mm * var(--scale)) calc(12mm * var(--scale)) calc(18mm * var(--scale)); margin: 10mm auto; background: white; box-shadow: 0 0 15px rgba(0,0,0,0.10); box-sizing: border-box; overflow: hidden; display: flex; flex-direction: column; page-break-after: always; position: relative; counter-increment: pagenum; }}
@@ -1626,7 +1630,7 @@ def build_css_core(h_img, f_img, e_img):
     return f"""<style>
     @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700;900&display=swap');
     @page {{ size: A4; margin: 12mm 14mm; }}
-    body {{ font-family: 'Noto Sans KR', sans-serif; background: #f0f2f5; margin: 0; padding: 0; color: #1e293b; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }}
+    body {{ font-family: 'Noto Sans KR', sans-serif; overflow-wrap: anywhere;background: #f0f2f5; margin: 0; padding: 0; color: #1e293b; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }}
     {BOOK_COVER_CSS}
     .core-wrapper {{ width: 210mm; box-sizing: border-box; padding: 13mm 15mm; margin: 10mm auto; background: white; box-shadow: 0 0 12px rgba(0,0,0,0.1); page-break-after: always; }}
     @media print {{ body {{ background: white; }} .core-wrapper {{ width: 100%; margin: 0; padding: 0; box-shadow: none; border: none; }} }}
@@ -1845,7 +1849,7 @@ def build_css_voca(h_img, f_img):
     return f"""<style>
     @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700;900&display=swap');
     @page {{ size: A4; margin: 12mm 14mm; }}
-    body {{ font-family: 'Noto Sans KR', sans-serif; background: #f0f2f5; margin: 0; padding: 0; color: #1e293b; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }}
+    body {{ font-family: 'Noto Sans KR', sans-serif; overflow-wrap: anywhere;background: #f0f2f5; margin: 0; padding: 0; color: #1e293b; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }}
     {BOOK_COVER_CSS}
     .voca-wrapper {{ width: 210mm; box-sizing: border-box; padding: 14mm 16mm; margin: 10mm auto; background: white; box-shadow: 0 0 12px rgba(0,0,0,0.1); page-break-after: always; break-after: page; }}
     @media print {{ body {{ background: white; }} .voca-wrapper {{ width: 100%; margin: 0; padding: 0; box-shadow: none; border: none; page-break-after: always; break-after: page; }} }}
@@ -2208,6 +2212,30 @@ ANATOMY_PROMPT = """너는 한국 고등학생용 영어 내신 교재를 만드
    - 편지의 인사말(Dear ~,), 맺음말(Sincerely,), 서명 줄도 각각 한 문장으로 취급한다.
 지문: \"\"\"{text}\"\"\""""
 
+# AI가 가끔 같은 글자를 수천 번 반복하는 결과를 내는데(예: '구구구구…'), 그대로 저장하면 교재 페이지가 옆으로 넓어져 인쇄가 작아짐
+DEGENERATE_REPEAT_RE = re.compile(r"(.{1,6}?)\1{14,}", re.S)
+
+def find_degenerate_text(obj, path: str = "") -> str:
+    """반복 오류가 있는 칸의 위치를 반환 (없으면 빈 문자열). 교재에 쓰이지 않는 visual_guide는 검사하지 않음."""
+    if isinstance(obj, str):
+        if max((len(w) for w in obj.split()), default=0) > 60:
+            return path or "text"
+        m = DEGENERATE_REPEAT_RE.search(obj)
+        if m and re.search(r"\w", m.group(1)):
+            return path or "text"
+        return ""
+    if isinstance(obj, dict):
+        items = ((k, v) for k, v in obj.items() if k != "visual_guide")
+    elif isinstance(obj, list):
+        items = ((str(i), v) for i, v in enumerate(obj))
+    else:
+        return ""
+    for k, v in items:
+        hit = find_degenerate_text(v, f"{path}.{k}" if path else k)
+        if hit:
+            return hit
+    return ""
+
 def analyze_passage(label, text, model_name, target_type="victory", core_context: Dict = None, max_retries=5,
                     dna_rules: str = None, notify=None, gen_client=None):
     """notify(msg, level), gen_client: 백그라운드 생성 작업(스레드)에서 st.* 없이 호출할 때 사용"""
@@ -2288,7 +2316,17 @@ def analyze_passage(label, text, model_name, target_type="victory", core_context
                     response_json_schema=schema
                 )
             )
-            return json.loads(res.text.strip())
+            result = json.loads(res.text.strip())
+            bad_field = find_degenerate_text(result)
+            if bad_field:
+                # 반복 오류 결과는 저장하지 않고 다시 생성
+                if attempt < max_retries - 1:
+                    notify(f"⚠️ AI 결과에 반복 오류가 있어 다시 생성합니다 ({label} - {target_type}, {bad_field}) ({attempt + 1}/{max_retries})", "info")
+                    time.sleep(5)
+                    continue
+                notify(f"❌ 반복 오류가 계속되어 생성하지 못했습니다 ({label} - {target_type}, {bad_field})", "error")
+                return None
+            return result
         except Exception as e:
             error_str = str(e).lower()
             if any(k in error_str for k in ["503", "high demand", "429", "unavailable", "quota", "overloaded", "timeout", "timed out", "connection", "500", "internal"]):
@@ -2827,7 +2865,12 @@ def _generate_one_type(sb, gclient, item: Dict, t: str, opts: Dict, dna_rules: s
     record = {"id": str(uuid.uuid4()), "label": lbl, "data": data, "body_text": text,
               "academy_name": opts.get("academy_name", "포피엠 입시 영어")}
     if t in ("victory", "anatomy"):
-        record.update({"image_data_url": "", "image_path": item.get("img_path", "")})
+        # 작업을 넣은 뒤에 원문 라이브러리에서 이미지를 만들었을 수 있으므로, 저장 직전에 최신 이미지를 다시 확인
+        img_path = item.get("img_path", "")
+        if not img_path:
+            src = next((m for m in (_store_get(sb, MOCK_FILE, []) or []) if m.get("label") == lbl), None)
+            img_path = (src or {}).get("image_path", "")
+        record.update({"image_data_url": "", "image_path": img_path})
     if t != "victory":
         record["school_name"] = item.get("school") or opts.get("school_name", "")
     lib = _store_get(sb, fpath, []) or []
