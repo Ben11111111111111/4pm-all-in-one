@@ -456,6 +456,11 @@ else:
 if "past_v_selected" not in st.session_state:
     st.session_state.past_v_selected = []
 
+# 한판승·Self-Note·Core·Voca가 같이 쓰는 선택 목록 (지문 이름 순서 = 출력 순서). 새로고침·재로그인 시 초기화
+if "shared_sel_labels" not in st.session_state:
+    st.session_state.shared_sel_labels = []
+SHARED_SELECTION_TYPES = ("victory", "anatomy", "core", "voca")
+
 if "saved_mock" not in st.session_state:
     st.session_state.saved_mock = load_from_file(MOCK_FILE)
 
@@ -2582,8 +2587,22 @@ def render_library_manager(prefix: str, title_name: str, file_path: str, css_str
         return
 
     id_to_item = {p["id"]: p for p in saved_list}
-    selected_ids[:] = [sid for sid in selected_ids if sid in id_to_item]
+    shares_selection = target_type in SHARED_SELECTION_TYPES
+    label_to_id = {p["label"]: p["id"] for p in saved_list}
+    if shares_selection:
+        # 다른 교재 탭에서 고른 지문도 같은 이름이면 선택된 상태로 (이 교재에 없는 지문은 건너뜀)
+        selected_ids[:] = [label_to_id[l] for l in st.session_state.shared_sel_labels if l in label_to_id]
+    else:
+        selected_ids[:] = [sid for sid in selected_ids if sid in id_to_item]
     selected_set = set(selected_ids)
+
+    def sync_shared_selection():
+        """이 탭에서 바뀐 선택을 공유 목록에 반영 (이 교재에 없는 지문의 선택은 그대로 유지)"""
+        if not shares_selection:
+            return
+        mine = [id_to_item[sid]["label"] for sid in selected_ids if sid in id_to_item]
+        others = [l for l in st.session_state.shared_sel_labels if l not in label_to_id]
+        st.session_state.shared_sel_labels = mine + others
 
     if target_type == "past_voca":
         q_c1, q_c2, q_c3 = st.columns(3)
@@ -2647,6 +2666,8 @@ def render_library_manager(prefix: str, title_name: str, file_path: str, css_str
     if b_col4.button("⬜ 전체 선택 해제", use_container_width=True, key=f"{prefix}_desel_all"):
         selected_ids.clear()
         selected_set.clear()
+        if shares_selection:
+            st.session_state.shared_sel_labels = []  # 모든 교재 탭의 선택을 함께 해제
 
     # 영구 삭제는 실수 방지를 위해 한 번 더 확인
     with b_col5.popover(f"🗑️ 선택 항목 삭제 ({len(selected_ids)})", use_container_width=True, disabled=not selected_ids):
@@ -2656,6 +2677,8 @@ def render_library_manager(prefix: str, title_name: str, file_path: str, css_str
             selected_ids.clear()
             save_to_file(file_path, st.session_state[saved_key])
             st.rerun()
+
+    sync_shared_selection()
 
     total_filtered = len(display_items)
     if page_limit_opt == "전체" or total_filtered <= int(page_limit_opt):
@@ -2675,6 +2698,14 @@ def render_library_manager(prefix: str, title_name: str, file_path: str, css_str
 
     def on_card_toggle(pid: str):
         # 카드 버튼을 누를 때마다 선택/해제 (누른 순서가 곧 출력 순서)
+        if shares_selection:
+            lbl = id_to_item[pid]["label"]
+            shared = st.session_state.shared_sel_labels
+            if lbl in shared:
+                shared.remove(lbl)
+            else:
+                shared.append(lbl)
+            return
         sel = st.session_state[sel_key]
         if pid in sel:
             sel.remove(pid)
@@ -4071,7 +4102,7 @@ tab1, tab_mock, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📖 Anatomy Voca",
     "🎯 기출 PDF 출제DNA 학습기",
     "📚 기출 어휘 독립 라이브러리"
-])
+], key="main_tabs", on_change="rerun")  # 탭을 바꿀 때 다시 그려, 다른 교재 탭에서 고른 지문이 바로 보이게 함
 
 with tab1:
     st.info("💡 엑셀과 이미지를 업로드하고 생성 버튼을 누르면, **Anatomy One-Shot(한판승)**, **Anatomy Self-Note**, **Anatomy Core**, **Anatomy Voca**가 동시에 생성되며, **Core에 쓰인 패러프레이징 어휘들이 Voca 단어장에 자동으로 포함**됩니다.")
