@@ -1326,7 +1326,8 @@ def render_victory(p):
             grammar_html = f'<div class="inline-grammar-box"><b>💡 Grammar Point</b> : {esc(row.get("grammar"))}</div>'
 
         is_essay = bool(row.get("essay_candidate"))
-        essay_badge = '<div class="essay-badge">서술형 출제 가능</div>' if is_essay else ""
+        essay_reason = str(row.get("essay_reason", "") or "").strip()
+        essay_badge = (f'<div class="essay-badge">서술형 출제 가능{(" · " + esc(essay_reason)) if essay_reason else ""}</div>') if is_essay else ""
 
         rows_html += f"""
         <tr>
@@ -2062,10 +2063,11 @@ SCHEMA_VICTORY = {
                             "required": ["no", "title", "explain"]
                         }
                     },
-                    "essay_candidate": {"type": "boolean", "description": "서술형(영작·어법 고치기) 출제 가능성이 높은 문장이면 true"},
+                    "essay_candidate": {"type": "boolean", "description": "학교 서술형 기출 DNA에 비추어 서술형으로 나올 가능성이 가장 높은 문장이면 true (지문당 보통 1문장)"},
+                    "essay_reason": {"type": "string", "description": "essay_candidate가 true일 때만: '문장 역할 · 핵심 문법 · 예상 형식' (예: 주제문 · 관계대명사 what · 조건 영작). 아니면 빈 문자열"},
                     "ys": {"type": "string"}
                 },
-                "required": ["eng", "kor", "ys", "grammar_points", "essay_candidate"]
+                "required": ["eng", "kor", "ys", "grammar_points", "essay_candidate", "essay_reason"]
             }
         }
     },
@@ -2196,7 +2198,12 @@ VICTORY_PROMPT = """너는 한국 고등학생 영어 내신용 '한판승' 교�
    - grammar_points: eng의 마커 번호마다 하나씩, 번호 순서대로 작성.
      · title: 어법 항목 이름 (예: "명사절 접속사 that", "과거분사 (명사 수식)", "A as well as B")
      · explain: 구조를 [ ]로 짧게 보여주고 콜론 뒤에 짧은 해석 (예: "show [타동사] + [목적어로 쓰인 명사절 접속사 that] : \\"전략이 ~할 수 있다는 것을 보여준다\\"")
-   - essay_candidate: 서술형(영작, 어법 고치기, 배열)으로 출제될 가능성이 높은 문장이면 true, 아니면 false. 지문 전체에서 2~4문장만 true로 하라.
+   - essay_candidate: 아래 [학교 서술형 출제 DNA]에 비추어 실제 내신 서술형(조건 영작·배열·어법 수정 등)으로 나올 가능성이 **가장 높은** 문장만 true.
+     · 지문 전체에서 보통 1문장만 true. 문장이 14개 이상인 긴 지문만 최대 2문장. 기준에 확실히 맞는 문장이 없으면 모두 false로 둔다.
+     · 학생이 이 문장 하나만 확실히 외우면 되도록, 가장 출제 가능성이 높은 문장을 골라라.
+   - essay_reason: essay_candidate가 true인 문장에만 "문장 역할 · 핵심 문법 · 예상 형식"을 30자 이내로 쓴다 (예: "주제문 · 관계대명사 what · 조건 영작"). false인 문장은 빈 문자열.
+   [학교 서술형 출제 DNA]
+{essay_dna}
    - sentence_vocab: 해당 문장에서 사용된 주요 단어들을 추출. 유의어 없이 딱 문장에 쓰인 의미만 작성. (word: 영어단어, pronunciation: 한글발음기호 예:나이스, pos: 품사 약어(n, v, a, ad 등), meaning: 뜻)
    - kor: 직독직해.
    - grammar: 빈 문자열로 둔다. (어법 설명은 grammar_points에 작성)
@@ -2260,8 +2267,28 @@ def find_degenerate_text(obj, path: str = "") -> str:
             return hit
     return ""
 
+# 서술형 출제 DNA가 아직 없을 때 쓰는 기본 기준
+ESSAY_DNA_FALLBACK = """- 글의 주제문·요지·결론 문장을 우선한다.
+- 관계사(what, 관계부사), 분사구문, 가주어/진주어, 간접의문문, 강조구문, 도치, 수동태처럼 영작·배열로 묻기 좋은 구문이 들어 있는 문장을 우선한다.
+- 단순 예시·세부 사항 문장은 고르지 않는다."""
+
+def essay_flag_limit(sentence_count: int) -> int:
+    """서술형 출제 가능 표시 개수: 보통 1문장, 14문장 이상 긴 지문은 2문장"""
+    return 2 if sentence_count >= 14 else 1
+
+def limit_essay_flags(data: Dict) -> Dict:
+    """AI가 서술형 표시를 너무 많이 달아도 지문당 허용 개수까지만 남김 (이유가 적힌 문장을 우선)"""
+    rows = data.get("analysis", []) or []
+    flagged = [i for i, r in enumerate(rows) if r.get("essay_candidate")]
+    keep = sorted(flagged, key=lambda i: (not rows[i].get("essay_reason"), i))[:essay_flag_limit(len(rows))]
+    for i, r in enumerate(rows):
+        r["essay_candidate"] = i in keep
+        if i not in keep:
+            r["essay_reason"] = ""
+    return data
+
 def analyze_passage(label, text, model_name, target_type="victory", core_context: Dict = None, max_retries=5,
-                    dna_rules: str = None, notify=None, gen_client=None):
+                    dna_rules: str = None, notify=None, gen_client=None, essay_rules: str = None):
     """notify(msg, level), gen_client: 백그라운드 생성 작업(스레드)에서 st.* 없이 호출할 때 사용"""
     if dna_rules is None:
         dna_rules = st.session_state.exam_dna.get("rules_text", DEFAULT_EXAM_DNA["rules_text"])
@@ -2270,7 +2297,9 @@ def analyze_passage(label, text, model_name, target_type="victory", core_context
     gen_client = gen_client or client
 
     if target_type == "victory":
-        prompt = VICTORY_PROMPT.replace("{text}", text)
+        if essay_rules is None:
+            essay_rules = st.session_state.exam_dna.get("essay_rules_text", "")
+        prompt = VICTORY_PROMPT.replace("{essay_dna}", essay_rules or ESSAY_DNA_FALLBACK).replace("{text}", text)
         schema = SCHEMA_VICTORY
 
     elif target_type == "anatomy":
@@ -2350,6 +2379,8 @@ def analyze_passage(label, text, model_name, target_type="victory", core_context
                     continue
                 notify(f"❌ 반복 오류가 계속되어 생성하지 못했습니다 ({label} - {target_type}, {bad_field})", "error")
                 return None
+            if target_type == "victory":
+                result = limit_essay_flags(result)
             return result
         except Exception as e:
             error_str = str(e).lower()
@@ -2490,7 +2521,8 @@ def render_permanent_json_editor(prefix: str, target_type: str, file_path: str, 
                         "grammar": str(r.get("grammar", "")), "ys": str(r.get("ys", "")),
                         "sentence_vocab": orig_row.get("sentence_vocab", []),
                         "grammar_points": orig_row.get("grammar_points", []),
-                        "essay_candidate": orig_row.get("essay_candidate", False)
+                        "essay_candidate": orig_row.get("essay_candidate", False),
+                        "essay_reason": orig_row.get("essay_reason", "")
                     })
                 pdata["analysis"] = updated_analysis
                 save_to_file(file_path, all_saved)
@@ -2900,7 +2932,7 @@ def _generate_one_type(sb, gclient, item: Dict, t: str, opts: Dict, dna_rules: s
     for round_idx in range(len(GEN_RETRY_WAITS) + 1):
         time.sleep(opts.get("api_delay", 3))
         data = analyze_passage(lbl, text, opts["model"], t, core_context=core_ctx,
-                               dna_rules=dna_rules, notify=note, gen_client=gclient)
+                               dna_rules=dna_rules, notify=note, gen_client=gclient, essay_rules=opts.get("essay_rules", ""))
         if data:
             break
         if round_idx < len(GEN_RETRY_WAITS):
@@ -2990,6 +3022,7 @@ def gen_worker_main(api_key: str, sb_url: str, sb_key: str):
     gclient = genai.Client(api_key=api_key)
     dna = _store_get(sb, DNA_FILE, {}) or {}
     dna_rules = dna.get("rules_text") or DEFAULT_EXAM_DNA["rules_text"]
+    essay_rules = dna.get("essay_rules_text", "")
     # PC 앱과 배포된 앱이 동시에 열려 있어도 한 곳에서만 처리하도록 '작업 담당자'를 기록 (20분 동안 소식 없으면 넘겨받음)
     my_id = str(uuid.uuid4())
     def claim(j):
@@ -3016,7 +3049,7 @@ def gen_worker_main(api_key: str, sb_url: str, sb_key: str):
             logs = []
             try:
                 sb_factory = (lambda: create_client(sb_url, sb_key)) if sb is not None else (lambda: None)
-                ok, err = _generate_item(sb_factory, gclient, item, job.get("opts", {}), dna_rules, logs,
+                ok, err = _generate_item(sb_factory, gclient, item, {**job.get("opts", {}), "essay_rules": essay_rules}, dna_rules, logs,
                                          heartbeat=lambda: _job_update(sb, claim))
             except Exception as e:
                 ok, err = False, f"처리 중 오류: {str(e)[:200]}"
@@ -4206,16 +4239,22 @@ with tab6:
 2. 요약문 빈칸 (A), (B) 문항에서 어떤 품사와 성격의 단어를 빈칸 타겟으로 삼는지 (실제 시험지 속 영어 예시 포함)
 3. '문맥상 낱말의 쓰임' 및 어휘 변형 문제에서 어떤 반의어/혼동어 함정을 사용하는지 (실제 영어 예시 포함)
 4. <보기> 영문 일치/불일치 문항에서 오답과 정답 선지를 어떻게 변형하는지
+5. 서술형·논술형 문항이 본문의 어떤 문장(주제문·결론·예시 등)을 고르는지, 어떤 문법(관계사·분사구문·가주어 등)을 묻는지, 어떤 형식(조건 영작·배열·어법 수정·요약문 완성 등)인지
 
 기존 출제 DNA 규칙:
 {st.session_state.exam_dna.get('rules_text', '')}
 
-위 기존 규칙을 유지하면서 새로 발견된 출제 패턴과 구체적 어휘 예시를 통합하여, 앞으로 'ANATOMY CORE'와 'ANATOMY VOCA' 생성 프롬프트에 바로 넣을 수 있는 완성된 [출제 DNA 핵심 규칙] 텍스트(updated_rules_text)와 이번 시험지 핵심 요약(analysis_summary)을 JSON으로 반환하라."""
+기존 서술형 출제 DNA:
+{st.session_state.exam_dna.get('essay_rules_text', '') or '(아직 없음)'}
+
+위 기존 규칙을 유지하면서 새로 발견된 출제 패턴과 구체적 어휘 예시를 통합하여, 앞으로 'ANATOMY CORE'와 'ANATOMY VOCA' 생성 프롬프트에 바로 넣을 수 있는 완성된 [출제 DNA 핵심 규칙] 텍스트(updated_rules_text),
+5번 분석을 기존 서술형 DNA에 통합한 [서술형 출제 DNA] 텍스트(updated_essay_rules_text, 한판승 '서술형 출제 가능' 표시 기준으로 쓰이며 2500자 이내),
+이번 시험지 핵심 요약(analysis_summary)을 JSON으로 반환하라."""
 
                     dna_schema = {
                         "type": "object",
-                        "properties": {"updated_rules_text": {"type": "string"}, "analysis_summary": {"type": "string"}},
-                        "required": ["updated_rules_text", "analysis_summary"]
+                        "properties": {"updated_rules_text": {"type": "string"}, "updated_essay_rules_text": {"type": "string"}, "analysis_summary": {"type": "string"}},
+                        "required": ["updated_rules_text", "updated_essay_rules_text", "analysis_summary"]
                     }
                     contents_payload.append(dna_prompt)
                     res = client.models.generate_content(
@@ -4225,6 +4264,8 @@ with tab6:
                     )
                     parsed_dna = json.loads(res.text.strip())
                     st.session_state.exam_dna["rules_text"] = parsed_dna["updated_rules_text"]
+                    if parsed_dna.get("updated_essay_rules_text", "").strip():
+                        st.session_state.exam_dna["essay_rules_text"] = parsed_dna["updated_essay_rules_text"].strip()
                     st.session_state.exam_dna["updated_at"] = time.strftime("%Y-%m-%d %H:%M")
                     st.session_state.exam_dna.setdefault("history", []).append({
                         "title": school_tag.strip() if school_tag.strip() else ", ".join([u.name for u in uploaded_pdfs]),
@@ -4257,9 +4298,26 @@ with tab6:
             save_exam_dna(st.session_state.exam_dna)
             st.success("✅ 출제 DNA 규칙이 저장되었습니다!")
         if dc2.button("🔄 운양고·제일고 기본값으로 초기화", use_container_width=True):
+            essay_keep = st.session_state.exam_dna.get("essay_rules_text", "")  # 서술형 DNA는 따로 관리하므로 유지
             st.session_state.exam_dna = dict(DEFAULT_EXAM_DNA)
+            if essay_keep:
+                st.session_state.exam_dna["essay_rules_text"] = essay_keep
             save_exam_dna(st.session_state.exam_dna)
             st.rerun()
+
+        st.markdown("#### ✍️ 서술형 출제 DNA (한판승 '서술형 출제 가능' 표시 기준)")
+        st.caption("운양고·제일고 기출 서술형·논술형 문항을 분석한 기준입니다. 한판승을 만들 때 이 기준에 맞는 문장만 지문당 1개(긴 지문 2개) 표시합니다.")
+        edited_essay = st.text_area(
+            "서술형 출제 DNA 편집",
+            value=st.session_state.exam_dna.get("essay_rules_text", "") or ESSAY_DNA_FALLBACK,
+            height=300,
+            label_visibility="collapsed",
+            key="essay_dna_editor"
+        )
+        if st.button("💾 서술형 출제 DNA 저장", use_container_width=True, key="essay_dna_save"):
+            st.session_state.exam_dna["essay_rules_text"] = edited_essay.strip()
+            save_exam_dna(st.session_state.exam_dna)
+            st.success("✅ 서술형 출제 DNA가 저장되었습니다!")
 
 # ==========================================
 # 📚 탭 7: 기출 어휘 독립 라이브러리 (시험지 단위 통합 & 시험지별 페이지 구분)
