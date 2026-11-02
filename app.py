@@ -8,6 +8,8 @@ import html
 import uuid
 import random
 import hashlib
+import functools
+import math
 import zipfile
 import threading
 import pandas as pd
@@ -2571,6 +2573,338 @@ def parse_number_query(query_str: str) -> List[int]:
             result.append(int(part))
     return result
 
+# -----------------------------
+# 4-Z. 수업용 PPT (AI 사용 안 함 · 토큰 0)
+#   - 만들어 둔 교재 자료로 칠판 빔용 PPT를 만듦 (검은 배경, 4:3, 메인 영어 32pt)
+#   - 제목: Self-Note 영어/한글 제목 · 문장·해석·단어: 한판승 · 요점 정리: 한판승 핵심 요약
+#   - 오른쪽 아래 10pt: 문장에 나온 단어의 유의어 (Voca 단어장 + 한판승 키워드), 발표자 노트에도 함께
+#   - 모든 글은 맑은 고딕 글자 폭으로 줄바꿈을 계산해 슬라이드 밖으로 넘치지 않게 크기를 정함
+#     (서버에는 맑은 고딕이 없어서 글자 폭 표를 코드에 넣어 둠)
+# -----------------------------
+PPT_ASSET_DIR = os.path.join(BASE_DIR, "ppt_assets")
+PPT_IMG_HEADER = os.path.join(PPT_ASSET_DIR, "header.png")
+PPT_IMG_TITLE = os.path.join(PPT_ASSET_DIR, "title.png")
+PPT_IMG_SUMMARY = os.path.join(PPT_ASSET_DIR, "summary.png")
+PPT_SLIDE_W, PPT_SLIDE_H = 10.0, 7.5   # 4:3 → 4:3 빔에서 화면을 꽉 채움
+PPT_BODY_MAX_PT = 32                   # 메인 영어 문장 기본 크기 (긴 문장만 넘치지 않게 줄어듦)
+PPT_MARGIN_X = 0.4
+PPT_CONTENT_W = PPT_SLIDE_W - 2 * PPT_MARGIN_X
+PPT_LINE_PITCH = 1.35   # 글자 크기 대비 한 줄 높이 (넉넉하게 잡아 넘침 방지)
+PPT_BOX_PAD_IN = 0.06   # 텍스트 상자 좌우 여백
+
+# 맑은 고딕(보통/굵게) 글자 폭 (글자 크기 100 기준). 한글·한자 등 그 밖의 글자는 100
+_PPT_ASCII_W = {
+    False: [35, 29, 40, 61, 55, 84, 82, 23, 30, 30, 42, 70, 22, 41, 22, 40, 55, 55, 55, 55, 55, 55, 55, 55, 55, 55, 22, 22, 70, 70, 70, 46,
+            98, 66, 58, 63, 72, 52, 50, 70, 72, 27, 36, 59, 48, 92, 77, 77, 57, 77, 61, 54, 53, 70, 63, 95, 60, 56, 58, 30, 76, 30, 70, 43,
+            27, 52, 60, 47, 60, 54, 32, 60, 58, 25, 25, 51, 25, 88, 58, 60, 60, 60, 35, 43, 34, 58, 49, 74, 46, 49, 46, 30, 24, 30, 70],
+    True: [35, 32, 48, 61, 58, 88, 86, 28, 36, 36, 46, 72, 26, 41, 26, 44, 58, 58, 58, 58, 58, 58, 58, 58, 58, 58, 26, 26, 72, 72, 72, 45,
+           98, 70, 64, 64, 75, 54, 52, 72, 77, 31, 43, 65, 51, 96, 80, 78, 61, 78, 65, 57, 58, 73, 67, 101, 65, 61, 61, 36, 76, 36, 72, 43,
+           31, 54, 63, 49, 63, 55, 37, 63, 61, 27, 28, 56, 27, 92, 61, 62, 63, 63, 39, 46, 38, 61, 54, 80, 54, 54, 48, 36, 31, 36, 72],
+}
+_PPT_SPECIAL_W = {
+    False: {"·": 22, "•": 42, "…": 74, "‘": 23, "’": 23, "“": 38, "”": 38, "—": 103, "–": 51, "≈": 66},
+    True: {"·": 26, "•": 42, "…": 88, "‘": 28, "’": 28, "“": 47, "”": 47, "—": 103, "–": 51, "≈": 66},
+}
+
+def _ppt_char_w(ch: str, bold: bool) -> float:
+    o = ord(ch)
+    if 32 <= o <= 126:
+        return _PPT_ASCII_W[bold][o - 32]
+    if o >= 0x1F000:  # 이모지는 실제 화면에서 더 넓게 그려지므로 넉넉하게
+        return 125
+    return _PPT_SPECIAL_W[bold].get(ch, 100)
+
+def _ppt_text_w_pt(s: str, pt: float, bold: bool) -> float:
+    return sum(_ppt_char_w(ch, bold) for ch in s) * pt / 100.0
+
+def _ppt_count_lines(text: str, width_in: float, pt: float, bold: bool) -> int:
+    """글자 폭으로 단어 단위 줄바꿈했을 때의 줄 수"""
+    width_pt = max(1.0, (width_in - 2 * PPT_BOX_PAD_IN) * 72 * 0.97)
+    total = 0
+    for para in str(text).split("\n"):
+        lines, cur = 1, ""
+        for w in para.split(" "):
+            cand = (cur + " " + w) if cur else w
+            if _ppt_text_w_pt(cand, pt, bold) <= width_pt:
+                cur = cand
+                continue
+            if cur:
+                lines += 1
+            # 한 단어가 한 줄보다 길면 글자 단위로 나눔
+            cur = ""
+            for ch in w:
+                if _ppt_text_w_pt(cur + ch, pt, bold) > width_pt and cur:
+                    lines += 1
+                    cur = ch
+                else:
+                    cur += ch
+        total += lines
+    return max(1, total)
+
+@functools.lru_cache(maxsize=50000)
+def ppt_text_height_in(text: str, width_in: float, pt: float, bold: bool, spacing: float, space_before_pt: float = 0) -> float:
+    return _ppt_count_lines(text, width_in, pt, bold) * pt * PPT_LINE_PITCH * spacing / 72.0 + space_before_pt / 72.0
+
+def ppt_fit_pt(text: str, width_in: float, height_in: float, max_pt: int, min_pt: int, bold: bool, spacing: float):
+    """높이 안에 들어가는 가장 큰 글자 크기와 그때 높이. 최소 크기로도 안 들어가면 (None, 높이)"""
+    for pt in range(max_pt, min_pt - 1, -1):
+        h = ppt_text_height_in(text, width_in, pt, bold, spacing)
+        if h <= height_in:
+            return pt, h
+    return None, ppt_text_height_in(text, width_in, min_pt, bold, spacing)
+
+def ppt_clean_eng(s: str) -> str:
+    """한판승 문장에서 [어구](S) 표시, {1:어법} 표시, 끊어 읽기 / 를 지운 깨끗한 원문"""
+    s = re.sub(r"\{\d{1,2}:(.*?)\}", r"\1", str(s or ""), flags=re.S)
+    s = re.sub(r"\[(.*?)\]\s*\(([SVOCM])\)", r"\1", s, flags=re.S)
+    s = re.sub(r"\s*/\s*", " ", s)
+    s = re.sub(r"\s+([,.;:!?’'\"”)])", r"\1", s)
+    return re.sub(r"\s{2,}", " ", s).strip()
+
+def ppt_clean_kor(s: str) -> str:
+    return re.sub(r"\s{2,}", " ", re.sub(r"\s*/\s*", " ", str(s or ""))).strip()
+
+def ppt_note_terms(sentence: str, voca_items, keywords) -> list:
+    """문장에 나온 단어의 유의어 목록 (Voca 단어장 → 한판승 핵심 키워드 순)"""
+    low = " " + re.sub(r"[^a-z' -]", " ", sentence.lower()) + " "
+    terms, seen = [], set()
+    def in_sentence(word):
+        w = re.sub(r"[^a-z' -]", " ", str(word).lower()).strip()
+        if len(w) <= 2:
+            return False
+        # 그대로 있거나, 한 단어일 때 어미만 다른 형태(예: decide → decided)도 인정
+        return ((" " + w + " ") in low or (" " + w + "s ") in low or (" " + w + "es ") in low
+                or (" " not in w and len(w) > 4 and (" " + w[:-1]) in low))
+    for it in voca_items or []:
+        w = str(it.get("word", "")).strip()
+        syns = [str(s.get("word", "")).strip() for s in (it.get("synonyms") or []) if isinstance(s, dict) and s.get("word")]
+        if w and syns and w.lower() not in seen and in_sentence(w):
+            terms.append(f"{w} ≈ {', '.join(syns[:3])}")
+            seen.add(w.lower())
+    for kw in keywords or []:
+        w = str(kw.get("word", "")).strip()
+        syn = re.sub(r"\([^)]*\)", "", str(kw.get("synonyms", ""))).strip(" ,")
+        if w and syn and w.lower() not in seen and in_sentence(w):
+            terms.append(f"{w} ≈ {syn}")
+            seen.add(w.lower())
+    return terms
+
+def ppt_header_label(label: str) -> str:
+    """머리말에는 [라벨]로 감싸 넣으므로 '[2026년 10월 고1] 20번' -> '2026년 10월 고1 20번'"""
+    m = re.match(r"^\[([^\]]+)\]\s*(.*)$", str(label))
+    return f"{m.group(1)} {m.group(2)}".strip() if m else str(label).strip()
+
+def build_class_ppt(passages: List[Dict], anatomy_list: List[Dict], voca_list: List[Dict], school: str, test_name: str):
+    """선택한 한판승 지문으로 수업용 PPT를 만들어 (파일 bytes, 슬라이드 수)를 돌려줌"""
+    from pptx import Presentation  # PPT를 만들 때만 불러와 앱 시작을 느리게 하지 않음
+    from pptx.util import Pt, Inches
+    from pptx.enum.text import MSO_AUTO_SIZE, PP_ALIGN
+    from pptx.dml.color import RGBColor
+
+    YELLOW_TITLE, YELLOW_VOCAB = RGBColor(255, 215, 0), RGBColor(255, 255, 102)
+    WHITE, NOTE_GRAY, HEAD_GRAY = RGBColor(255, 255, 255), RGBColor(150, 150, 150), RGBColor(200, 200, 200)
+
+    def new_slide():
+        slide = prs.slides.add_slide(layout)
+        fill = slide.background.fill
+        fill.solid()
+        fill.fore_color.rgb = RGBColor(0, 0, 0)
+        return slide
+
+    def picture(slide, path, left, top, width):
+        if os.path.exists(path):
+            try:
+                slide.shapes.add_picture(path, Inches(left), Inches(top), width=Inches(width))
+            except Exception:
+                pass
+
+    def textbox(slide, left, top, width, height):
+        tf = slide.shapes.add_textbox(Inches(left), Inches(top), Inches(width), Inches(height)).text_frame
+        tf.word_wrap = True
+        tf.auto_size = MSO_AUTO_SIZE.NONE
+        tf.margin_left = tf.margin_right = Inches(PPT_BOX_PAD_IN)
+        tf.margin_top = tf.margin_bottom = 0
+        return tf
+
+    def paragraph(tf, text, size, color, first=False, spacing=1.85, before=0, bold=True, align=None):
+        # 글자 색을 글자마다 직접 넣어 PowerPoint에서 검정으로 풀리지 않게 함
+        lines = [ln.strip() for ln in str(text).split("\n") if ln.strip()] or [""]
+        for i, line in enumerate(lines):
+            p = tf.paragraphs[0] if (first and i == 0) else tf.add_paragraph()
+            p.line_spacing = spacing
+            if i == 0 and before > 0:
+                p.space_before = Pt(before)
+            if align is not None:
+                p.alignment = align
+            run = p.add_run()
+            run.text = line
+            run.font.size = Pt(size)
+            run.font.bold = bold
+            run.font.color.rgb = color
+
+    def header(slide, label):
+        text_left = PPT_MARGIN_X
+        if os.path.exists(PPT_IMG_HEADER):
+            picture(slide, PPT_IMG_HEADER, PPT_MARGIN_X, 0.15, 0.5)
+            text_left = PPT_MARGIN_X + 0.62
+        w = PPT_SLIDE_W - PPT_MARGIN_X - text_left
+        text = " ".join(t for t in (school, test_name) if t) + f" 대비_낱낱이 해부하다! [{ppt_header_label(label)}]"
+        pt, h = ppt_fit_pt(text, w, 0.5, 15, 10, True, 1.2)
+        tf = textbox(slide, text_left, 0.15, w, max(h, 0.3))
+        paragraph(tf, text, pt or 10, HEAD_GRAY, first=True, spacing=1.2)
+
+    def title_slide(label, eng_title, kor_title):
+        slide = new_slide()
+        header(slide, label)
+        has_img = os.path.exists(PPT_IMG_TITLE)
+        width, box_h = (PPT_CONTENT_W - 1.4 if has_img else PPT_CONTENT_W), 5.8
+        parts = [(f"📌 {label}", -4, 0, 1.5), (f"\"{eng_title}\"", 0, 20, 1.6), (kor_title, -2, 18, 1.6)]
+        chosen = 14
+        for pt in range(PPT_BODY_MAX_PT + 4, 13, -1):
+            if sum(ppt_text_height_in(t, width, max(12, pt + d), True, sp, b) for t, d, b, sp in parts if t) <= box_h:
+                chosen = pt
+                break
+        tf = textbox(slide, PPT_MARGIN_X, 1.2, width, box_h)
+        paragraph(tf, parts[0][0], max(12, chosen - 4), YELLOW_TITLE, first=True, spacing=1.5)
+        paragraph(tf, parts[1][0], chosen, WHITE, spacing=1.6, before=20)
+        if kor_title:
+            paragraph(tf, kor_title, max(12, chosen - 2), YELLOW_TITLE, spacing=1.6, before=18)
+        if has_img:
+            picture(slide, PPT_IMG_TITLE, PPT_SLIDE_W - PPT_MARGIN_X - 1.1, 1.4, 1.1)
+
+    def sentence_slide(label, sent, trans, vocabs, note_terms):
+        slide = new_slide()
+        header(slide, label)
+        left, width, top0, bottom = PPT_MARGIN_X, PPT_CONTENT_W, 0.8, PPT_SLIDE_H - 0.1
+
+        # 오른쪽 아래 10pt 단어·유의어 (최대 3줄, 넘치는 단어는 발표자 노트에만)
+        note_w, note_text, note_h = 4.2, "", 0.0
+        shown = []
+        for t in note_terms:
+            if _ppt_count_lines("💡 " + "  ·  ".join(shown + [t]), note_w, 10, False) <= 3:
+                shown.append(t)
+        if shown:
+            note_text = "💡 " + "  ·  ".join(shown)
+            note_h = ppt_text_height_in(note_text, note_w, 10, False, 1.0) + 0.02
+        content_bottom = bottom - (note_h + 0.06 if note_h else 0)
+
+        vocab_lines = [f"• {v}" for v in vocabs]
+        two_cols = len(vocab_lines) >= 3 or sum(len(v) for v in vocab_lines) > 95
+        half = math.ceil(len(vocab_lines) / 2)
+        cols = [vocab_lines[:half], vocab_lines[half:]] if two_cols else [vocab_lines]
+        col_w = (width - 0.2) / 2 if two_cols else width
+
+        def vocab_height(pt):
+            return max((ppt_text_height_in("\n".join(c), col_w, pt, True, 1.2) for c in cols if c), default=0.0)
+
+        # 본문 32pt를 지키고 단어 17pt → 10pt, 해석 → 9pt를 먼저 줄임. 그래도 안 들어가면 본문을 줄임
+        plan = None
+        for body_pt in range(PPT_BODY_MAX_PT, 13, -1):
+            body_h = ppt_text_height_in(sent, width, body_pt, True, 1.85)
+            for vocab_pt in range(17, 9, -1):
+                v_h = vocab_height(vocab_pt) if vocab_lines else 0.0
+                for trans_pt in range(vocab_pt, 8, -1):
+                    t_h = ppt_text_height_in(trans, width, trans_pt, False, 1.2) if trans else 0.0
+                    if top0 + body_h + (0.12 + v_h if v_h else 0) + (0.08 + t_h if t_h else 0) <= content_bottom:
+                        plan = (body_pt, body_h, vocab_pt, v_h, trans_pt, t_h)
+                        break
+                if plan:
+                    break
+            if plan:
+                break
+        if plan is None:  # 아주 긴 문장: 단어를 빼서라도 본문·해석을 지킴 (단어는 발표자 노트에 남음)
+            vocab_lines, cols = [], [[]]
+            plan = (14, ppt_text_height_in(sent, width, 14, True, 1.85), 12, 0.0, 9,
+                    ppt_text_height_in(trans, width, 9, False, 1.2) if trans else 0.0)
+        body_pt, body_h, vocab_pt, v_h, trans_pt, t_h = plan
+
+        paragraph(textbox(slide, left, top0, width, body_h), sent, body_pt, WHITE, first=True, spacing=1.85)
+        y = top0 + body_h
+        if vocab_lines and v_h:
+            # 단어는 가능하면 4.4인치 아래부터 (자리가 모자라면 본문 바로 아래)
+            rest = (0.08 + t_h) if t_h else 0
+            vocab_top = max(y + 0.12, 4.4) if max(y + 0.12, 4.4) + v_h + rest <= content_bottom else y + 0.12
+            positions = [(left, col_w), (left + col_w + 0.2, col_w)] if two_cols else [(left, width)]
+            for col, (c_left, c_w) in zip(cols, positions):
+                if col:
+                    v_tf = textbox(slide, c_left, vocab_top, c_w, v_h)
+                    for i, line in enumerate(col):
+                        paragraph(v_tf, line, vocab_pt, YELLOW_VOCAB, first=(i == 0), spacing=1.2)
+            y = vocab_top + v_h
+        if trans and t_h:
+            paragraph(textbox(slide, left, y + 0.08, width, t_h), trans, trans_pt, WHITE, first=True, spacing=1.2, bold=False)
+        if note_text:
+            n_tf = textbox(slide, PPT_SLIDE_W - 0.3 - note_w, bottom - note_h, note_w, note_h)
+            paragraph(n_tf, note_text, 10, NOTE_GRAY, first=True, spacing=1.0, bold=False, align=PP_ALIGN.RIGHT)
+
+        # 발표자 노트: 단어·유의어 전체와 해석 (슬라이드 쇼 발표자 보기에서만 보임)
+        notes = []
+        if vocabs:
+            notes.append("[문장 단어] " + " / ".join(vocabs))
+        if note_terms:
+            notes.append("[유의어] " + " / ".join(note_terms))
+        if trans:
+            notes.append("[해석] " + trans)
+        if notes:
+            slide.notes_slide.notes_text_frame.text = "\n".join(notes)
+
+    def summary_slide(label, summary_text):
+        slide = new_slide()
+        header(slide, label)
+        if os.path.exists(PPT_IMG_SUMMARY):
+            picture(slide, PPT_IMG_SUMMARY, PPT_MARGIN_X, 1.2, 1.0)
+            s_left, s_w = PPT_MARGIN_X + 1.25, PPT_CONTENT_W - 1.25
+        else:
+            s_left, s_w = PPT_MARGIN_X, PPT_CONTENT_W
+        box_h, head, chosen = 5.9, "📌 영쌤의 요점 정리", 14
+        for pt in range(PPT_BODY_MAX_PT, 13, -1):
+            if ppt_text_height_in(head, s_w, pt, True, 1.5) + ppt_text_height_in(summary_text, s_w, pt, True, 1.7, 20) <= box_h:
+                chosen = pt
+                break
+        tf = textbox(slide, s_left, 1.1, s_w, box_h)
+        paragraph(tf, head, chosen, YELLOW_TITLE, first=True, spacing=1.5)
+        paragraph(tf, summary_text, chosen, WHITE, spacing=1.7, before=20)
+
+    prs = Presentation()
+    prs.slide_width, prs.slide_height = Inches(PPT_SLIDE_W), Inches(PPT_SLIDE_H)
+    layout = prs.slide_layouts[6]
+    anatomy = {p["label"]: p for p in anatomy_list}
+    voca = {p["label"]: p for p in voca_list}
+    for v in passages:
+        label = v.get("label", "")
+        vdata, adata = v.get("data", {}), anatomy.get(label, {}).get("data", {})
+        title_slide(label, str(adata.get("english_title") or "Reading Comprehension").strip(), str(adata.get("korean_title") or "").strip())
+        voca_items = voca.get(label, {}).get("data", {}).get("voca_list", [])
+        for row in vdata.get("analysis", []):
+            sent = ppt_clean_eng(row.get("eng", ""))
+            if not sent:
+                continue
+            vocabs = [f"{str(x.get('word', '')).strip()}: {str(x.get('meaning', '')).strip()}" for x in (row.get("sentence_vocab") or []) if x.get("word")]
+            sentence_slide(label, sent, ppt_clean_kor(row.get("kor", "")), vocabs, ppt_note_terms(sent, voca_items, vdata.get("keywords", [])))
+        summary_slide(label, str(vdata.get("summary", "")).strip())
+    stream = io.BytesIO()
+    prs.save(stream)
+    return stream.getvalue(), len(prs.slides)
+
+def render_class_ppt_section(sel_passages: List[Dict], school_name: str):
+    """한판승 탭: 고른 지문으로 수업용 PPT 만들기"""
+    with st.expander(f"🎬 선택한 {len(sel_passages)}개 지문으로 수업용 PPT 만들기 (AI 사용 안 함 · 토큰 0)"):
+        st.caption("검은 배경 4:3 슬라이드 · 영어 문장 32pt(긴 문장만 줄어듦) · 제목은 Self-Note, 요점 정리는 한판승에서 가져옵니다. "
+                   "오른쪽 아래 10pt 유의어와 발표자 노트도 함께 들어갑니다.")
+        p_col1, p_col2, p_col3 = st.columns([2, 2, 1.6])
+        ppt_school = p_col1.text_input("🏫 머리말 학교명", value=school_name, key="ppt_school")
+        ppt_test = p_col2.text_input("📝 머리말 시험명", value="", placeholder="예: 고1 10모", key="ppt_test")
+        if p_col3.button("🎬 PPT 만들기", type="primary", use_container_width=True, key="ppt_make_btn"):
+            with st.spinner("PPT를 만드는 중입니다..."):
+                data, n_slides = build_class_ppt(sel_passages, st.session_state.saved_a, st.session_state.saved_w, ppt_school.strip(), ppt_test.strip())
+            st.session_state.ppt_file = (data, n_slides, len(sel_passages))
+        if st.session_state.get("ppt_file"):
+            data, n_slides, n_passages = st.session_state.ppt_file
+            st.download_button(f"📥 수업용 PPT 다운로드 (지문 {n_passages}개 · 슬라이드 {n_slides}장)", data,
+                               f"수업용_PPT_{time.strftime('%m%d_%H%M')}.pptx",
+                               "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                               use_container_width=True, key="ppt_dl_btn")
+
 @st.fragment
 def render_library_manager(prefix: str, title_name: str, file_path: str, css_str: str, target_type: str, text_model: str, api_delay: int, academy_name: str, school_name: str, h_url: str, f_url: str):
     saved_key = {"victory": "saved_v", "anatomy": "saved_a", "core": "saved_c", "voca": "saved_w", "past_voca": "saved_past_voca"}[target_type]
@@ -2779,6 +3113,9 @@ def render_library_manager(prefix: str, title_name: str, file_path: str, css_str
         st.markdown(f"🛒 **출력 순서 (총 {len(sel_passages)}개):** {order_preview}")
 
         render_permanent_json_editor(prefix, target_type, file_path, sel_passages, saved_list)
+
+        if target_type == "victory":
+            render_class_ppt_section(sel_passages, school_name)
 
         if target_type in ["voca", "past_voca"]:
             r_col1, r_col2, r_col3, r_col4, r_col5 = st.columns([1.8, 1.8, 2.1, 2.1, 2.2])

@@ -3,3 +3,4 @@ google-genai
 pandas
 openpyxl
 supabase
+python-pptx
