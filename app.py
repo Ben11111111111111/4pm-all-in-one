@@ -2897,11 +2897,13 @@ def render_class_ppt_section(sel_passages: List[Dict], school_name: str):
         if p_col3.button("🎬 PPT 만들기", type="primary", use_container_width=True, key="ppt_make_btn"):
             with st.spinner("PPT를 만드는 중입니다..."):
                 data, n_slides = build_class_ppt(sel_passages, st.session_state.saved_a, st.session_state.saved_w, ppt_school.strip(), ppt_test.strip())
-            st.session_state.ppt_file = (data, n_slides, len(sel_passages))
+            # 파일 이름은 머리말 시험명 그대로 (파일 이름에 못 쓰는 글자만 지움, 비어 있으면 날짜로)
+            file_stem = re.sub(r'[\\/:*?"<>|]', "", ppt_test).strip() or f"수업용_PPT_{time.strftime('%m%d_%H%M')}"
+            st.session_state.ppt_file = (data, n_slides, len(sel_passages), f"{file_stem}.pptx")
         if st.session_state.get("ppt_file"):
-            data, n_slides, n_passages = st.session_state.ppt_file
+            data, n_slides, n_passages, file_name = st.session_state.ppt_file
             st.download_button(f"📥 수업용 PPT 다운로드 (지문 {n_passages}개 · 슬라이드 {n_slides}장)", data,
-                               f"수업용_PPT_{time.strftime('%m%d_%H%M')}.pptx",
+                               file_name,
                                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
                                use_container_width=True, key="ppt_dl_btn")
 
