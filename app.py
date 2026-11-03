@@ -70,13 +70,37 @@ AI_KEYS = {
 }
 AI_DEFAULT_MODELS = {
     "gemini": ["gemini-2.5-flash", "gemini-3.5-flash", "gemini-3.1-pro", "gemini-3.1-flash-lite"],
-    "openai": ["gpt-5", "gpt-5-mini"],
+    "openai": ["gpt-6.1-sol", "gpt-6.1-terra", "gpt-5", "gpt-5-mini"],
     "anthropic": ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"],
 }
 # Claude 안전 필터가 요청을 거절하면 같은 요청을 다른 모델로 다시 처리 (서버 측 대체 모델)
 CLAUDE_FALLBACK_MODELS = {"claude-opus-5-5", "claude-opus-5", "claude-fable-5-1"}
 # 쉬운 작업(변형문제 하·중 등)에 쓰는 같은 제공사의 가벼운 모델 (값이 대략 1/2~1/5)
-AI_LIGHT_MODELS = {"gemini": "gemini-3.5-flash", "openai": "gpt-5-mini", "anthropic": "claude-sonnet-5-5"}
+AI_LIGHT_MODELS = {"gemini": "gemini-3.5-flash-lite", "openai": "gpt-6.1-terra", "anthropic": "claude-sonnet-5-5"}
+
+# 변형문제 모델 고르기 참고표 — 2026-11-03 같은 지문([2024년 10월 고1] 37번)으로 삽입 최상(제일고)·어법 조합형 최상(운양고)·빈칸 상(제일고)을
+# 모델마다 만들게 한 뒤, Claude Opus 5.5와 GPT-6.1 Sol이 누가 만든지 모르게 채점 (정답·유일성·지문 충실·스타일·난이도 1~5)
+AI_MODEL_GUIDE = [
+    # 모델, 문제당 원, 정답 일치, 지문 충실, 스타일(5점), 난이도(5점), 한 줄 평
+    ("openai:gpt-6.1-sol", 42, "100%", "100%", 3.5, 2.0, "⭐ 추천 · 스타일 점수 1위, 정답·지문 모두 정확, 값도 중간"),
+    ("openai:gpt-6.1-terra", 20, "100%", "100%", 3.2, 2.0, "💰 가성비 · Sol보다 약간 단순하지만 정확, 하·중에 알맞음"),
+    ("anthropic:claude-sonnet-5-5", 75, "100%", "100%", 3.3, 2.0, "정확하고 지문 충실 · 값이 GPT-6.1 Sol의 약 2배"),
+    ("anthropic:claude-opus-5-5", 110, "83%", "67%", 3.3, 2.0, "가장 비쌈 · 이번 시험에서는 원문 문장을 바꿔 해석한 경우가 있음"),
+    ("gemini:gemini-3.8-flash", 17, "100%", "17%", 3.3, 2.0, "싸지만 지문을 통째로 다시 씀(원문 표현 0~59%) → 운양고(원문 거의 그대로)와 안 맞음"),
+    ("gemini:gemini-3.5-flash", 35, "100%", "67%", 3.0, 1.7, "3.8 Flash보다 비싸고 지문 재작성이 심함 · 바꾸는 것을 권장"),
+    ("gemini:gemini-3.1-pro-preview", 70, "83%", "33%", 3.2, 2.0, "어법 조합형 정답이 틀림 · 지문 변형 심함"),
+    ("anthropic:claude-haiku-5-5", 5, "100%", "100%", 2.8, 1.3, "매우 쌈 · 빈칸 선택지 비문 1건, 하 난이도 전용"),
+    ("openai:gpt-6-luna", 3, "100%", "67%", 2.5, 1.7, "매우 쌈 · 밑줄 기호 누락 등 형식 오류, 비추천"),
+]
+
+def render_model_guide():
+    """사이드바: 변형문제용 모델 고르기 참고표"""
+    with st.expander("📊 모델 고르기 참고표 (변형문제)", expanded=False):
+        st.dataframe(pd.DataFrame([{"모델": ai_model_label(m), "문제당": f"약 {won}원", "정답": acc, "지문 충실": fid, "스타일": sty, "난이도": dif, "평": note}
+                                   for m, won, acc, fid, sty, dif, note in AI_MODEL_GUIDE]), hide_index=True, use_container_width=True)
+        st.caption("2026-11-03 같은 지문으로 3문제(삽입 최상·어법 조합형 최상·빈칸 상)씩 만들어 Claude Opus와 GPT-6.1 Sol이 채점했어요. "
+                   "지문 충실 = 원문 정보를 빼거나 뜻을 바꾸지 않은 비율. 표본이 작아 참고용이에요. "
+                   "난이도 점수는 모든 모델이 낮았어요(5점 중 2점 안팎) — 모델보다 출제 방식을 보강해야 하는 부분이에요.")
 
 def light_model_for(model_spec: str) -> str:
     provider, model = split_model_spec(model_spec)
@@ -143,13 +167,22 @@ def _gemini_part(gc, f: AiFile):
 
 # ---- AI 사용량·비용 ----
 #   호출마다 토큰(입력·캐시로 읽은 입력·캐시에 새로 쓴 입력·출력)을 모아 달마다 모델별로 더해 DB(ai_usage 문서)에 저장
-#   단가(1M 토큰당 달러)는 2026-11 기준 공개 가격을 넣은 추정치. 정확한 청구액은 각 회사 콘솔(결제 화면)이 기준
+#   단가(1M 토큰당 달러)는 2026-11 기준 공개 가격. 금액은 화면에 보일 때 토큰 수 × 지금 단가로 다시 계산 (단가를 고치면 지난 기록도 맞게 바뀜)
+#   정확한 청구액은 각 회사 콘솔(결제 화면)이 기준 (부가세 별도)
 AI_PRICES = [  # (모델 이름에 들어 있는 글자, 입력, 캐시 읽기, 출력) — 위에서부터 먼저 맞는 것을 씀
     ("claude-fable-5-1", 10, 0.25, 50), ("claude-fable", 10, 1.0, 50), ("claude-mythos", 10, 1.0, 50),
     ("claude-opus-5-5", 4, 0.20, 20), ("claude-opus", 5, 0.50, 25), ("claude-sonnet", 2, 0.20, 10), ("claude-haiku", 0.10, 0.01, 0.50),
+    ("gpt-6.1-sol", 2.0, 0.10, 10.0), ("gpt-6.1-terra", 1.0, 0.05, 5.0), ("gpt-6-astra", 10.0, 1.0, 50.0), ("gpt-6-sol", 2.0, 0.20, 10.0),
+    ("gpt-6-luna", 0.10, 0.01, 0.50), ("gpt-5.6-sol", 4.0, 0.40, 20.0), ("gpt-5.6-terra", 2.0, 0.20, 12.0), ("gpt-5.6-luna", 0.20, 0.02, 1.20),
+    ("gpt-5.5", 5.0, 0.50, 30.0), ("gpt-5.4-mini", 0.75, 0.075, 4.50), ("gpt-5.4-nano", 0.20, 0.02, 1.25), ("gpt-5.4", 2.50, 0.25, 15.0),
     ("gpt-5-nano", 0.05, 0.005, 0.40), ("gpt-5-mini", 0.25, 0.025, 2.0), ("gpt-5", 1.25, 0.125, 10.0),
     ("gpt-4.1-mini", 0.40, 0.10, 1.60), ("gpt-4o-mini", 0.15, 0.075, 0.60), ("gpt-4", 2.0, 0.50, 8.0), ("o4-mini", 1.10, 0.275, 4.40), ("o3", 2.0, 0.50, 8.0),
-    ("flash-lite", 0.10, 0.01, 0.40), ("flash", 0.30, 0.03, 2.50), ("pro", 2.0, 0.20, 12.0),
+    ("gemini-3.8-flash", 0.75, 0.075, 3.75),  # 2026-12-31까지 할인가 (2027년부터 1.50 / 0.15 / 7.50)
+    ("gemini-3.7-flash", 1.50, 0.15, 7.50), ("gemini-3.6-flash", 1.50, 0.15, 7.50),
+    ("gemini-3.5-flash-lite", 0.30, 0.03, 2.50), ("gemini-3.5-flash", 1.50, 0.15, 9.0), ("gemini-3.1-flash-lite", 0.25, 0.025, 1.50),
+    ("gemini-3.1-pro", 2.0, 0.20, 12.0), ("gemini-3-flash", 0.50, 0.05, 3.0), ("gemini-2.5-pro", 1.25, 0.125, 10.0),
+    ("gemini-2.5-flash-lite", 0.10, 0.01, 0.40), ("gemini-2.5-flash", 0.30, 0.03, 2.50),
+    ("flash-lite", 0.30, 0.03, 2.50), ("flash", 1.50, 0.15, 9.0), ("pro", 2.0, 0.20, 12.0),
 ]
 AI_PRICE_DEFAULT = (2.0, 0.20, 10.0)
 AI_USAGE_FILE = "ai_usage.json"  # DB 문서 이름 ai_usage (로컬 실행이면 같은 이름 파일)
@@ -228,14 +261,15 @@ def render_ai_spend():
     """사이드바: 이번 달·전체 AI 사용 금액 (추정)"""
     months = (_ai_usage_cached().get("months") or {})
     this = months.get(time.strftime("%Y-%m"), {})
-    usd_month = sum(d.get("usd", 0) for d in this.values())
-    usd_all = sum(d.get("usd", 0) for m in months.values() for d in m.values())
+    cost = lambda spec, d: ai_cost_usd(split_model_spec(spec)[1], d.get("in", 0), d.get("cached", 0), d.get("write", 0), d.get("out", 0))
+    usd_month = sum(cost(k, d) for k, d in this.items())
+    usd_all = sum(cost(k, d) for m in months.values() for k, d in m.items())
     with st.expander(f"💵 AI 사용 금액 · 이번 달 ${usd_month:,.2f}", expanded=False):
         if not this:
             st.caption("이번 달에는 아직 기록이 없어요. (이 기능을 넣은 뒤부터 기록됩니다)")
-        for spec, d in sorted(this.items(), key=lambda x: -x[1].get("usd", 0)):
+        for spec, d in sorted(this.items(), key=lambda x: -cost(*x)):
             hit = d.get("cached", 0) / max(1, d.get("in", 0))
-            st.markdown(f"<b>{html.escape(ai_model_label(spec))}</b><br>${d.get('usd', 0):,.2f} · {int(d.get('calls', 0))}번 · "
+            st.markdown(f"<b>{html.escape(ai_model_label(spec))}</b><br>${cost(spec, d):,.2f} · {int(d.get('calls', 0))}번 · "
                         f"입력 {d.get('in', 0) / 1000:,.0f}K(캐시 {hit:.0%}) · 출력 {d.get('out', 0) / 1000:,.0f}K", unsafe_allow_html=True)
         st.caption(f"기록한 뒤 전체 ${usd_all:,.2f} (약 {usd_all * 1400:,.0f}원) · 공개 단가로 계산한 추정치예요. 정확한 청구액은 각 회사 결제 화면에서 확인하세요.")
 
@@ -3520,6 +3554,13 @@ def _store_put(sb, filepath, content):
     except Exception:
         pass
 
+def job_item_model(item: Dict, opts: Dict) -> str:
+    """작업 1건에 쓸 모델: 작업 전체 모델(opts) 기준, '가벼운 모델' 표시가 있으면 같은 제공사의 가벼운 모델
+    (예전 작업은 건마다 모델이 고정돼 있었음 → 작업 모델과 다르게 적힌 건만 가벼운 모델로 봄)"""
+    base = opts.get("model", "")
+    light = item.get("light", bool(item.get("model")) and item.get("model") != base and item.get("difficulty") in ("하", "중"))
+    return light_model_for(base) if light else base
+
 def _job_log(job: Dict, msg: str):
     job.setdefault("log", []).append(f"{time.strftime('%m-%d %H:%M:%S')} {msg}")
     job["log"] = job["log"][-60:]
@@ -3660,7 +3701,7 @@ def gen_worker_main(api_key: str, sb_url: str, sb_key: str):
                 _job_update(sb, lambda j: (j.update(status="done", current="", worker=None), _job_log(j, "🎉 모든 작업을 마쳤습니다.")))
                 return
             item = pending[0]
-            item_model = item.get("model") or job.get("opts", {}).get("model", "")
+            item_model = job_item_model(item, job.get("opts", {}))
             _job_update(sb, lambda j: (j.update(current=item["label"], current_model=item_model), claim(j)))
             logs = []
             try:
@@ -3775,6 +3816,23 @@ def _render_gen_job_body(job: Dict):
         st.caption(f"⏳ 지금 처리 중: {job['current']}" + (f" · 🤖 {ai_model_label(job['current_model'])}" if job.get("current_model") else ""))
     elif job.get("opts", {}).get("model") and status in ("running", "stopping"):
         st.caption(f"🤖 {ai_model_label(job['opts']['model'])}")
+    cur_model = globals().get("text_model", "")
+    job_model = job.get("opts", {}).get("model", "")
+
+    def use_model(j, spec):
+        j.setdefault("opts", {})["model"] = spec
+        for it in j.get("items", []):
+            if it.get("state") == "pending" and "light" not in it:
+                it["light"] = bool(it.get("model")) and it.get("model") != job_model and it.get("difficulty") in ("하", "중")
+            it.pop("model", None) if it.get("state") == "pending" else None
+        _job_log(j, f"🤖 남은 작업 모델 → {ai_model_label(spec)}")
+
+    if c["pending"] and cur_model and job_model and cur_model != job_model:
+        w1, w2 = st.columns([3, 1.2], vertical_alignment="center")
+        w1.warning(f"남은 작업은 **{ai_model_label(job_model)}** 로 진행돼요. 사이드바에서 고른 모델은 **{ai_model_label(cur_model)}** 이에요.")
+        if w2.button("남은 작업을 사이드바 모델로", use_container_width=True, key="gen_use_model"):
+            _job_update(supabase if IS_CLOUD_DB else None, lambda j: use_model(j, cur_model))
+            st.rerun()
 
     b1, b2, b3, b4 = st.columns(4)
     if status == "running":
@@ -3783,7 +3841,8 @@ def _render_gen_job_body(job: Dict):
             st.rerun()
     elif status in ("stopped", "stopping") and c["pending"]:
         if b1.button("▶️ 다시 시작", type="primary", use_container_width=True, key="gen_resume"):
-            _job_update(supabase if IS_CLOUD_DB else None, lambda j: (j.update(status="running"), _job_log(j, "▶️ 다시 시작")))
+            _job_update(supabase if IS_CLOUD_DB else None,
+                        lambda j: (use_model(j, cur_model) if cur_model and cur_model != job_model else None, j.update(status="running"), _job_log(j, "▶️ 다시 시작")))
             start_gen_thread()
             st.rerun()
     if c["failed"] and status != "stopping":
@@ -3855,7 +3914,12 @@ GICHUL_FILE = os.path.join(BASE_DIR, "gichul_map.json")   # 실제 기출 시험
 QB_LEVELS = ["최상", "상", "중", "하"]
 QB_SCHOOLS = ["운양고", "제일고"]
 # 문제 1개 생성 비용 대략 (원). 실측: Claude Opus 5.5 한 번 호출 = 입력 약 13,000토큰(그중 출제 DNA 등 12,000은 캐시) + 출력 약 2,000~2,500토큰
-QB_COST_PER_Q = {"opus": 60, "fable": 60, "sonnet": 30, "haiku": 10, "gpt-5-mini": 8, "gpt": 40, "pro": 30, "flash": 6}
+#   Gemini 3.5 Flash 실측: 변형문제 376개에 출력 73만 토큰 → 문제당 약 27원
+#   2026-11-03 모델 비교 시험(아래 AI_MODEL_GUIDE)에서 잰 생성 비용 · 1달러 1,400원 · 정답 검증은 약 10~20% 더
+QB_COST_PER_Q = {"opus": 110, "fable": 250, "sonnet": 75, "haiku": 5,
+                 "gpt-6.1-sol": 42, "gpt-6.1-terra": 20, "gpt-6-luna": 3, "gpt-5-mini": 8, "gpt": 45,
+                 "3.8-flash": 17, "3.6-flash": 30, "3.5-flash-lite": 8, "3.1-flash-lite": 5, "2.5-flash-lite": 2, "2.5-flash": 8,
+                 "flash-lite": 8, "3.5-flash": 35, "flash": 35, "pro": 70}
 
 def qb_cost_per_q(model_spec: str) -> int:
     name = split_model_spec(model_spec)[1].lower()
@@ -4193,7 +4257,7 @@ def _generate_qbank_item(sb_factory, gclient, item: Dict, opts: Dict, dna_rules:
     sb = sb_factory()
     label, q_type, level, school = item["passage_label"], item["q_type"], item["difficulty"], item.get("school", "운양고")
     count = int(item.get("count", 2))
-    model = item.get("model") or opts["model"]
+    model = job_item_model(item, opts)
     existing = [r for r in qb_fetch(sb, [label], "q_type,content") if r.get("q_type") == q_type]
     avoid = [str((r.get("content") or {}).get("focus", "")) for r in existing if (r.get("content") or {}).get("focus")]
     questions = []
@@ -4233,6 +4297,11 @@ def enqueue_qbank(passages: List[Dict], q_types: List[str], levels: List[str], s
             job["items"] = [it for it in job.get("items", []) if it.get("state") in ("pending", "failed")]
             job["created_at"] = time.time()
             job["worker"] = None
+        old_model = (job.get("opts") or {}).get("model", "")
+        for it in job.get("items", []):  # 예전 방식(건마다 모델 고정)으로 남은 작업도 새 모델을 따르게
+            if it.get("state") == "pending" and "light" not in it:
+                it["light"] = bool(it.get("model")) and it.get("model") != old_model and it.get("difficulty") in ("하", "중")
+                it.pop("model", None)
         job["opts"] = {"model": text_model, "api_delay": api_delay, "academy_name": academy_name, "school_name": school_name}
         # 어법은 최상이면 단일 정답형 대신 '있는 대로 고른 것' 조합형으로 (같은 조합은 한 번만)
         combos = list(dict.fromkeys(("어법 (조합형)" if (t == "어법 (단일)" and lv == "최상") else t, lv) for t in q_types for lv in levels))
@@ -4242,7 +4311,7 @@ def enqueue_qbank(passages: List[Dict], q_types: List[str], levels: List[str], s
                                      "passage_label": p["label"], "exam_key": p.get("exam_key", ""), "number": str(p.get("number", "")),
                                      "text": p.get("body_text", ""), "q_type": t, "difficulty": lv, "school": school,
                                      "count": count, "verify": verify, "state": "pending", "error": "",
-                                     "model": light_model_for(text_model) if (light_easy and lv in ("하", "중")) else text_model})
+                                     "light": bool(light_easy and lv in ("하", "중"))})
                 added["n"] += 1
         _job_log(job, f"➕ 변형문제 {added['n']}건 추가 ({school} · {', '.join(levels)} · 건당 {count}문제)")
     _job_update(sb, add)
@@ -5722,6 +5791,7 @@ with st.sidebar:
                               key=f"ai_model_{provider}", help="Secrets의 API 키로 쓸 수 있는 모델을 자동으로 불러옵니다 (1시간마다 새로 확인).")
     text_model = f"{provider}:{model_name}"
     render_ai_spend()
+    render_model_guide()
     if not AI_KEYS.get("gemini"):
         st.caption("ℹ️ AI 이미지 생성은 Gemini 키가 있어야 쓸 수 있습니다.")
     api_delay = st.slider(
