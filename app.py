@@ -4249,7 +4249,10 @@ body { font-family: 'Noto Serif KR', serif; font-size: 10.3pt; line-height: 1.62
 .info div { flex: 1; padding: 5px 10px; border-right: 1px solid #111; }
 .info div:last-child { border-right: 0; }
 .cols { column-count: 2; column-gap: 9mm; column-rule: 1px solid #111; }
-.q { break-inside: avoid; margin: 0 0 14px; }
+.q { margin: 0 0 14px; }  /* 긴 문항은 쪽·단을 넘겨 이어지게 (통째로 다음 쪽으로 밀리면 첫 쪽이 비어 버림) */
+.q .stem, .q .tag, .q .given { break-after: avoid; }
+.passage p { orphans: 3; widows: 3; }
+.choices, .box, .write { break-inside: avoid; }
 .q .stem { font-family: 'Noto Sans KR'; font-size: 10pt; margin-bottom: 3px; }
 .q .stem .no { font-weight: 900; font-size: 11pt; margin-right: 2px; }
 .q .tag { display: block; font-family: 'Noto Sans KR'; font-size: 7.8pt; color: #444; margin: -1px 0 3px 16px; }
@@ -4269,7 +4272,7 @@ u { text-underline-offset: 2px; }
 .choices.inline { display: flex; justify-content: space-between; padding-right: 12px; }
 .choices.inline div { padding: 0; text-indent: 0; }
 .write { border-bottom: 1px solid #999; height: 22px; margin: 0 0 4px 10px; }
-.ans-page { break-before: page; }
+.ans-page { break-before: page; page-break-before: always; clear: both; }  /* 정답·해설은 항상 새 쪽에서 시작 */
 .anshead { border: 2px solid #111; text-align: center; font-family: 'Noto Sans KR'; font-weight: 900; font-size: 15pt; padding: 6px; margin-bottom: 8px; }
 table.key { width: 100%; border-collapse: collapse; font-family: 'Noto Sans KR'; font-size: 9.5pt; margin-bottom: 6px; text-align: center; table-layout: fixed; }
 table.key th, table.key td { border: 1px solid #111; padding: 3px 2px; }
@@ -4345,9 +4348,10 @@ def render_qbank_exam(qs: List[Dict], meta: Dict, gidx: Dict[str, List[Dict]]) -
         o.append("<div class='ans-page'><div class='anshead'>정답 및 해설</div>")
         for i in range(0, len(qs), 10):
             part = qs[i:i + 10]
-            o.append("<table class='key'><tr><th>번호</th>" + "".join(f"<th>{i + k + 1}</th>" for k in range(len(part))) + "</tr><tr><th>정답</th>"
-                     + "".join(f"<td><b>{'서술형' if r['q_type'] in QB_ESSAY_TYPES else html.escape(r['content'].get('answer', ''))}</b></td>" for r in part)
-                     + "</tr><tr><th>구분</th>" + "".join(f"<td>{html.escape(kind_short(r))}</td>" for r in part) + "</tr></table>")
+            pad = "<td></td>" * (10 - len(part))  # 마지막 줄도 10칸 너비로 맞춤
+            o.append("<table class='key'><tr><th>번호</th>" + "".join(f"<th>{i + k + 1}</th>" for k in range(len(part))) + pad.replace("td", "th") + "</tr><tr><th>정답</th>"
+                     + "".join(f"<td><b>{'서술형' if r['q_type'] in QB_ESSAY_TYPES else html.escape(r['content'].get('answer', ''))}</b></td>" for r in part) + pad
+                     + "</tr><tr><th>구분</th>" + "".join(f"<td>{html.escape(kind_short(r))}</td>" for r in part) + pad + "</tr></table>")
         o.append("<div class='keynote'>구분: 기출 = 실제 기출문제 · 변(운) = 운양고 스타일 변형 · 변(제) = 제일고 스타일 변형 · 굵은 기출 이력 = 같은 유형으로 출제됨</div>")
         o.append("<div class='cols'>")
         for n, r in enumerate(qs, 1):
