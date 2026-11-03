@@ -4578,6 +4578,181 @@ table.key th { background: #e8e8e8; }
 @media print { .printbar { display: none; } }
 """
 
+# ---- ANATOMY VISION 단행본: 앞표지 · 사용법 · 제작 소개 2쪽 · (문제·해설) · 저작권 · 뒤표지 ----
+#   양면 인쇄 기준: 앞쪽 4쪽 뒤라 문제는 5쪽(오른쪽 면)부터. 뒤표지가 맨 뒷면(짝수 쪽)이 되려면 전체 쪽수가 짝수여야 하는데
+#   크롬은 '오른쪽 면에서 시작'(break-before: right)을 지원하지 않아서, 인쇄 막대의 '빈 쪽 넣기'로 맞춤
+#   소개 페이지의 숫자(분석한 시험지 수·연도·어법 선택지 수 등)는 기출 분석 자료에서 그때그때 셈
+QB_PASSAGE_MEASURE = [  # 실제 기출 지문 vs 원문: 원문 표현(4단어 묶음)이 남은 비율 (2026-11 측정)
+    ("삽입", "93%", "62~94%"), ("순서", "88%", "12%까지"), ("빈칸", "91~95%", "55~75%"),
+]
+QB_BOOK_CSS = """
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800;900&display=swap');
+@page vcover { size: A4; margin: 0; }
+.vcover { width: 210mm; height: 297mm; margin: 0 auto 10mm; position: relative; overflow: hidden; background: #fff;
+  box-shadow: 0 0 12px rgba(0,0,0,.12); font-family: 'Inter', 'Noto Sans KR', sans-serif; color: #0f172a; break-after: page; page-break-after: always; }
+.vcover .bar { position: absolute; top: 0; left: 0; right: 0; height: 10mm; background: linear-gradient(90deg, #0f172a 0%, #0047AB 65%, #38bdf8 100%); }
+.vcover .inner { position: absolute; inset: 26mm 24mm 22mm; display: flex; flex-direction: column; justify-content: space-between; }
+.vcover .top { display: flex; justify-content: space-between; border-bottom: 1.5px solid #0f172a; padding-bottom: 12px; font-size: 10.5px; font-weight: 800; letter-spacing: 3px; color: #0047AB; }
+.vcover .pill { display: inline-block; background: #b91c1c; color: #fff; font-size: 10.5px; font-weight: 800; letter-spacing: 2px; padding: 5px 12px; border-radius: 4px; margin-bottom: 18px; }
+.vcover h1 { font-size: 60px; font-weight: 900; letter-spacing: -1.5px; line-height: 1.02; margin: 0 0 14px; }
+.vcover h1 span { color: #0047AB; }
+.vcover .en { font-size: 15px; font-weight: 600; color: #475569; margin-bottom: 8px; }
+.vcover .ko { font-size: 14px; font-weight: 500; color: #334155; }
+.vcover .rule { width: 65px; height: 5px; background: #0047AB; margin: 26px 0 20px; }
+.vcover .ttl { font-family: 'Noto Sans KR'; font-size: 17px; font-weight: 900; margin-bottom: 4px; }
+.vcover .meta { font-family: 'Noto Sans KR'; font-size: 12px; color: #475569; }
+.vcover .credit { font-size: 13px; font-weight: 700; letter-spacing: 1.2px; margin-top: 18px; }
+.vcover .credit b { color: #0047AB; font-weight: 900; }
+.vcover .bottom { display: flex; justify-content: space-between; align-items: flex-end; border-top: 1px solid #cbd5e1; padding-top: 16px; font-size: 11.5px; color: #475569; line-height: 1.6; }
+.vcover .student { width: 210px; border: 1.5px solid #0f172a; border-radius: 6px; padding: 8px 14px; background: #f8fafc; color: #0f172a; font-weight: 700; }
+.vcover .student div { display: flex; justify-content: space-between; border-bottom: 1px dashed #cbd5e1; padding: 5px 0; }
+.vcover .student div:last-child { border-bottom: 0; }
+.vcover.blank { box-shadow: 0 0 12px rgba(0,0,0,.06); }
+.vcover.back .inner { justify-content: center; align-items: center; text-align: center; }
+.vcover.back h1 { font-size: 46px; }
+.vcover.back .line { font-family: 'Noto Sans KR'; font-size: 13px; color: #334155; margin: 10px 0 26px; }
+.vcover.back .series { font-size: 12px; font-weight: 600; color: #64748b; letter-spacing: .5px; }
+.vcover.back .series b { color: #0047AB; }
+.vcover.back .foot2 { position: absolute; bottom: 22mm; left: 24mm; right: 24mm; border-top: 1px solid #cbd5e1; padding-top: 12px;
+  font-family: 'Noto Sans KR'; font-size: 11px; color: #475569; display: flex; justify-content: space-between; }
+.vcover.copy .inner { justify-content: flex-end; align-items: flex-end; }
+.vcover.copy .cbox { text-align: right; max-width: 125mm; border-right: 4px solid #0047AB; padding-right: 14px; }
+.vcover.copy .cbox .t { font-size: 12px; font-weight: 900; letter-spacing: 1.5px; margin-bottom: 6px; }
+.vcover.copy .cbox .k { font-family: 'Noto Sans KR'; font-size: 10.5px; font-weight: 700; color: #334155; line-height: 1.65; word-break: keep-all; margin-bottom: 6px; }
+.vcover.copy .cbox .e { font-size: 9px; color: #94a3b8; line-height: 1.4; }
+.vpage { min-height: 266mm; font-family: 'Noto Sans KR', sans-serif; color: #0f172a; break-after: page; page-break-after: always; line-height: 1.6; }
+.vpage .kicker { font-family: 'Inter'; font-size: 10px; font-weight: 800; letter-spacing: 3px; color: #0047AB; }
+.vpage h2 { font-size: 21pt; font-weight: 900; margin: 4px 0 4px; letter-spacing: -.5px; }
+.vpage .lead { font-size: 12pt; font-weight: 700; color: #0047AB; margin: 0 0 10px; }
+.vpage p { font-size: 10pt; margin: 0 0 8px; word-break: keep-all; }
+.vpage .step { border-left: 4px solid #0047AB; padding: 2px 0 2px 12px; margin: 12px 0; }
+.vpage .step h3 { font-size: 11.5pt; margin: 0 0 3px; }
+.vpage .step h3 span { font-family: 'Inter'; color: #0047AB; font-weight: 900; margin-right: 6px; }
+.vpage .step ul { margin: 2px 0 0; padding-left: 16px; font-size: 9.8pt; }
+.vpage table { width: 100%; border-collapse: collapse; font-size: 9.5pt; margin: 5px 0 4px; }
+.vpage th, .vpage td { border: 1px solid #94a3b8; padding: 4px 6px; text-align: center; }
+.vpage th { background: #eef2ff; }
+.vpage td:first-child { font-weight: 700; }
+.vpage .two { display: flex; gap: 10mm; }
+.vpage .two > div { flex: 1; border: 1.5px solid #0f172a; border-radius: 8px; padding: 10px 14px; }
+.vpage .two h3 { font-size: 13pt; margin: 0 0 6px; }
+.vpage .two h3.u { color: #0047AB; } .vpage .two h3.j { color: #b91c1c; }
+.vpage .two ul { margin: 0; padding-left: 16px; font-size: 9.8pt; }
+.vpage .two li { margin-bottom: 6px; }
+.vpage .so { background: #f1f5f9; border-radius: 8px; padding: 10px 16px; margin-top: 12px; font-size: 10pt; }
+.vpage .so ul { margin: 4px 0 0; padding-left: 16px; }
+.vpage .quote { text-align: right; margin-top: 16px; font-size: 11pt; font-weight: 700; }
+.vpage .quote span { display: block; font-size: 9.5pt; font-weight: 400; color: #475569; }
+.vpage .howto li { margin-bottom: 12px; font-size: 10.5pt; }
+.vpage .howto b { color: #0047AB; }
+.vcover.filler { display: none; }
+body.addblank .vcover.filler { display: block; }
+.printbar label { font-family: 'Noto Sans KR'; font-size: 12px; margin-right: 10px; color: #334155; }
+@media print {
+  .vcover { page: vcover; margin: 0 !important; box-shadow: none !important; height: 296mm; }
+}
+"""
+
+def qb_book_stats(gmap: Dict, gidx: Dict) -> Dict:
+    """소개 페이지에 넣을 숫자: 분석한 실제 기출 시험지 수·연도, 연결된 지문 수, 학교별 어법 선택지 수·많이 나온 개념"""
+    exams = list((gmap.get("exams") or {}).values())
+    years = sorted({int(m.group(1)) for ex in exams for m in [re.search(r"(\d{2})\s*년", str(ex.get("exam_name", "")))] if m})
+    grammar = {}
+    for school, text in QB_GRAMMAR_DNA.items():
+        m = re.search(r"개념 빈도\((\d+)개 선택지\):\s*(.+)", text)
+        if m:
+            grammar[school] = (int(m.group(1)), [x.strip() for x in m.group(2).split(">")][:3])
+    return {"exams": len(exams), "by_school": {sc: sum(1 for ex in exams if sc in str(ex.get("school", ""))) for sc in QB_SCHOOLS},
+            "years": (2000 + years[0], 2000 + years[-1]) if years else None, "linked": len(gidx), "grammar": grammar}
+
+def render_vision_book(meta: Dict, stats: Dict, n_total: int, n_real: int) -> (str, str):
+    """앞쪽 4쪽(앞표지·사용법·제작 소개 ①②)과 뒤쪽 2쪽(저작권·뒤표지) HTML"""
+    e = html.escape
+    acad = e(meta.get("academy") or "포피엠 입시 영어")
+    yrs = stats.get("years")
+    yr_txt = f"{yrs[0]}~{yrs[1]}년 " if yrs else ""
+    n_ex = stats.get("exams", 0)
+    by = stats.get("by_school", {})
+    gram = stats.get("grammar", {})
+    n_gram = sum(v[0] for v in gram.values())
+    gram_rows = "".join(f"<tr><td>{e(sc)}</td><td>{v[0]}개</td><td>{e(' · '.join(v[1]))}</td></tr>" for sc, v in gram.items())
+    pass_rows = "".join(f"<tr><td>{t}</td><td>{u}</td><td>{j}</td></tr>" for t, u, j in QB_PASSAGE_MEASURE)
+    title = e(meta.get("title", ""))
+    front = f"""
+<div class='vcover'><div class='bar'></div><div class='inner'>
+  <div class='top'><span>PQRS YOUNG ENGLISH CURRICULUM SERIES</span><span>ANATOMY SERIES</span></div>
+  <div>
+    <div class='pill'>REAL EXAM DNA EDITION &bull; 운양고 &middot; 제일고</div>
+    <h1>ANATOMY <span>VISION</span></h1>
+    <div class='en'>School-Specific Variant Exam System &mdash; Built from Real Exam DNA</div>
+    <div class='ko'>운양고·제일고 실제 기출을 해부해, 출제자의 눈으로 다시 만든 변형문제</div>
+    <div class='rule'></div>
+    <div class='ttl'>{title}</div>
+    <div class='meta'>총 {n_total}문항{f' · 실제 기출 {n_real}문항 포함' if n_real else ''}</div>
+    <div class='credit'>Created &amp; Designed by <b>PQRS Young</b> &times; {acad}</div>
+  </div>
+  <div class='bottom'>
+    <div><b style='color:#0f172a;font-size:13px'>PQRS Young &times; {acad}</b><br>High School English Exam &amp; CSAT Preparation</div>
+    <div class='student'><div><span>SCHOOL</span><span style='font-weight:500;color:#64748b'>{e(meta.get('kind', ''))}</span></div><div><span>GRADE / CLASS</span><span></span></div><div><span>STUDENT NAME</span><span></span></div></div>
+  </div>
+</div></div>
+<div class='vpage'>
+  <div class='kicker'>HOW TO USE</div><h2>이 교재 사용법</h2>
+  <ol class='howto'>
+    <li><b>실제 시험처럼 시간을 재고 푸세요.</b><br>문항 아래 작은 표시로 실제 기출인지, 어느 학교 스타일 변형인지, 난이도가 어떤지 알 수 있어요.</li>
+    <li><b>'기출 이력'을 꼭 보세요.</b><br>같은 지문이 운양고·제일고 어느 시험 몇 번에 나왔는지 적혀 있어요. 굵게 표시된 것은 같은 유형으로 나온 문제예요.</li>
+    <li><b>틀린 문제는 해설의 '근거'를 지문에서 직접 찾아 밑줄 치세요.</b><br>재진술 문제는 해설 끝 '원문 표현 → 바꾼 표현'을 외우는 것이 핵심이에요.</li>
+  </ol>
+</div>
+<div class='vpage'>
+  <div class='kicker'>HOW ANATOMY VISION WAS MADE</div><h2>ANATOMY VISION은 이렇게 만들었습니다</h2>
+  <div class='lead'>"외운 지문으로는 풀 수 없게, 그러나 우리 학교 시험과 똑같이."</div>
+  <p>시중 변형문제는 대부분 어느 학교 시험인지 상관없이 똑같이 만들어집니다. 그런데 운양고와 제일고는 같은 지문을 내도 묻는 방식이 전혀 다릅니다. ANATOMY VISION은 문제를 만들기 전에, 먼저 두 학교의 실제 시험지를 해부했습니다.</p>
+  <div class='step'><h3><span>STEP 1</span>실제 기출 시험지 수집과 해부</h3><ul>
+    <li>운양고·제일고 {yr_txt}중간·기말 시험지 <b>{n_ex}회분</b>(운양고 {by.get('운양고', 0)} · 제일고 {by.get('제일고', 0)})을 문항 하나하나 분석했습니다. 번호, 배점, 유형, 출처 지문을 모두 확인했습니다.</li>
+    <li>출처 지문을 원문과 연결해, 지문 <b>{stats.get('linked', 0)}개</b>에 어느 시험 몇 번에 나왔는지 <b>기출 이력</b>을 만들었습니다.</li></ul></div>
+  <div class='step'><h3><span>STEP 2</span>어법 선택지 {n_gram:,}개 전수 분석</h3>
+    <table><tr><th>학교</th><th>선택지</th><th>많이 나온 개념 TOP 3</th></tr>{gram_rows}</table></div>
+  <div class='step'><h3><span>STEP 3</span>지문을 얼마나 바꾸는지 측정</h3>
+    <p style='font-size:9.5pt;margin:0'>실제 시험지 지문과 교과서·모의고사 원문을 네 단어씩 비교해, 원문 표현이 몇 % 남아 있는지 쟀습니다.</p>
+    <table><tr><th>유형</th><th>운양고</th><th>제일고</th></tr>{pass_rows}</table>
+    <ul><li><b>결론:</b> 운양고는 지문을 거의 그대로 두고 '주어진 문장'만 바꿔 씁니다. 제일고는 지문 본문까지 다시 써서, 외운 학생이 바로 찾지 못하게 합니다.</li></ul></div>
+  <div class='step'><h3><span>STEP 4</span>학교별로 출제하고 정답을 한 번 더 검증</h3><ul>
+    <li>위 분석 결과를 출제 기준으로 삼아 학교 스타일과 난이도(하·중·상·최상)별로 문제를 만들었습니다.</li>
+    <li>정답은 따로 한 번 더 풀어 맞지 않는 문제는 버렸습니다.</li></ul></div>
+</div>
+<div class='vpage'>
+  <div class='kicker'>THROUGH THE EXAMINER'S EYES</div><h2>운양고·제일고 출제자의 시선</h2>
+  <div class='two'>
+    <div><h3 class='u'>운양고 출제자는 이렇게 냅니다</h3><ul>
+      <li><b>"원문을 외웠는지 정확히 확인한다."</b><br>지문은 원문에 가깝게 두고, 주어진 문장과 선택지를 바꿔 씁니다.<br><i>at three degrees of warming</i> → <i>when the temperature rises by three or four more degrees</i></li>
+      <li><b>"있는 대로 모두 고르게 한다."</b><br>어법은 ⓐ~ⓖ 중 틀린/옳은 것을 모두 고르는 조합형이 대부분이라, 하나만 알아서는 풀 수 없습니다.</li>
+      <li><b>{e(gram.get('운양고', (0, ['수일치']))[1][0].split()[0])}를 가장 많이 묻습니다.</b><br>긴 수식어 뒤의 진짜 주어, 동명사구 주어 같은 함정입니다.</li></ul></div>
+    <div><h3 class='j'>제일고 출제자는 이렇게 냅니다</h3><ul>
+      <li><b>"외운 문장 모양으로는 못 찾게 한다."</b><br>지문 본문까지 동의어·구조 바꾸기로 재진술하고, 순서 문제는 도입부를 새로 쓰기도 합니다.</li>
+      <li><b>"선택지가 길고 어휘가 어렵다."</b><br>주제·제목·요지 선택지를 학술적 상위 개념어로 바꿉니다.<br><i>help a child in distress</i> → <i>altruistic behavior</i></li>
+      <li><b>{e(gram.get('제일고', (0, ['분사·분사구문']))[1][0].split()[0])}을 가장 많이 묻습니다.</b><br>감정 분사와 분사구문의 능동·수동을 특히 자주 내고, 도치 구문(So + 형용사, Not only)도 자주 활용합니다.</li></ul></div>
+  </div>
+  <div class='so'><b>그래서 ANATOMY VISION은</b><ul>
+    <li>모든 변형문제에 <b>어느 학교 스타일로 만들었는지</b> 표시했습니다.</li>
+    <li>실제 기출문제는 <b>'실제 기출'</b>로 따로 표시해 함께 실었습니다.</li>
+    <li>해설마다 <b>근거 문장</b>과 <b>원문 표현 → 바꾼 표현</b>을 적었습니다.</li></ul></div>
+  <div class='quote'>"우리 학교 시험지를 가장 많이 본 사람이 만든 변형문제."<span>— {acad} PQRS영T</span></div>
+</div>"""
+    back = f"""
+<div class='vcover blank filler'></div>
+<div class='vcover copy'><div class='inner'><div class='cbox'>
+  <div class='t'>ANATOMY VISION &mdash; CREATED BY PQRS YOUNG</div>
+  <div class='k'>본 교재의 모든 저작권은 제작자인 <b>PQRS영쌤</b>에게 있으며, 저작권자의 사전 서면 동의 없는 무단 복제, 배포, 전송, 스캔 및 도용 시 저작권법에 의거하여 민·형사상의 엄중한 법적 처벌을 받을 수 있습니다.</div>
+  <div class='e'>Copyright &copy; PQRS Young ({acad}). All rights reserved.<br>Unauthorized reproduction, distribution, or plagiarism of this material is strictly prohibited and subject to legal prosecution.</div>
+</div></div></div>
+<div class='vcover back' style='break-after:auto;page-break-after:auto'><div class='bar'></div><div class='inner'>
+  <h1>ANATOMY <span>VISION</span></h1>
+  <div class='line'>실제 기출 {n_ex}회분 · 어법 선택지 {n_gram:,}개 분석 · 학교별 출제 DNA</div>
+  <div class='series'>Anatomy One-Shot &middot; Self-Note &middot; Core &middot; Voca &middot; <b>Vision</b></div>
+</div><div class='foot2'><span>장기동 {acad} · PQRS영T</span><span>031-991-1199</span></div></div>"""
+    return front, back
+
 def render_qbank_exam(qs: List[Dict], meta: Dict, gidx: Dict[str, List[Dict]]) -> str:
     def tag_of(r):
         """1줄: 지문 · 유형 + [실제 기출]/[변형 · ○○고 스타일 · 난이도]  2줄: 기출 이력 (같은 시험은 번호를 묶고, 같은 유형은 굵게)"""
@@ -4612,7 +4787,12 @@ def render_qbank_exam(qs: List[Dict], meta: Dict, gidx: Dict[str, List[Dict]]) -
             return "기출"
         return f"변({(r.get('school') or '?')[:1]})"
 
-    o = [f"<div class='printbar'><button onclick='window.print()'>🖨️ 인쇄 / PDF로 저장</button></div><div class='sheet'>",
+    book = meta.get("book_stats")
+    front, back = render_vision_book(meta, book, len(qs), sum(1 for r in qs if r["difficulty"] == QB_GICHUL_LEVEL)) if book else ("", "")
+    blank_toggle = ("<label title='양면 인쇄 때 뒤표지가 맨 뒷면에 오게 하려면 전체 쪽수가 짝수여야 해요'>"
+                    "<input type='checkbox' onchange=\"document.body.classList.toggle('addblank', this.checked)\"> "
+                    "인쇄 미리보기 쪽수가 홀수면 체크 → 뒤표지 앞에 빈 쪽 넣기</label>") if book else ""
+    o = [f"<div class='printbar'>{blank_toggle}<button onclick='window.print()'>🖨️ 인쇄 / PDF로 저장</button></div>{front}<div class='sheet'>",
          f"""<div class='head'><div class='top'><div class='brand'><b>PQRS</b>영T {html.escape(meta.get('brand', '변형문제 TEST'))}</div><div class='kind'>{html.escape(meta.get('kind', ''))}</div></div>
 <h1>{html.escape(meta.get('title', ''))}</h1><div class='sub'>{html.escape(meta.get('sub', ''))}</div>
 <div class='info'><div>반 :</div><div>번호 :</div><div>이름 :</div><div>점수 :</div></div></div><div class='cols'>"""]
@@ -4655,7 +4835,9 @@ def render_qbank_exam(qs: List[Dict], meta: Dict, gidx: Dict[str, List[Dict]]) -
                      + note + "".join(f"<li>{qb_html(e)}</li>" for e in (c.get("explanation") or [])) + "</ul></div>")
         o.append("</div></div>")
     o.append("<div class='foot'>PQRS 영T 자체제작 · 장기동 포피엠입시영어 031-991-1199</div></div>")
-    return f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>{html.escape(meta.get('title', '변형문제'))}</title><style>{QB_EXAM_CSS}</style></head><body>{''.join(o)}</body></html>"
+    o.append(back)
+    css = QB_EXAM_CSS + (QB_BOOK_CSS if book else "")
+    return f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>{html.escape(meta.get('title', '변형문제'))}</title><style>{css}</style></head><body>{''.join(o)}</body></html>"
 
 # ---- 화면 ----
 # 지문 고르기: 출처 → 학년 → 시험을 고르면 번호가 칩으로 펼쳐지고, 칩 옆 작은 숫자는 쌓인 문제 수.
@@ -4892,10 +5074,12 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
             title = _qb_row("제목").text_input("시험지 제목", value="", placeholder=default_title or "예: 고1 26년 6월 19·20·21번 변형문제", key="qb_exam_title",
                                                 label_visibility="collapsed")
             kind = _qb_row("머리말 오른쪽").text_input("머리말 오른쪽", value=school_name, key="qb_exam_kind", label_visibility="collapsed")
-            o1, o2, o3 = _qb_row("표시").columns(3)
+            o1, o2, o3, o4 = _qb_row("표시").columns(4)
             show_tag = o1.checkbox("문항 아래 출처·구분", value=True, key="qb_exam_tag", help="실제 기출/변형, 학교 스타일, 난이도")
             show_gichul = o2.checkbox("같은 지문 기출 이력", value=True, key="qb_exam_gichul", help="운양고·제일고에서 이 지문이 나온 시험·번호 전부")
             with_answers = o3.checkbox("마지막에 정답·해설", value=True, key="qb_exam_ans")
+            as_book = o4.checkbox("ANATOMY VISION 책으로", value=True, key="qb_exam_book",
+                                  help="앞표지·사용법·제작 소개 2쪽을 앞에, 저작권·뒤표지를 뒤에 붙여 양면 인쇄하면 한 권의 책처럼 나와요")
         b1, b2 = st.columns([2, 1])
         make = b1.button("📄 시험지 만들기", type="primary", disabled=not sel_e or not e_types or (not e_levels and e_real != "기출만"), use_container_width=True, key="qb_exam_btn")
         reshuffle = b2.button("🔀 다른 조합으로 다시 뽑기", disabled="qb_exam_html" not in st.session_state, use_container_width=True, key="qb_exam_shuffle")
@@ -4915,8 +5099,13 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
                         "sub": " · ".join(x for x in [
                             f"실제 기출 {sum(1 for r in picked if r['difficulty'] == QB_GICHUL_LEVEL)}" if e_real != "빼기" else "",
                             f"변형 {sum(1 for r in picked if r['difficulty'] != QB_GICHUL_LEVEL)} ({', '.join(e_levels)})" if e_real != "기출만" else "",
-                            f"총 {len(picked)}문항"] if x), "show_tag": show_tag, "show_gichul": show_gichul, "with_answers": with_answers}
-                st.session_state.qb_exam_html = render_qbank_exam(picked, meta, gichul_index(load_gichul_map(), labels_all))
+                            f"총 {len(picked)}문항"] if x), "show_tag": show_tag, "show_gichul": show_gichul, "with_answers": with_answers,
+                        "academy": academy_name}
+                gmap = load_gichul_map()
+                gidx = gichul_index(gmap, labels_all)
+                if as_book:
+                    meta["book_stats"] = qb_book_stats(gmap, gidx)
+                st.session_state.qb_exam_html = render_qbank_exam(picked, meta, gidx)
                 st.session_state.qb_exam_info = (len(picked), notes, title or default_title or "변형문제")
             else:
                 st.session_state.pop("qb_exam_html", None)
