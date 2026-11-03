@@ -2237,7 +2237,7 @@ FIELD_MAX_CHARS = {
     "ys": 700, "kor": 800, "eng": 1500, "grammar": 700, "explain": 600, "summary": 900, "title": 300,
     "meaning": 300, "synonyms": 400, "synonyms_text": 400, "topic": 800, "easy_explanation": 1800,
     "structure_flow": 1200, "explanation": 1000, "english_statement": 700, "korean_statement": 500,
-    "point": 1500, "one_line_summary": 300,
+    "point": 1500, "one_line_summary": 300, "passage": 6000,
 }
 FIELD_MAX_DEFAULT = 4000  # 위에 없는 칸 (translation처럼 원래 긴 칸은 제외)
 FIELD_NO_LIMIT = {"translation", "visual_guide", "text", "restored_text", "body_text"}
@@ -3388,8 +3388,11 @@ def gen_worker_main(api_key: str, sb_url: str, sb_key: str):
             logs = []
             try:
                 sb_factory = (lambda: create_client(sb_url, sb_key)) if sb is not None else (lambda: None)
-                ok, err = _generate_item(sb_factory, gclient, item, {**job.get("opts", {}), "essay_rules": essay_rules}, dna_rules, logs,
-                                         heartbeat=lambda: _job_update(sb, claim))
+                if item.get("kind") == "qbank":
+                    ok, err = _generate_qbank_item(sb_factory, gclient, item, job.get("opts", {}), dna_rules, essay_rules, logs)
+                else:
+                    ok, err = _generate_item(sb_factory, gclient, item, {**job.get("opts", {}), "essay_rules": essay_rules}, dna_rules, logs,
+                                             heartbeat=lambda: _job_update(sb, claim))
             except Exception as e:
                 ok, err = False, f"처리 중 오류: {str(e)[:200]}"
 
@@ -3532,10 +3535,12 @@ def render_gen_job_live():
     job = load_gen_job()
     c = _gen_job_counts(job)
     # 지문이 완료될 때마다 화면의 교재 목록을 DB에서 다시 불러와, 화면이 오래된 목록으로 덮어쓰지 않게 함
+    # (변형문제는 교재 목록과 상관없으므로 세지 않음)
+    done_books = sum(1 for it in job.get("items", []) if it.get("state") == "done" and it.get("kind") != "qbank")
     seen = st.session_state.get("gen_seen_done")
-    if seen is not None and seen != c["done"]:
+    if seen is not None and seen != done_books:
         reload_libraries_from_db()
-    st.session_state.gen_seen_done = c["done"]
+    st.session_state.gen_seen_done = done_books
     if job.get("status") in ("running", "stopping") and not gen_thread_alive():
         start_gen_thread()  # 서버가 재시작된 경우 자동으로 이어서 진행
     _render_gen_job_body(job)
@@ -3554,6 +3559,857 @@ def render_gen_job_panel():
             render_gen_job_live()
         else:
             _render_gen_job_body(job)
+
+
+# -----------------------------
+# 5-Q. 변형문제 은행 & 시험지 만들기
+#   - 원문 라이브러리(모의고사 번호·교과서 단락)마다 유형·난이도별 변형문제를 계속 쌓음
+#   - 문제는 Supabase 'question_bank' 표에 한 문제씩 따로 저장 (앱을 열 때 불러오지 않아 다른 탭 속도에 영향 없음)
+#   - 생성은 교재 생성과 같은 백그라운드 작업 목록에서 하나씩 처리 (창을 닫아도 계속)
+#   - 시험지: 고른 번호에서 골고루 뽑아 원하는 개수·유형·난이도로 구성, 실제 학교 기출이면 출처 표시
+# -----------------------------
+QB_TABLE = "question_bank"
+QB_FILE = os.path.join(BASE_DIR, "question_bank.json")   # Supabase가 없을 때만 쓰는 로컬 저장
+GICHUL_FILE = os.path.join(BASE_DIR, "gichul_map.json")   # 실제 기출 시험지 문항 → 원문 라이브러리 지문 연결
+QB_LEVELS = ["최상", "상", "중", "하"]
+QB_SCHOOLS = ["운양고", "제일고"]
+QB_COST_PER_Q = 3  # 문제 1개 생성 비용 대략 (원, 정답 검증 포함 시 약 1.3배)
+
+QB_SETUP_SQL = """create table if not exists public.question_bank (
+  id uuid primary key default gen_random_uuid(),
+  created_at timestamptz not null default now(),
+  passage_label text not null,
+  exam_key text,
+  number text,
+  q_type text not null,
+  difficulty text not null,
+  school text,
+  content jsonb not null
+);
+create index if not exists question_bank_label_idx on public.question_bank (passage_label);
+alter table public.question_bank enable row level security;
+create policy "qb select" on public.question_bank for select using (true);
+create policy "qb insert" on public.question_bank for insert with check (true);
+create policy "qb update" on public.question_bank for update using (true);
+create policy "qb delete" on public.question_bank for delete using (true);"""
+
+# 유형별 문제 형식 (학교 시험에 나오는 유형)
+QB_TYPES = {
+    "주제": "stem '다음 글의 주제로 가장 적절한 것은?'. choices는 영어 명사구 5개. 정답은 지문 핵심을 상위 개념어로 재진술.",
+    "제목": "stem '다음 글의 제목으로 가장 적절한 것은?'. choices는 영어 제목 5개(콜론형·의문형 등 섞기).",
+    "요지·주장": "stem '다음 글의 요지로 가장 적절한 것은?' 또는 '필자가 주장하는 바로 가장 적절한 것은?'. 하·중은 한국어 선택지, 상·최상은 영어 재진술 선택지.",
+    "내용 일치·불일치": "stem '윗글의 내용과 일치하는(일치하지 않는) 것은?'. 하·중은 한국어 선택지, 상·최상은 영어 재진술 선택지. 숫자·비교·원인/결과 함정 활용.",
+    "<보기> 일치 조합형": "box에 ⓐ~ⓖ(최상은 ⓐ~ⓗ) 진술을 줄바꿈으로 나열. stem '윗글의 내용과 일치하는 것만을 &lt;보기&gt;에서 있는 대로 고른 것은?'. choices는 'ⓐ, ⓒ, ⓔ' 같은 조합 5개.",
+    "빈칸": "passage의 핵심 표현 자리를 '__________'로 비우고 stem '다음 빈칸에 들어갈 말로 가장 적절한 것은?'. choices는 영어 어구 5개.",
+    "순서": "given에 주어진 글(첫 부분), passage에 (A)(B)(C) 세 덩어리를 섞어 줄바꿈으로 구분(각 덩어리 앞에 (A) 등 표시). stem '주어진 글 다음에 이어질 글의 순서로 가장 적절한 것은?'. choices는 '(A) - (C) - (B)' 형식 5개.",
+    "삽입": "given에 빼낸 문장, passage의 문장 사이에 ( ① )~( ⑤ ) 표시. stem '글의 흐름으로 보아, 주어진 문장이 들어가기에 가장 적절한 곳은?'. choices는 빈 문자열 5개.",
+    "무관한 문장": "passage 중간 문장 다섯 개 앞에 ①~⑤를 붙이고 그중 하나는 흐름과 무관한 새 문장으로 바꿔 넣음. stem '다음 글에서 전체 흐름과 관계 없는 문장은?'. choices는 빈 문자열 5개.",
+    "요약문 (A)(B)": "box에 영어 요약문 한 문장(빈칸 (A), (B) 포함). stem '다음 글의 내용을 한 문장으로 요약하고자 한다. 빈칸 (A), (B)에 들어갈 말로 가장 적절한 것은?'. choices는 'word1 …… word2' 형식 5개.",
+    "어법 (조합형)": "passage에 ⓐ~ⓖ 밑줄 7개(<u>…</u> 앞에 ⓐ 등). 틀린 것 2~4개는 원문 형태를 실제로 틀린 형태로 바꿔 passage에 써 넣는다(예: 원문 is → passage에는 ⓐ <u>are</u>). 바꾸지 않은 밑줄은 원문 그대로라 옳은 것. stem '밑줄 친 ⓐ~ⓖ 중, 어법상 틀린 것만을 있는 대로 고른 것은?'(또는 옳은 것만). choices는 조합 5개.",
+    "어법 (단일)": "passage에 ①~⑤ 밑줄 5개, 그중 1개만 원문을 실제로 틀린 형태로 바꿔 써 넣는다(나머지 4개는 원문 그대로). stem '다음 글의 밑줄 친 부분 중, 어법상 틀린 것은?'. choices는 빈 문자열 5개.",
+    "낱말 (문맥상)": "passage에 ①~⑤ 밑줄 낱말 5개, 그중 하나를 문맥과 반대되는 낱말로 바꿈. stem '다음 글의 밑줄 친 부분 중, 문맥상 낱말의 쓰임이 적절하지 않은 것은?'. choices는 빈 문자열 5개.",
+    "함축 의미": "passage의 비유적 어구 하나에 밑줄. stem '밑줄 친 부분이 다음 글에서 의미하는 바로 가장 적절한 것은?'. choices는 영어 5개.",
+    "서술형 (어법 수정)": "passage의 원문 2~3곳을 실제로 틀린 형태로 바꿔 써 넣고(밑줄 없이 또는 ⓐ~ⓗ 밑줄 중 일부), stem에 '찾아 바르게 고쳐 쓰시오' 조건. choices는 빈 배열, answer에 '틀린 표현 → 고친 표현'을 모두 적음.",
+    "서술형 (조건 영작)": "box에 <조건>(사용할 단어·어형 변화·단어 수)을 줄바꿈으로. passage의 핵심 문장 한 곳을 빈칸 또는 우리말로 바꿈. choices는 빈 배열, answer에 모범 답안 영어 문장.",
+}
+QB_TYPE_NAMES = list(QB_TYPES)
+QB_ESSAY_TYPES = {t for t in QB_TYPE_NAMES if t.startswith("서술형")}
+QB_MARK_TYPES = {"삽입", "무관한 문장", "어법 (단일)", "낱말 (문맥상)"}  # 선택지가 지문 속 ①~⑤ 표시인 유형
+
+QB_SCHOOL_STYLE = {
+    "운양고": "24문항·100점, 배점 3.8~4.5. 어법 '틀린/옳은 것만 있는 대로 고른 것'(ⓐ~ⓖ 조합형), '<보기>에서 일치하는/일치하지 않는 것만 있는 대로'(ⓐ~ⓗ 진술), 순서·삽입·요약문(A)(B)·무관한 문장·낱말·빈칸·주제·제목·요지. 1학년은 한글 선택지 내용일치·우리말→영어 표현도 출제.",
+    "제일고": "24문항, 배점 3.6~4.8. 영어 선택지가 길고 지문 재진술 어휘가 고급. 어법 조합형, 빈칸, 제목/주제, 내용 일치, 밑줄 의미, 문맥상 낱말, 요약문, 도치 구문(So+형용사, Not only) 자주 활용.",
+}
+QB_LEVEL_RULES = {
+    "하": "단일 정답형 위주, 오답은 명백히 틀림, 원문 표현 그대로.",
+    "중": "오답 1~2개는 지문 키워드를 재사용한 매력적 오답.",
+    "상": "조합형·<보기>형 포함, 숫자·more than/less than·원인/결과 뒤바꾸기 함정, 바로 뒤 단어가 미끼가 되는 낱말 문제, 지시어로 막히는 삽입 위치.",
+    "최상": "상 + 선택지를 전부 재진술(paraphrase), <보기> 7~8개, 어법은 완료부정사·동격 that·분사구문 태·도치 등 고난도 포인트로만 구성.",
+}
+# 어법 조합형은 난이도마다 밑줄 개수·틀린 개수·묻는 방향을 따로 정함 (최상은 실제 내신처럼 '있는 대로 고른 것')
+# 실제 운양고(29회)·제일고(25회) 기출 어법 선택지 전수 정리(PQRS영쌤 '어법·어휘 출제 총정리')에서 뽑은 개념별 빈도와 함정 패턴
+QB_GRAMMAR_TYPES = {"어법 (조합형)", "어법 (단일)", "서술형 (어법 수정)", "서술형 (조건 영작)"}
+QB_GRAMMAR_DNA = {
+    "운양고": """- 형식: 'ⓐ~ⓕ(ⓖ) 중 어법상 틀린/옳은 것만 모두 고르기'가 대부분(단어·구 밑줄과 문장 단위 밑줄 모두), 다음으로 ①~⑤ 단일, (A)(B)(C) 네모 어법. 서술형은 '틀린 두 곳 찾아 고치기'·<보기> 배열 영작.
+- 개념 빈도(524개 선택지): 수일치 66 > 분사·분사구문 58 > 관계대명사 48 > 능동/수동 44 > 5형식 목적격보어 37 > 동명사 34 > 명사절·동격 that 30 > 병렬 29 > 시제·가정법·조동사 26 > 형용사/부사·2형식 보어 23 > 관계부사 vs 관계대명사 21 > 도치·강조 17 > 대명사 지칭 16 > 가주어·가목적어 13 > 비교 10 > to부정사 9 > 한정사 9 > 접속사 vs 전치사 7 > 복합관계사 6.""",
+    "제일고": """- 형식: '①~⑤ 중 어법상 틀린(옳은) 것 1개'와 문장 단위 밑줄이 많고, 'ⓐ~ⓗ 중 옳은/틀린 것만을 있는 대로', '옳은 표현의 개수' 형식도 출제. 서술형은 '틀린 문장 찾아 고쳐 쓰기'·조건 영작(관계대명사·가정법·비교 구문 지정).
+- 개념 빈도(488개 선택지): 분사·분사구문 82 > 관계대명사 46 > 명사절·동격 that 35 > 능동/수동 34 > 동명사 33 > 시제·가정법·조동사 30 > 병렬 27 > 수일치 25 > 형용사/부사 25 > 대명사 지칭 16 > 접속사 vs 전치사 16 > to부정사 16 > 5형식 목적격보어 15 > 관계부사 14 > 도치·강조 14 > 가주어·가목적어 13 > 동사 자리 vs 준동사 11 > 자동사/타동사 9.""",
+}
+QB_GRAMMAR_TRAPS = """- 수일치: 긴 수식어·삽입구 뒤 핵심 주어, 동명사구·명사절 주어는 단수, one of + 복수명사 → 단수, a number of → 복수, 관계절 동사는 선행사에, 계속적 용법 which(앞 절)는 단수, 부분 표현 + of + 명사, each/every + 단수, the + 국적형용사 복수, 도치 구문의 뒤 주어.
+- 관계사: 선행사가 있으면 what 불가(최다 함정), 계속적 용법 what 불가, 전치사 + that 불가, 뒤가 완전한 절이면 관계부사/전치사 + 관계대명사, 관계부사 뒤가 불완전하면 which/that, 사람 선행사 + which 오류, 주격 관계대명사 생략 불가.
+- 명사절: fact/belief/claim/sign/evidence 뒤 동격 that ↔ which 오류, 완전한 절 that ↔ 불완전한 절 what, 간접의문문 어순.
+- 분사: 감정 분사(satisfied/pleased/excited/interested/surprised ↔ -ing), 분사구문 능동·수동(Compared to, First expressed, Considered, Loaded), with + O + 분사, 접속사 없이 두 동사 → 분사구문, 명사 후치 수식 분사.
+- 능동/수동: 자동사(happen, emerge, appear) 수동 불가, 목적어가 있으면 능동, be believed/expected to V, 수동 부정사 to be p.p.
+- 5형식: help + O + (to) V, make/let/have + O + 원형, allow/force/order/expect/inspire/prompt/beg/compel + O + to V, 지각동사 + O + 원형/-ing, make + O + 형용사(부사 오류).
+- 동명사: 전치사 + 동명사(instead of, by, without, devoted to, when it comes to), end up/keep/cannot help/stop -ing, be used to -ing ↔ used to V.
+- 형용사/부사: 2형식 보어(feel/seem/look + 형용사), 과거분사·형용사를 꾸미는 부사, 동사 수식 부사.
+- 병렬: and/or/but 앞뒤 시제·형태 일치, not only A but also B.
+- 시제·가정법: If 생략 도치(Had you not ~), 가정법 과거완료 would have p.p., 과거보다 앞선 일 과거완료, 조동사 + 원형, 조건 부사절 현재시제.
+- 도치·강조: 부정어(Not only/Rarely/Seldom/Only then) 문두 조동사 도치, So + 형용사 문두, Here + V + S, It ~ that 강조의 수일치.
+- 기타: 가목적어 it 누락(make it possible for A to V), 대동사 do/be 구분, such a + 형용사 + 명사, every + 단수명사, -thing + 형용사, 접속사 vs 전치사(despite/due to/during + 명사 ↔ although/because/while + 절).
+- 정답 구성: 실제 기출처럼 옳은 밑줄에도 위 포인트를 그대로 써서(맞게 쓴 함정) 틀린 것과 구별이 어렵게 하고, 원문을 고치지 않아도 되는 곳은 원문 그대로 둔다."""
+QB_VOCAB_TRAPS = """- 운양고·제일고 낱말 문제는 대부분 원문 낱말을 반의어로 바꿈(rarely→frequently, disproves→proves, prevent→facilitate, decrease→increase, shrink→improve).
+- 바로 뒤·앞 문장과 모순되게 바꾸는 방식이 가장 많음(예: 'The few times that they do occur' 앞의 frequently).
+- 형태가 비슷한 혼동어(conservation↔conversion, adherence↔withdrawal, elicit↔eliminate, beneficence↔maleficence, interpersonal↔intrapersonal)도 자주 씀.
+- ⓐ~ⓘ 중 '적절하지 않은 것만 모두 고르기'(2~3개), 영영풀이 일치/불일치, 네모 (A)(B)(C) 어휘 고르기도 출제."""
+
+QB_GRAMMAR_LEVEL = {
+    "하": "밑줄 5개(ⓐ~ⓔ), 틀린 것 1~2개. 수 일치·시제·품사(형용사/부사)·동사원형 같은 기본 포인트. '틀린 것만을 고른 것'.",
+    "중": "밑줄 6개(ⓐ~ⓕ), 틀린 것 2~3개. 관계사·분사·to부정사/동명사 같은 빈출 포인트 섞기.",
+    "상": "밑줄 7개(ⓐ~ⓖ), 틀린 것 2~4개. 빈출 포인트 + 고난도 1~2개. '틀린 것만을' 또는 '옳은 것만을' 중 하나.",
+    "최상": "지문 전체에 고르게 밑줄 8개(ⓐ~ⓗ). stem은 '어법상 옳은 것만을 있는 대로 고른 것은?' 또는 '틀린 것만을 있는 대로 고른 것은?' 중 하나(문항마다 섞기). "
+            "틀린 것 개수는 3~5개로 정해 개수로 답을 추측할 수 없게 하고, choices 5개는 2개·3개·4개·5개짜리 조합을 섞는다. "
+            "포인트는 완료부정사, 동격 that vs 관계대명사, 관계부사 vs 관계대명사, 분사구문의 태, 도치 후 수 일치, 가정법, 병렬, 강조구문, 수동태 불가 동사 등 고난도 위주로 하고 "
+            "바로 옆 단어만 보면 맞아 보이는 함정을 넣는다.",
+}
+
+SCHEMA_QBANK = {
+    "type": "object",
+    "properties": {"questions": {"type": "array", "items": {"type": "object", "properties": {
+        "focus": {"type": "string", "description": "이 문항이 묻는 핵심 한 줄 (예: 'ⓑ 완료부정사 to have p.p. / ⓖ 동격 that')"},
+        "stem": {"type": "string", "description": "발문"},
+        "given": {"type": "string", "description": "주어진 글·문장 (순서·삽입 유형), 없으면 빈 문자열"},
+        "passage": {"type": "string", "description": "문제용으로 표시한 지문. 단락은 줄바꿈"},
+        "box": {"type": "string", "description": "<보기>·요약문·<조건> 박스 내용, 없으면 빈 문자열"},
+        "choices": {"type": "array", "items": {"type": "string"}, "description": "선택지 5개 (번호 기호 없이), 서술형은 빈 배열"},
+        "answer": {"type": "string", "description": "객관식은 ①~⑤ 중 하나, 서술형은 모범 답안"},
+        "explanation": {"type": "array", "items": {"type": "string"}, "description": "한국어 해설 2~4줄"},
+    }, "required": ["focus", "stem", "given", "passage", "box", "choices", "answer", "explanation"]}}},
+    "required": ["questions"],
+}
+SCHEMA_QB_SOLVE = {
+    "type": "object",
+    "properties": {"answers": {"type": "array", "items": {"type": "object", "properties": {
+        "index": {"type": "integer"}, "answer": {"type": "string"}}, "required": ["index", "answer"]}}},
+    "required": ["answers"],
+}
+CIRCLED = "①②③④⑤"
+
+def qb_norm_answer(a: str) -> str:
+    """'③', '3', '정답 ③' → '③' (못 찾으면 빈 문자열)"""
+    s = str(a or "")
+    m = re.search(r"[①②③④⑤]", s)
+    if m:
+        return m.group(0)
+    m = re.search(r"\b([1-5])\b", s)
+    return CIRCLED[int(m.group(1)) - 1] if m else ""
+
+def _qb_call(gclient, model: str, prompt: str, schema: Dict, temperature: float, logs: List[str], what: str):
+    for attempt in range(4):
+        try:
+            res = gclient.models.generate_content(model=model, contents=prompt, config=types.GenerateContentConfig(
+                temperature=temperature, response_mime_type="application/json", response_json_schema=schema))
+            return json.loads(res.text.strip())
+        except Exception as e:
+            err_s = str(e).lower()
+            if attempt < 3 and any(k in err_s for k in ["503", "high demand", "429", "unavailable", "quota", "overloaded", "timeout", "timed out", "connection", "500", "internal"]):
+                time.sleep(15 + attempt * 15)
+                continue
+            logs.append(f"❌ {what}: {str(e)[:150]}")
+            return None
+    return None
+
+def qb_generate(gclient, model: str, label: str, text: str, q_type: str, level: str, school: str, count: int,
+                avoid: List[str], dna_rules: str, essay_rules: str, logs: List[str]) -> List[Dict]:
+    """변형문제 count개 생성 (형식이 맞지 않는 문항은 버림)"""
+    avoid_str = ""
+    if avoid:
+        avoid_str = "\n[이미 만든 문제의 출제 포인트 — 같은 포인트·같은 정답 구성을 피하고 다른 문장·다른 포인트로 출제]\n" + "\n".join(f"- {a}" for a in avoid[-25:])
+    dna = dna_rules + (f"\n\n[서술형 출제 DNA]\n{essay_rules or ESSAY_DNA_FALLBACK}" if q_type in QB_ESSAY_TYPES else "")
+    if q_type in QB_GRAMMAR_TYPES:
+        dna += f"\n\n[{school} 실제 기출 어법 출제 DNA — 이 빈도와 함정 패턴을 반영해 밑줄 포인트를 고른다]\n{QB_GRAMMAR_DNA.get(school, '')}\n{QB_GRAMMAR_TRAPS}"
+    elif q_type == "낱말 (문맥상)":
+        dna += f"\n\n[운양고·제일고 실제 기출 어휘 출제 패턴]\n{QB_VOCAB_TRAPS}"
+    prompt = f"""너는 {school} 영어 내신 출제위원이다. 아래 지문으로 [{q_type}] 유형 변형문제를 난이도 [{level}]로 {count}문항 만들어 JSON으로 반환하라.
+
+[{school} 출제 스타일]
+{QB_SCHOOL_STYLE.get(school, '')}
+
+[난이도 {level} 기준]
+{QB_LEVEL_RULES[level]}
+
+[{q_type} 유형 형식]
+{QB_TYPES[q_type]}{chr(10) + "[이 난이도의 어법 조합형 기준] " + QB_GRAMMAR_LEVEL[level] if q_type == "어법 (조합형)" else ""}
+
+{dna}
+
+[공통 규칙]
+- passage는 원문을 바탕으로 이 유형에 필요한 표시만 넣는다(밑줄 <u>…</u>, ⓐ~ⓖ, ①~⑤, 빈칸 __________, (A)(B)(C)). 나머지는 원문 그대로 두고 요약·생략하지 않는다. 단락은 줄바꿈으로 구분한다.
+- 원문에 없는 문장을 새로 지어 붙이지 않는다('무관한 문장' 유형의 한 문장만 예외). 지문이 짧아 밑줄 개수를 다 채우기 어려우면 밑줄 개수를 줄인다.
+- 어법·낱말 문제의 '틀린 곳'은 passage에 틀린 표현이 실제로 적혀 있어야 한다(원문 그대로 두고 틀렸다고 하지 않는다). 오류는 꼭 필요한 곳에만 넣고, explanation에 'ⓐ are → is (주어가 동명사구라 단수)'처럼 passage에 쓴 틀린 표현 → 올바른 표현을 밝힌다.
+- 객관식은 choices 5개(①② 같은 번호 기호는 쓰지 않음), answer는 ①~⑤ 중 하나. 여러 문항이면 정답 번호가 한쪽으로 몰리지 않게 하고, 문항마다 묻는 핵심(어법 개념·문장·논리)을 다르게 한다.
+- 서술형은 choices를 빈 배열로 두고 answer에 모범 답안을 쓴다.
+- 정답이 하나로 확실히 정해지는지 직접 풀어 확인하고, 애매하면 고쳐서 낸다.
+- explanation은 한국어 2~4줄: 근거(영어 원문 일부) + 오답 이유.
+- 서식 태그는 <u>, <b>만 쓴다.
+{avoid_str}
+
+지문 정보: {label}
+지문: \"\"\"{text}\"\"\""""
+    out = _qb_call(gclient, model, prompt, SCHEMA_QBANK, 0.7, logs, f"{label} {q_type} {level} 생성")
+    good = []
+    for q in (out or {}).get("questions", [])[:count]:
+        if find_degenerate_text(q):
+            continue
+        if q_type in QB_ESSAY_TYPES:
+            q["choices"] = []
+            if not str(q.get("answer", "")).strip():
+                continue
+        else:
+            q["answer"] = qb_norm_answer(q.get("answer"))
+            q["choices"] = [""] * 5 if q_type in QB_MARK_TYPES else [str(c).strip() for c in (q.get("choices") or [])][:5]
+            if not q["answer"] or len(q["choices"]) != 5 or (q_type not in QB_MARK_TYPES and not all(q["choices"])):
+                continue
+        good.append(q)
+    return good
+
+def qb_verify(gclient, model: str, text: str, questions: List[Dict], logs: List[str]) -> List[bool]:
+    """객관식 문항을 AI가 따로 풀어 정답이 같은지 확인 (서술형은 그대로 통과)"""
+    idx = [i for i, q in enumerate(questions) if q.get("choices")]
+    if not idx:
+        return [True] * len(questions)
+    blocks = []
+    for k, i in enumerate(idx, 1):
+        q = questions[i]
+        ch = "\n".join(f"{CIRCLED[j]} {c}" for j, c in enumerate(q["choices"]))
+        blocks.append(f"### 문제 {k}\n{q['stem']}\n" + (f"[주어진 글]\n{q['given']}\n" if q.get("given") else "")
+                      + f"[지문]\n{q['passage']}\n" + (f"[박스]\n{q['box']}\n" if q.get("box") else "") + f"[선택지]\n{ch}")
+    prompt = ("아래 영어 객관식 문제들을 각 지문을 근거로 직접 풀어라. 원래 글(참고용 원문)과 비교해 판단해도 된다. "
+              "각 문제 번호(index)와 정답(①~⑤ 중 하나)만 반환하라.\n\n[참고용 원문]\n" + text + "\n\n" + "\n\n".join(blocks))
+    out = _qb_call(gclient, model, prompt, SCHEMA_QB_SOLVE, 0.0, logs, "정답 검증")
+    if out is None:
+        return [True] * len(questions)  # 검증 호출 실패는 탈락시키지 않음 (verified=False로 저장)
+    solved = {int(a.get("index", 0)): qb_norm_answer(a.get("answer")) for a in out.get("answers", [])}
+    ok = [True] * len(questions)
+    for k, i in enumerate(idx, 1):
+        ok[i] = solved.get(k, "") == questions[i]["answer"]
+    return ok
+
+# ---- 문제 저장소 (Supabase 표, 없으면 로컬 파일) ----
+def qb_table_status(sb) -> (bool, str):
+    if sb is None:
+        return True, ""
+    try:
+        sb.table(QB_TABLE).select("id").limit(1).execute()
+        return True, ""
+    except Exception as e:
+        return False, str(e)[:200]
+
+def _qb_local_load() -> List[Dict]:
+    if os.path.exists(QB_FILE):
+        with open(QB_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return []
+
+def qb_insert(sb, rows: List[Dict]):
+    if not rows:
+        return
+    if sb is not None:
+        sb.table(QB_TABLE).insert(rows).execute()
+        return
+    data = _qb_local_load() + [{**r, "created_at": time.strftime("%Y-%m-%dT%H:%M:%S")} for r in rows]
+    with open(QB_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+
+def qb_fetch(sb, labels: List[str], cols: str = "*") -> List[Dict]:
+    """고른 지문의 문제만 불러옴 (한 번에 1000개씩 나눠 읽음)"""
+    labels = list(dict.fromkeys(labels))
+    if not labels:
+        return []
+    if sb is None:
+        keep = set(labels)
+        return [r for r in _qb_local_load() if r.get("passage_label") in keep]
+    out = []
+    for i in range(0, len(labels), 40):
+        chunk = labels[i:i + 40]
+        start = 0
+        while True:
+            res = sb.table(QB_TABLE).select(cols).in_("passage_label", chunk).order("created_at").range(start, start + 999).execute()
+            out += res.data or []
+            if len(res.data or []) < 1000:
+                break
+            start += 1000
+    return out
+
+def qb_delete(sb, ids: List[str]):
+    if not ids:
+        return
+    if sb is not None:
+        for i in range(0, len(ids), 100):
+            sb.table(QB_TABLE).delete().in_("id", ids[i:i + 100]).execute()
+        return
+    drop = set(ids)
+    with open(QB_FILE, "w", encoding="utf-8") as f:
+        json.dump([r for r in _qb_local_load() if r.get("id") not in drop], f, ensure_ascii=False)
+
+def _generate_qbank_item(sb_factory, gclient, item: Dict, opts: Dict, dna_rules: str, essay_rules: str, logs: List[str]) -> (bool, str):
+    """작업 목록의 변형문제 1건(지문·유형·난이도) 생성 → 정답 검증 → 문제 표에 저장"""
+    sb = sb_factory()
+    label, q_type, level, school = item["passage_label"], item["q_type"], item["difficulty"], item.get("school", "운양고")
+    count = int(item.get("count", 2))
+    existing = [r for r in qb_fetch(sb, [label], "q_type,content") if r.get("q_type") == q_type]
+    avoid = [str((r.get("content") or {}).get("focus", "")) for r in existing if (r.get("content") or {}).get("focus")]
+    questions = []
+    for round_idx in range(len(GEN_RETRY_WAITS) + 1):
+        time.sleep(opts.get("api_delay", 3))
+        questions = qb_generate(gclient, opts["model"], label, item["text"], q_type, level, school, count, avoid, dna_rules, essay_rules, logs)
+        if questions:
+            break
+        if round_idx < len(GEN_RETRY_WAITS):
+            time.sleep(GEN_RETRY_WAITS[round_idx])
+    if not questions:
+        return False, "변형문제 생성 실패"
+    checks = qb_verify(gclient, opts["model"], item["text"], questions, logs) if item.get("verify", True) else [True] * len(questions)
+    rows = []
+    for q, ok in zip(questions, checks):
+        if not ok:
+            continue
+        q["verified"] = bool(item.get("verify", True))
+        rows.append({"id": str(uuid.uuid4()), "passage_label": label, "exam_key": item.get("exam_key", ""), "number": item.get("number", ""),
+                     "q_type": q_type, "difficulty": level, "school": school, "content": q})
+    dropped = len(questions) - len(rows)
+    if not rows:
+        return False, f"정답 검증을 통과한 문제가 없음 ({len(questions)}개 모두 탈락)"
+    qb_insert(sb, rows)
+    logs.append(f"✅ 변형문제 {len(rows)}개 저장: {item['label']}" + (f" (정답 검증 탈락 {dropped}개)" if dropped else ""))
+    return True, ""
+
+def enqueue_qbank(passages: List[Dict], q_types: List[str], levels: List[str], school: str, count: int, verify: bool,
+                  text_model: str, api_delay: int, academy_name: str, school_name: str) -> int:
+    """지문 × 유형 × 난이도 조합마다 작업 1건씩 추가"""
+    sb = supabase if IS_CLOUD_DB else None
+    added = {"n": 0}
+
+    def add(job):
+        if job.get("status") not in ("running", "stopping"):
+            job["status"] = "running"
+            job["items"] = [it for it in job.get("items", []) if it.get("state") in ("pending", "failed")]
+            job["created_at"] = time.time()
+            job["worker"] = None
+        job["opts"] = {"model": text_model, "api_delay": api_delay, "academy_name": academy_name, "school_name": school_name}
+        # 어법은 최상이면 단일 정답형 대신 '있는 대로 고른 것' 조합형으로 (같은 조합은 한 번만)
+        combos = list(dict.fromkeys(("어법 (조합형)" if (t == "어법 (단일)" and lv == "최상") else t, lv) for t in q_types for lv in levels))
+        for p in passages:
+            for t, lv in combos:
+                job["items"].append({"id": str(uuid.uuid4()), "kind": "qbank", "label": f"{p['label']} · {t} · {lv}",
+                                     "passage_label": p["label"], "exam_key": p.get("exam_key", ""), "number": str(p.get("number", "")),
+                                     "text": p.get("body_text", ""), "q_type": t, "difficulty": lv, "school": school,
+                                     "count": count, "verify": verify, "state": "pending", "error": ""})
+                added["n"] += 1
+        _job_log(job, f"➕ 변형문제 {added['n']}건 추가 ({school} · {', '.join(levels)} · 건당 {count}문제)")
+    _job_update(sb, add)
+    start_gen_thread()
+    return added["n"]
+
+# ---- 실제 기출 시험지 → 원문 라이브러리 지문 연결 + 실제 기출문제 수록 ----
+#   - gichul_map 문서: 시험지마다 문항 번호·유형·배점·출처 지문 (가벼운 목록, '기출 이력' 표시에 씀)
+#   - 원문 라이브러리 지문과 연결된 문항은 문제 전체를 question_bank 표에 difficulty='기출'로 수록 (시험지에 섞을 수 있음)
+QB_GICHUL_LEVEL = "기출"
+
+SCHEMA_GICHUL = {
+    "type": "object",
+    "properties": {
+        "school": {"type": "string", "description": "운양고 또는 제일고"},
+        "grade": {"type": "string", "description": "예: 고1"},
+        "exam_name": {"type": "string", "description": "예: 25년 2학기 기말"},
+        "questions": {"type": "array", "items": {"type": "object", "properties": {
+            "no": {"type": "string", "description": "문항 번호 (예: 7, 서술형 2)"},
+            "points": {"type": "string", "description": "배점 (보이면)"},
+            "q_type": {"type": "string", "enum": QB_TYPE_NAMES + ["기타"]},
+            "source_hint": {"type": "string", "description": "지문 출처 (예: 2025년 6월 고1 모의고사 21번, 공통영어1 능률(민) 3과 2단락). 모르면 지문 첫 문장 앞부분"},
+            "matched_label": {"type": "string", "description": "[후보 지문 목록]에서 같은 지문의 label (없으면 빈 문자열)"},
+            "stem": {"type": "string", "description": "발문 (배점 표시 제외)"},
+            "given": {"type": "string", "description": "주어진 글·문장, 없으면 빈 문자열"},
+            "passage": {"type": "string", "description": "시험지에 실린 지문 그대로 (밑줄·기호 유지)"},
+            "box": {"type": "string", "description": "<보기>·요약문·<조건>, 없으면 빈 문자열"},
+            "choices": {"type": "array", "items": {"type": "string"}},
+            "answer": {"type": "string", "description": "직접 풀어 낸 정답 (①~⑤, 서술형은 모범 답안)"},
+            "explanation": {"type": "array", "items": {"type": "string"}},
+        }, "required": ["no", "points", "q_type", "source_hint", "matched_label", "stem", "given", "passage", "box", "choices", "answer", "explanation"]}},
+    },
+    "required": ["school", "grade", "exam_name", "questions"],
+}
+
+def gichul_candidates_text(mock_lib: List[Dict]) -> str:
+    lines = []
+    for p in sorted(mock_lib, key=natural_sort_key):
+        words = re.sub(r"\s+", " ", str(p.get("body_text", ""))).split(" ")[:18]
+        lines.append(f"{p['label']} :: {' '.join(words)}")
+    return "\n".join(lines)
+
+def gichul_extract(gclient, model: str, pdf_part, file_name: str, candidates: str) -> Dict:
+    prompt = f"""이 PDF는 운양고 또는 제일고 영어 내신 시험지다 (파일명: {file_name}).
+객관식·서술형 문항마다 번호, 배점, 유형, 지문 출처를 정리하고, 원문 지문과 연결되는 문항은 문제 전체를 옮겨라.
+- q_type은 주어진 목록에서 가장 가까운 것 (해당 없으면 '기타').
+- 각 문항 지문을 아래 [후보 지문 목록]의 지문 첫 부분과 비교해, 같은 지문이면 matched_label에 그 label을 그대로 적는다 (일부 문장만 같아도 같은 지문). 없으면 빈 문자열.
+- matched_label이 있는 문항은 시험지 그대로 옮긴다: stem(발문), given(주어진 글·문장), passage(지문 — 밑줄은 <u>…</u>, ⓐ~ⓖ·①~⑤·빈칸·(A)(B)(C) 표시 유지, 단락은 줄바꿈), box(<보기>·요약문·<조건>), choices(선택지 5개, 번호 기호 없이. 지문 속 ①~⑤가 선택지인 유형은 빈 문자열 5개, 서술형은 빈 배열).
+- 여러 문항이 지문 하나를 같이 쓰면 문항마다 passage를 똑같이 넣는다.
+- answer: 시험지의 학생 필기·표시는 믿지 말고 지문으로 직접 풀어 ①~⑤ 중 하나를 적는다 (서술형은 모범 답안). explanation은 한국어 2~3줄.
+- matched_label이 빈 문항은 stem만 적고 given·passage·box·answer는 빈 문자열, choices·explanation은 빈 배열로 둔다.
+- school, grade, exam_name은 표지·머리말·파일명으로 판단한다.
+- 서식 태그는 <u>, <b>만 쓴다.
+
+[후보 지문 목록] (label :: 지문 첫 부분)
+{candidates}"""
+    return _qb_call(gclient, model, [pdf_part, prompt], SCHEMA_GICHUL, 0.1, [], f"{file_name} 기출 분석")
+
+def gichul_label_from_hint(hint: str, labels: set) -> str:
+    """'2025년 6월 고1 모의고사 21번' → '[2025년 6월 고1] 21번' (원문 라이브러리에 있으면)"""
+    m = re.search(r"(20\d{2}|\d{2})\s*년\s*(\d{1,2})\s*월\s*(고\s*\d).*?(\d{2}(?:\s*[~\-]\s*\d{2})?)\s*번", str(hint))
+    if not m:
+        return ""
+    y = m.group(1) if len(m.group(1)) == 4 else "20" + m.group(1)
+    num = re.sub(r"\s*[~\-]\s*", "~", m.group(4))
+    cand = f"[{y}년 {int(m.group(2))}월 {m.group(3).replace(' ', '')}] {num}번"
+    return cand if cand in labels else ""
+
+def gichul_short(ex: Dict) -> str:
+    """'운양고' '25년 2학기 기말' '고1' → '운양 25-2기말 고1' (기출 이력을 한 줄에 여러 개 적을 때)"""
+    school = str(ex.get("school", "")).replace("김포", "").replace("고", "") or "?"
+    name = str(ex.get("exam_name", ""))
+    m = re.search(r"(\d{2})\s*년.*?(\d)\s*학기.*?(중간|기말)", name)
+    name = f"{m.group(1)}-{m.group(2)}{m.group(3)}" if m else name
+    return f"{school} {name} {ex.get('grade', '')}".strip()
+
+def gichul_question_label(ex: Dict, q: Dict, labels: set) -> str:
+    return q.get("matched_label") if q.get("matched_label") in labels else gichul_label_from_hint(q.get("source_hint", ""), labels)
+
+def load_gichul_map() -> Dict:
+    return _store_get(supabase if IS_CLOUD_DB else None, GICHUL_FILE, {}) or {}
+
+def gichul_index(gmap: Dict, labels: set) -> Dict[str, List[Dict]]:
+    """지문 label → 그 지문이 나온 실제 기출 문항 목록 (운양고·제일고 전부, 최신 시험 먼저)"""
+    idx = {}
+    for exam_id, ex in (gmap.get("exams") or {}).items():
+        for q in ex.get("questions", []):
+            lbl = gichul_question_label(ex, q, labels)
+            if lbl:
+                idx.setdefault(lbl, []).append({"exam_id": exam_id, "exam": ex.get("display", ""), "short": gichul_short(ex),
+                                                "school": ex.get("school", ""), "no": str(q.get("no", "")),
+                                                "q_type": q.get("q_type", ""), "points": q.get("points", "")})
+    for hits in idx.values():
+        hits.sort(key=lambda h: natural_sort_key({"label": h["short"].split(" ", 1)[-1]}), reverse=True)
+    return idx
+
+def gichul_norm_meta(school: str, grade: str, exam_name: str, file_name: str = "") -> (str, str, str):
+    """학교·학년·시험 이름을 '운양고' '고2' '25년 2학기 기말' 형태로 통일 (파일명 '[운양2] 25년 2학기 기말.pdf'를 우선)"""
+    src = f"{file_name} {school}"
+    school = "운양고" if "운양" in src else ("제일고" if "제일" in src else str(school).strip())
+    m = re.search(r"(운양|제일)\s*(?:고)?\s*(\d)", file_name) or re.search(r"고\s*(\d)|(\d)\s*학년", str(grade))
+    g = next((x for x in (m.groups() if m else ()) if x and x.isdigit()), "")
+    grade = f"고{g}" if g else str(grade).strip()
+    def parse(t):
+        t = str(t)
+        y = re.search(r"(?:20)?(\d{2})\s*(?:년|학년도)", t)
+        term = re.search(r"(\d)\s*학기", t)
+        kind = "중간" if re.search(r"중간|1\s*차", t) else ("기말" if re.search(r"기말|2\s*차", t) else "")
+        return f"{y.group(1)}년 {term.group(1)}학기 {kind}".strip() if (y and term and kind) else ""
+    exam_name = parse(file_name) or parse(exam_name) or str(exam_name).strip()
+    return school, grade, exam_name
+
+def gichul_light(res: Dict, file_name: str) -> Dict:
+    """gichul_map 문서에 남길 가벼운 목록 (문제 본문은 question_bank 표에)"""
+    keep = ("no", "points", "q_type", "source_hint", "matched_label")
+    school, grade, exam_name = gichul_norm_meta(res.get("school", ""), res.get("grade", ""), res.get("exam_name", ""), file_name)
+    return {"school": school, "grade": grade, "exam_name": exam_name, "file": file_name,
+            "display": f"{school} {exam_name} {grade}".strip(),
+            "questions": [{k: q.get(k, "") for k in keep} for q in res.get("questions", [])]}
+
+def gichul_bank_rows(gclient, model: str, exam_id: str, res: Dict, mock_by_label: Dict[str, Dict], existing_keys: set, logs: List[str]) -> List[Dict]:
+    """연결된 기출 문항을 문제 표에 넣을 행으로 (AI가 따로 한 번 더 풀어 정답이 다르면 '정답 확인 필요' 표시)"""
+    ex = gichul_light(res, res.get("_file", ""))
+    labels = set(mock_by_label)
+    by_label = {}
+    for q in res.get("questions", []):
+        lbl = gichul_question_label(ex, q, labels)
+        if not lbl or not str(q.get("passage", "")).strip() or q.get("q_type") == "기타" or (exam_id, str(q.get("no", ""))) in existing_keys:
+            continue
+        if find_degenerate_text({k: q.get(k) for k in ("stem", "passage", "box", "choices", "explanation")}):
+            continue
+        if q["q_type"] in QB_ESSAY_TYPES:
+            q["choices"] = []
+        else:
+            q["answer"] = qb_norm_answer(q.get("answer"))
+            q["choices"] = [""] * 5 if q["q_type"] in QB_MARK_TYPES else [str(c).strip() for c in (q.get("choices") or [])][:5]
+            if len(q["choices"]) != 5:
+                continue
+        by_label.setdefault(lbl, []).append(q)
+    rows = []
+    for lbl, qs in by_label.items():
+        checks = qb_verify(gclient, model, mock_by_label[lbl].get("body_text", ""), qs, logs)
+        for q, ok in zip(qs, checks):
+            content = {k: q.get(k, "") for k in ("stem", "given", "passage", "box", "choices", "answer", "explanation")}
+            content.update({"focus": f"실제 기출 {ex['display']} {q.get('no', '')}번", "verified": bool(ok),
+                            "source": {"exam_id": exam_id, "exam": ex["display"], "short": gichul_short(ex), "no": str(q.get("no", "")), "points": q.get("points", "")}})
+            if not ok:
+                content["answer_note"] = "AI가 다시 푼 답과 달라요 — 정답 확인 필요"
+            p = mock_by_label[lbl]
+            rows.append({"id": str(uuid.uuid4()), "passage_label": lbl, "exam_key": p.get("exam_key", ""), "number": str(p.get("number", "")),
+                         "q_type": q["q_type"], "difficulty": QB_GICHUL_LEVEL, "school": ex["school"], "content": content})
+    return rows
+
+def qb_existing_gichul_keys(rows: List[Dict]) -> set:
+    return {(r["content"]["source"]["exam_id"], r["content"]["source"]["no"]) for r in rows
+            if r.get("difficulty") == QB_GICHUL_LEVEL and (r.get("content") or {}).get("source")}
+
+# ---- 시험지 구성 ----
+def qb_pick(rows: List[Dict], labels: List[str], total: int, seed: int) -> (List[Dict], List[str]):
+    """고른 지문에서 골고루(같은 개수씩) 뽑고, 지문 안에서는 유형을 돌아가며 뽑음. 부족한 지문 몫은 남는 지문이 채움."""
+    rnd = random.Random(seed)
+    pools = {}
+    for lbl in labels:
+        by_type = {}
+        for r in rows:
+            if r["passage_label"] == lbl:
+                by_type.setdefault(r["q_type"], []).append(r)
+        for lst in by_type.values():
+            rnd.shuffle(lst)
+        # 유형을 돌아가며 한 줄로 세움 (예: 주제·어법·순서·주제·어법·순서…)
+        order = [t for t in QB_TYPE_NAMES if t in by_type]
+        rnd.shuffle(order)
+        seq = []
+        while any(by_type[t] for t in order):
+            for t in order:
+                if by_type[t]:
+                    seq.append(by_type[t].pop())
+        pools[lbl] = seq
+    active = [l for l in labels if pools.get(l)]
+    empty = [l for l in labels if not pools.get(l)]
+    notes = [f"조건에 맞는 문제가 없는 지문 {len(empty)}개: " + ", ".join(empty[:8]) + (" 외" if len(empty) > 8 else "")] if empty else []
+    if not active:
+        return [], notes
+    quota = {l: total // len(active) + (1 if i < total % len(active) else 0) for i, l in enumerate(active)}
+    taken = {l: pools[l][:quota[l]] for l in active}
+    short = sum(quota[l] - len(taken[l]) for l in active)
+    lacking = [l for l in active if len(taken[l]) < quota[l]]
+    while short > 0:
+        spare = [l for l in active if len(taken[l]) < len(pools[l])]
+        if not spare:
+            break
+        for l in sorted(spare, key=lambda x: len(taken[x])):
+            if short <= 0:
+                break
+            taken[l].append(pools[l][len(taken[l])])
+            short -= 1
+    if lacking:
+        notes.append("쌓인 문제가 적은 지문: " + ", ".join(f"{l} ({len(pools[l])}문제)" for l in lacking)
+                     + (" → 모자란 만큼 다른 지문에서 더 뽑았습니다." if short <= 0 else ""))
+    if short > 0:
+        notes.append(f"조건에 맞는 문제가 모자라 {total - short}문제로 만들었습니다 ({short}문제 부족). '문제 만들기'에서 더 생성해 주세요.")
+    return [q for l in labels for q in taken.get(l, [])], notes
+
+def qb_html(s) -> str:
+    """AI가 쓴 글에서 <u>, <b>만 살리고 나머지는 글자로 표시"""
+    s = html.escape(html.unescape(str(s or "")))
+    return re.sub(r"&lt;(/?)(u|b)&gt;", r"<\1\2>", s)
+
+def qb_paras(s) -> str:
+    return "".join(f"<p>{qb_html(line)}</p>" for line in str(s or "").split("\n") if line.strip())
+
+QB_EXAM_CSS = """
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;700;900&family=Noto+Serif+KR:wght@400;700&display=swap');
+@page { size: A4; margin: 14mm 12mm 14mm 12mm; }
+* { box-sizing: border-box; }
+body { font-family: 'Noto Serif KR', serif; font-size: 10.3pt; line-height: 1.62; color: #111; margin: 0; background: #fff; }
+.sheet { max-width: 186mm; margin: 0 auto; }
+.head { border: 2px solid #111; margin-bottom: 8px; }
+.head .top { display: flex; align-items: center; justify-content: space-between; padding: 6px 12px; border-bottom: 1px solid #111; }
+.brand { font-family: 'Noto Sans KR'; font-weight: 900; font-size: 12pt; letter-spacing: .5px; }
+.brand b { color: #fff; background: #111; padding: 1px 7px; margin-right: 6px; }
+.kind { font-family: 'Noto Sans KR'; font-size: 9pt; }
+.head h1 { font-family: 'Noto Sans KR'; font-weight: 900; font-size: 19pt; text-align: center; margin: 8px 0 2px; }
+.head .sub { text-align: center; font-family: 'Noto Sans KR'; font-size: 10pt; margin-bottom: 8px; }
+.info { display: flex; border-top: 1px solid #111; font-family: 'Noto Sans KR'; font-size: 9.5pt; }
+.info div { flex: 1; padding: 5px 10px; border-right: 1px solid #111; }
+.info div:last-child { border-right: 0; }
+.cols { column-count: 2; column-gap: 9mm; column-rule: 1px solid #111; }
+.q { break-inside: avoid; margin: 0 0 14px; }
+.q .stem { font-family: 'Noto Sans KR'; font-size: 10pt; margin-bottom: 3px; }
+.q .stem .no { font-weight: 900; font-size: 11pt; margin-right: 2px; }
+.q .tag { display: block; font-family: 'Noto Sans KR'; font-size: 7.8pt; color: #444; margin: -1px 0 3px 16px; }
+.q .tag .bd { display: inline-block; font-weight: 700; padding: 0 5px; margin-left: 3px; border: 1px solid #111; }
+.q .tag .bd.real { background: #111; color: #fff; }
+.q .tag .hist { display: inline-block; margin-top: 1px; }
+.keynote { font-family: 'Noto Sans KR'; font-size: 8pt; color: #444; margin: -2px 0 8px; }
+.passage { text-align: justify; margin: 0 0 6px; }
+.passage p { margin: 0 0 4px; text-indent: 1em; }
+.given { border: 1px solid #111; padding: 5px 8px; margin: 0 0 7px; }
+.given p { margin: 0; }
+.box { border: 1px solid #111; padding: 4px 8px; margin: 2px 0 4px 10px; font-size: 9.8pt; }
+.box p { margin: 0; }
+u { text-underline-offset: 2px; }
+.choices { margin: 0 0 0 10px; }
+.choices div { padding-left: 1.3em; text-indent: -1.3em; }
+.choices.inline { display: flex; justify-content: space-between; padding-right: 12px; }
+.choices.inline div { padding: 0; text-indent: 0; }
+.write { border-bottom: 1px solid #999; height: 22px; margin: 0 0 4px 10px; }
+.ans-page { break-before: page; }
+.anshead { border: 2px solid #111; text-align: center; font-family: 'Noto Sans KR'; font-weight: 900; font-size: 15pt; padding: 6px; margin-bottom: 8px; }
+table.key { width: 100%; border-collapse: collapse; font-family: 'Noto Sans KR'; font-size: 9.5pt; margin-bottom: 6px; text-align: center; table-layout: fixed; }
+table.key th, table.key td { border: 1px solid #111; padding: 3px 2px; }
+table.key th { background: #e8e8e8; }
+.exp { break-inside: avoid; margin-bottom: 7px; font-size: 9.2pt; line-height: 1.45; }
+.exp h3 { font-family: 'Noto Sans KR'; font-size: 10pt; margin: 0 0 2px; border-bottom: 1px solid #999; padding-bottom: 1px; }
+.exp h3 span { font-weight: 400; font-size: 8.2pt; color: #444; margin-left: 4px; }
+.exp ul { margin: 0; padding-left: 14px; }
+.foot { font-family: 'Noto Sans KR'; text-align: center; font-size: 8pt; color: #555; margin-top: 8px; }
+.printbar { position: sticky; top: 0; text-align: right; padding: 6px; background: #fff; }
+.printbar button { font-size: 13px; padding: 6px 14px; cursor: pointer; }
+@media print { .printbar { display: none; } }
+"""
+
+def render_qbank_exam(qs: List[Dict], meta: Dict, gidx: Dict[str, List[Dict]]) -> str:
+    def tag_of(r):
+        """1줄: 지문 · 유형 + [실제 기출]/[변형 · ○○고 스타일 · 난이도]  2줄: 기출 이력 (같은 시험은 번호를 묶고, 같은 유형은 굵게)"""
+        c = r["content"]
+        src = c.get("source") if r["difficulty"] == QB_GICHUL_LEVEL else None
+        if src:
+            badge = (f"<span class='bd real'>실제 기출</span> {html.escape(src.get('exam', ''))} {html.escape(src.get('no', ''))}번"
+                     + (f" · {html.escape(str(src['points']))}점" if src.get("points") else ""))
+        else:
+            badge = f"<span class='bd var'>변형 · {html.escape(r.get('school') or '')} 스타일 · {html.escape(r['difficulty'])}</span>"
+        t = f"▶ {html.escape(r['passage_label'])} · {html.escape(r['q_type'])} {badge}"
+        if meta.get("show_gichul"):
+            groups = {}
+            for h in gidx.get(r["passage_label"], []):
+                if src and h["exam_id"] == src.get("exam_id") and h["no"] == src.get("no"):
+                    continue  # 이 문제 자신은 이력에서 뺌
+                g = groups.setdefault(h["exam_id"], {"short": h["short"], "nos": [], "types": [], "same": False})
+                g["nos"].append(h["no"])
+                if h["q_type"] not in g["types"]:
+                    g["types"].append(h["q_type"])
+                g["same"] |= h["q_type"] == r["q_type"]
+            if groups:
+                items = []
+                for g in groups.values():
+                    one = f"{html.escape(g['short'])} {html.escape('·'.join(g['nos']))}번({html.escape('·'.join(g['types']))})"
+                    items.append(f"<b>{one}</b>" if g["same"] else one)
+                t += f"<br><span class='hist'>{'다른 ' if src else ''}기출 이력: {' · '.join(items)}</span>"
+        return t
+
+    def kind_short(r):
+        if r["difficulty"] == QB_GICHUL_LEVEL:
+            return "기출"
+        return f"변({(r.get('school') or '?')[:1]})"
+
+    o = [f"<div class='printbar'><button onclick='window.print()'>🖨️ 인쇄 / PDF로 저장</button></div><div class='sheet'>",
+         f"""<div class='head'><div class='top'><div class='brand'><b>PQRS</b>영T {html.escape(meta.get('brand', '변형문제 TEST'))}</div><div class='kind'>{html.escape(meta.get('kind', ''))}</div></div>
+<h1>{html.escape(meta.get('title', ''))}</h1><div class='sub'>{html.escape(meta.get('sub', ''))}</div>
+<div class='info'><div>반 :</div><div>번호 :</div><div>이름 :</div><div>점수 :</div></div></div><div class='cols'>"""]
+    for n, r in enumerate(qs, 1):
+        c = r["content"]
+        o.append(f"<div class='q'><div class='stem'><span class='no'>{n}.</span> {qb_html(c.get('stem'))}</div>")
+        if meta.get("show_tag"):
+            o.append(f"<span class='tag'>{tag_of(r)}</span>")
+        if c.get("given"):
+            o.append(f"<div class='given'>{qb_paras(c['given'])}</div>")
+        o.append(f"<div class='passage'>{qb_paras(c.get('passage'))}</div>")
+        if c.get("box"):
+            o.append(f"<div class='box'>{qb_paras(c['box'])}</div>")
+        choices = c.get("choices") or []
+        if r["q_type"] in QB_ESSAY_TYPES:
+            o.append("<div class='write'></div><div class='write'></div>")
+        elif all(not str(x).strip() for x in choices):
+            o.append("<div class='choices inline'>" + "".join(f"<div>{ch}</div>" for ch in CIRCLED) + "</div>")
+        else:
+            o.append("<div class='choices'>" + "".join(f"<div>{CIRCLED[i]} {qb_html(x)}</div>" for i, x in enumerate(choices[:5])) + "</div>")
+        o.append("</div>")
+    o.append("</div>")
+    if meta.get("with_answers"):
+        o.append("<div class='ans-page'><div class='anshead'>정답 및 해설</div>")
+        for i in range(0, len(qs), 10):
+            part = qs[i:i + 10]
+            o.append("<table class='key'><tr><th>번호</th>" + "".join(f"<th>{i + k + 1}</th>" for k in range(len(part))) + "</tr><tr><th>정답</th>"
+                     + "".join(f"<td><b>{'서술형' if r['q_type'] in QB_ESSAY_TYPES else html.escape(r['content'].get('answer', ''))}</b></td>" for r in part)
+                     + "</tr><tr><th>구분</th>" + "".join(f"<td>{html.escape(kind_short(r))}</td>" for r in part) + "</tr></table>")
+        o.append("<div class='keynote'>구분: 기출 = 실제 기출문제 · 변(운) = 운양고 스타일 변형 · 변(제) = 제일고 스타일 변형 · 굵은 기출 이력 = 같은 유형으로 출제됨</div>")
+        o.append("<div class='cols'>")
+        for n, r in enumerate(qs, 1):
+            c = r["content"]
+            ans = qb_html(c.get("answer", ""))
+            src = c.get("source") if r["difficulty"] == QB_GICHUL_LEVEL else None
+            kind = f"실제 기출 {src.get('short', '')} {src.get('no', '')}번" if src else f"{r.get('school') or ''} 스타일 변형 · {r['difficulty']}"
+            note = f"<li><b>⚠️ {qb_html(c['answer_note'])}</b></li>" if c.get("answer_note") else ""
+            o.append(f"<div class='exp'><h3>{n}번 정답 {ans}<span>({html.escape(r['passage_label'])} · {html.escape(r['q_type'])} · {html.escape(kind)})</span></h3><ul>"
+                     + note + "".join(f"<li>{qb_html(e)}</li>" for e in (c.get("explanation") or [])) + "</ul></div>")
+        o.append("</div></div>")
+    o.append("<div class='foot'>PQRS 영T 자체제작 · 장기동 포피엠입시영어 031-991-1199</div></div>")
+    return f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>{html.escape(meta.get('title', '변형문제'))}</title><style>{QB_EXAM_CSS}</style></head><body>{''.join(o)}</body></html>"
+
+# ---- 화면 ----
+def _qb_passage_picker(key: str, mock_lib: List[Dict], help_text: str) -> List[str]:
+    labels = [p["label"] for p in sorted(mock_lib, key=natural_sort_key)]
+    groups = list(dict.fromkeys(p.get("exam_key") or extract_group_prefix(p["label"]) for p in sorted(mock_lib, key=natural_sort_key)))
+    g_col1, g_col2 = st.columns([3, 1.2])
+    grp = g_col1.selectbox("📁 시험·교과서 단원 (빠르게 추가)", groups, key=f"{key}_grp")
+    if g_col2.button("➕ 이 묶음 전체 추가", use_container_width=True, key=f"{key}_grp_add"):
+        cur = st.session_state.get(key, [])
+        st.session_state[key] = cur + [p["label"] for p in sorted(mock_lib, key=natural_sort_key)
+                                       if (p.get("exam_key") or extract_group_prefix(p["label"])) == grp and p["label"] not in cur]
+    return st.multiselect("📌 지문 선택 (검색해서 여러 개 고르기)", labels, key=key, help=help_text, placeholder="예: 26년 6월 고1 19")
+
+def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_name: str):
+    st.markdown("### 🧩 변형문제 은행 & 시험지 만들기")
+    sb = supabase if IS_CLOUD_DB else None
+    ready, err = qb_table_status(sb)
+    if not ready:
+        st.error("변형문제를 저장할 표가 Supabase에 아직 없습니다. Supabase → SQL Editor에서 아래 문장을 한 번 실행한 뒤 새로고침해 주세요.")
+        st.code(QB_SETUP_SQL, language="sql")
+        st.caption(f"오류 내용: {err}")
+        return
+    mock_lib = [p for p in st.session_state.saved_mock if p.get("body_text")]
+    if not mock_lib:
+        st.info("원문 라이브러리에 지문이 없습니다. '📝 원문 라이브러리' 탭에서 모의고사·교과서 원문을 먼저 저장해 주세요.")
+        return
+    by_label = {p["label"]: p for p in mock_lib}
+    t_gen, t_exam, t_manage, t_gichul = st.tabs(["🛠️ 문제 만들기 (누적)", "📄 시험지 만들기", "🗂️ 문제 보기·삭제", "🏫 기출 표시"])
+
+    with t_gen:
+        st.caption("고른 지문 × 유형 × 난이도마다 문제를 만들어 계속 쌓습니다. 같은 지문을 다시 만들면 이미 만든 문제와 다른 포인트로 출제합니다.")
+        sel = _qb_passage_picker("qb_gen_labels", mock_lib, "원문 라이브러리의 모의고사 번호·교과서 단락")
+        c1, c2 = st.columns([3, 2])
+        q_types = c1.multiselect("🧷 유형", QB_TYPE_NAMES, default=[t for t in QB_TYPE_NAMES if t not in QB_ESSAY_TYPES], key="qb_gen_types")
+        levels = c2.multiselect("🎚️ 난이도", QB_LEVELS, default=["상", "중"], key="qb_gen_levels")
+        c3, c4, c5 = st.columns([2, 1.5, 2])
+        school = c3.radio("🏫 학교 스타일", QB_SCHOOLS, horizontal=True, key="qb_gen_school")
+        count = c4.number_input("조합당 문제 수", 1, 5, 2, key="qb_gen_count")
+        verify = c5.checkbox("✅ 정답 검증 (AI가 한 번 더 풀어서 정답이 다르면 버림)", value=True, key="qb_gen_verify")
+        n_jobs = len(sel) * len({("어법 (조합형)" if (t == "어법 (단일)" and lv == "최상") else t, lv) for t in q_types for lv in levels})
+        if "어법 (단일)" in q_types and "최상" in levels:
+            st.caption("💡 어법 최상은 실제 내신처럼 '옳은/틀린 것만을 있는 대로 고른 것'(ⓐ~ⓗ 조합형)으로 만듭니다.")
+        n_q = n_jobs * count
+        if n_jobs:
+            cost = n_q * QB_COST_PER_Q * (1.3 if verify else 1)
+            st.caption(f"📦 작업 {n_jobs}건 · 문제 약 {n_q}개 · 예상 비용 약 {cost:,.0f}원 · 예상 시간 약 {max(1, n_jobs * 40 // 60)}분 (창을 닫아도 서버에서 계속)")
+        if st.button("🚀 변형문제 생성 시작", type="primary", disabled=not n_jobs, key="qb_gen_btn"):
+            n = enqueue_qbank([by_label[l] for l in sel], q_types, levels, school, int(count), verify, text_model, api_delay, academy_name, school_name)
+            st.session_state.gen_flash = f"✅ 변형문제 {n}건을 생성 작업에 추가했습니다. 위 작업 칸에서 진행 상황을 볼 수 있어요."
+            st.rerun()
+
+        if sel:
+            rows = qb_fetch(sb, sel, "passage_label,q_type,difficulty")
+            if rows:
+                df = pd.DataFrame(rows)
+                pv = df.pivot_table(index="passage_label", columns="q_type", values="difficulty", aggfunc="count", fill_value=0)
+                pv = pv.reindex(columns=[t for t in QB_TYPE_NAMES if t in pv.columns])
+                pv["합계"] = pv.sum(axis=1)
+                st.markdown("##### 📊 고른 지문에 쌓인 문제 수")
+                st.dataframe(pv, use_container_width=True)
+            else:
+                st.caption("고른 지문에는 아직 쌓인 문제가 없습니다.")
+
+    with t_exam:
+        st.caption("고른 번호에서 같은 개수씩 골고루 뽑고, 번호 안에서는 유형을 돌아가며 섞습니다.")
+        sel_e = _qb_passage_picker("qb_exam_labels", mock_lib, "시험지에 넣을 번호")
+        e1, e2, e3 = st.columns([3, 2, 1.4])
+        e_types = e1.multiselect("🧷 넣을 유형", QB_TYPE_NAMES, default=QB_TYPE_NAMES, key="qb_exam_types")
+        e_levels = e2.multiselect("🎚️ 변형문제 난이도", QB_LEVELS, default=QB_LEVELS, key="qb_exam_levels")
+        total = e3.number_input("총 문제 수", 1, 300, 30, key="qb_exam_total")
+        e4, e5, e6 = st.columns([2, 1.6, 2])
+        e_school = e4.radio("🏫 학교 (변형 스타일·기출 학교)", ["전체"] + QB_SCHOOLS, horizontal=True, key="qb_exam_school")
+        e_real = e5.radio("🏫 실제 기출문제", ["함께 섞기", "빼기", "기출만"], horizontal=True, key="qb_exam_real")
+        order = e6.radio("↕️ 문제 순서", ["지문 순서 (오름차순)", "지문 역순 (내림차순)"], horizontal=True, key="qb_exam_order")
+        h1, h2 = st.columns(2)
+        default_title = (" · ".join(sel_e[:3]) + (" 외" if len(sel_e) > 3 else "")) if sel_e else ""
+        title = h1.text_input("📝 시험지 제목", value="", placeholder=default_title or "예: 고1 26년 6월 19·20·21번 변형문제", key="qb_exam_title")
+        kind = h2.text_input("🏫 머리말 오른쪽", value=school_name, key="qb_exam_kind")
+        o1, o2, o3 = st.columns(3)
+        show_tag = o1.checkbox("문항 아래 출처·실제 기출/변형·스타일 표시", value=True, key="qb_exam_tag")
+        show_gichul = o2.checkbox("같은 지문의 기출 이력 표시 (운양고·제일고 전부)", value=True, key="qb_exam_gichul")
+        with_answers = o3.checkbox("마지막에 정답·해설", value=True, key="qb_exam_ans")
+        b1, b2 = st.columns([2, 1])
+        make = b1.button("📄 시험지 만들기", type="primary", disabled=not sel_e or not e_types or (not e_levels and e_real != "기출만"), use_container_width=True, key="qb_exam_btn")
+        reshuffle = b2.button("🔀 다른 조합으로 다시 뽑기", disabled="qb_exam_html" not in st.session_state, use_container_width=True, key="qb_exam_shuffle")
+        if make or reshuffle:
+            seed = random.randint(1, 10**9)
+            labels_ordered = sorted(sel_e, key=lambda l: natural_sort_key({"label": l}), reverse=order.startswith("지문 역순"))
+            def wanted(r):
+                is_real = r["difficulty"] == QB_GICHUL_LEVEL
+                if (is_real and e_real == "빼기") or (not is_real and (e_real == "기출만" or r["difficulty"] not in e_levels)):
+                    return False
+                return r["q_type"] in e_types and (e_school == "전체" or r.get("school") == e_school)
+            rows = [r for r in qb_fetch(sb, labels_ordered) if wanted(r)]
+            picked, notes = qb_pick(rows, labels_ordered, int(total), seed)
+            if picked:
+                labels_all = set(by_label)
+                meta = {"brand": "변형문제 TEST", "kind": kind, "title": title or default_title,
+                        "sub": " · ".join(x for x in [
+                            f"실제 기출 {sum(1 for r in picked if r['difficulty'] == QB_GICHUL_LEVEL)}" if e_real != "빼기" else "",
+                            f"변형 {sum(1 for r in picked if r['difficulty'] != QB_GICHUL_LEVEL)} ({', '.join(e_levels)})" if e_real != "기출만" else "",
+                            f"총 {len(picked)}문항"] if x), "show_tag": show_tag, "show_gichul": show_gichul, "with_answers": with_answers}
+                st.session_state.qb_exam_html = render_qbank_exam(picked, meta, gichul_index(load_gichul_map(), labels_all))
+                st.session_state.qb_exam_info = (len(picked), notes, title or default_title or "변형문제")
+            else:
+                st.session_state.pop("qb_exam_html", None)
+                st.warning("조건에 맞는 문제가 없습니다. '문제 만들기'에서 먼저 생성해 주세요.")
+        if st.session_state.get("qb_exam_html"):
+            n, notes, fname = st.session_state.qb_exam_info
+            for note in notes:
+                st.warning(note)
+            safe = re.sub(r'[\\/:*?"<>|]', "", fname).strip() or "변형문제"
+            st.download_button(f"📥 시험지 HTML 다운로드 ({n}문항) — 열어서 '인쇄 / PDF로 저장'", st.session_state.qb_exam_html,
+                               f"{safe}.html", "text/html", use_container_width=True, key="qb_exam_dl")
+            components.html(st.session_state.qb_exam_html, height=850, scrolling=True)
+
+    with t_manage:
+        m_label = st.selectbox("📌 지문", [p["label"] for p in sorted(mock_lib, key=natural_sort_key)], key="qb_manage_label")
+        rows = qb_fetch(sb, [m_label]) if m_label else []
+        if not rows:
+            st.caption("이 지문에는 아직 쌓인 문제가 없습니다.")
+        else:
+            table = pd.DataFrame([{"삭제": False, "유형": r["q_type"], "구분": "실제 기출" if r["difficulty"] == QB_GICHUL_LEVEL else f"변형 · {r['difficulty']}",
+                                   "학교": r.get("school", "") + ("" if r["difficulty"] == QB_GICHUL_LEVEL else " 스타일"),
+                                   "정답": (r["content"].get("answer", "") if r["q_type"] not in QB_ESSAY_TYPES else "서술형"),
+                                   "출제 포인트": r["content"].get("focus", ""),
+                                   "검증": "✅" if r["content"].get("verified") else ("⚠️ 정답 확인" if r["content"].get("answer_note") else ""),
+                                   "id": r["id"]} for r in rows])
+            edited = st.data_editor(table, hide_index=True, use_container_width=True, disabled=[c for c in table.columns if c != "삭제"],
+                                    column_config={"id": None}, key=f"qb_manage_editor_{m_label}")
+            to_del = edited.loc[edited["삭제"], "id"].tolist()
+            v1, v2 = st.columns([1, 1])
+            with v1.popover(f"🗑️ 고른 문제 삭제 ({len(to_del)})", use_container_width=True, disabled=not to_del):
+                st.warning(f"{len(to_del)}문제를 영구 삭제합니다. 되돌릴 수 없습니다.")
+                if st.button("삭제 확정", type="primary", key="qb_manage_del"):
+                    qb_delete(sb, to_del)
+                    st.rerun()
+            pick = v2.selectbox("👁️ 미리보기", range(len(rows)), format_func=lambda i: f"{i + 1}. {rows[i]['q_type']} · {rows[i]['difficulty']} · {rows[i]['content'].get('focus', '')[:40]}", key="qb_manage_preview")
+            components.html(render_qbank_exam([rows[pick]], {"title": m_label, "show_tag": True, "with_answers": True, "show_gichul": True},
+                                              gichul_index(load_gichul_map(), set(by_label))), height=600, scrolling=True)
+
+    with t_gichul:
+        gmap = load_gichul_map()
+        exams = gmap.get("exams") or {}
+        gidx = gichul_index(gmap, set(by_label))
+        st.caption(f"실제 기출 시험지 {len(exams)}개를 분석해 두었고, 원문 라이브러리 지문 {len(gidx)}개가 기출로 연결되어 있습니다. "
+                   "새 시험지 PDF를 올리면 문항별 출처를 찾아 '기출 이력'에 쓰고, 원문 라이브러리 지문으로 낸 문항은 **실제 기출문제**로 문제 은행에 수록합니다 "
+                   "(시험지 1개에 약 1분, 약 60원).")
+        g_pdfs = st.file_uploader("📄 운양고·제일고 기출 시험지 PDF (여러 개 가능)", type=["pdf"], accept_multiple_files=True, key="gichul_pdf_uploader")
+        if g_pdfs and st.button("🔎 기출 문항 출처 분석해서 추가", type="primary", key="gichul_btn"):
+            cands = gichul_candidates_text(mock_lib)
+            prog = st.progress(0.0)
+            for i, f in enumerate(g_pdfs, 1):
+                key_md5 = hashlib.md5(f.getvalue()).hexdigest()[:12]
+                if key_md5 in exams:
+                    continue
+                with st.spinner(f"{f.name} 분석 중... ({i}/{len(g_pdfs)})"):
+                    res = gichul_extract(client, text_model, pdf_to_part(f), f.name, cands)
+                if res:
+                    res["_file"] = f.name
+                    exams[key_md5] = gichul_light(res, f.name)
+                    linked = list({gichul_question_label(exams[key_md5], q, set(by_label)) for q in res.get("questions", [])} - {""})
+                    bank_rows = gichul_bank_rows(client, text_model, key_md5, res, by_label, qb_existing_gichul_keys(qb_fetch(sb, linked)), [])
+                    qb_insert(sb, bank_rows)
+                    st.toast(f"✅ {exams[key_md5]['display']}: 실제 기출문제 {len(bank_rows)}개 수록")
+                prog.progress(i / len(g_pdfs))
+            gmap["exams"], gmap["updated_at"] = exams, time.strftime("%Y-%m-%d %H:%M")
+            _store_put(supabase if IS_CLOUD_DB else None, GICHUL_FILE, gmap)
+            st.success("✅ 기출 출처를 저장했습니다.")
+            st.rerun()
+        if gidx:
+            st.markdown("##### 🏫 기출로 연결된 지문")
+            st.dataframe(pd.DataFrame([{"지문": l, "기출 이력": " / ".join(f"{h['short']} {h['no']}번({h['q_type']})" for h in hs)}
+                                       for l, hs in sorted(gidx.items(), key=lambda x: natural_sort_key({"label": x[0]}))]),
+                         hide_index=True, use_container_width=True)
 
 
 # -----------------------------
@@ -4465,9 +5321,10 @@ CSS_VOCA = build_css_voca(h_url, f_url)
 with st.container():
     render_gen_job_panel()
 
-tab1, tab_mock, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+tab1, tab_mock, tab_qb, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "🚀 엑셀 원클릭 통합 생성",
     "📝 원문 라이브러리 (모의고사·교과서)",
+    "🧩 변형문제 은행·시험지",
     "🏆 Anatomy One-Shot (한판승)",
     "🦅 Anatomy Self-Note",
     "💎 Anatomy Core",
@@ -4538,6 +5395,9 @@ with tab1:
 
 with tab_mock:
     render_mock_exam_tab(text_model, api_delay, academy_name, school_name)
+
+with tab_qb:
+    render_qbank_tab(text_model, api_delay, academy_name, school_name)
 
 with tab2:
     render_library_manager("v", "Anatomy One-Shot", VICTORY_FILE, CSS_VICTORY, "victory", text_model, api_delay, academy_name, school_name, h_url, f_url)
