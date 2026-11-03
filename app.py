@@ -56,15 +56,152 @@ if APP_PASSWORD:
 LOCAL_FALLBACK_KEY = ""  # 로컬 PC 단독 실행 시에만 입력
 API_KEY = get_secret("GEMINI_API_KEY", LOCAL_FALLBACK_KEY)
 
-if not API_KEY or API_KEY == "여기에_선생님의_API_키를_넣어주세요":
-    st.error("API 키를 찾지 못했습니다. Streamlit Cloud의 Secrets에 GEMINI_API_KEY를 등록해주세요.")
+# -----------------------------
+# 1-B. AI 제공사 (Gemini · OpenAI GPT · Anthropic Claude)
+#   - Secrets에 키가 있는 제공사만 사이드바에 나오고, 그 키로 쓸 수 있는 모델 목록을 자동으로 불러옴
+#   - 모델 지정은 '제공사:모델' 문자열 (예: openai:gpt-5, anthropic:claude-opus-5-5). 예전 설정처럼 앞부분이 없으면 Gemini
+#   - 이미지 생성은 Gemini 이미지 모델만 지원 (Claude는 이미지 생성 기능이 없음)
+# -----------------------------
+AI_PROVIDERS = {"gemini": "Google Gemini", "openai": "OpenAI GPT", "anthropic": "Anthropic Claude"}
+AI_KEYS = {
+    "gemini": API_KEY if API_KEY != "여기에_선생님의_API_키를_넣어주세요" else "",
+    "openai": get_secret("OPENAI_API_KEY", ""),
+    "anthropic": get_secret("ANTHROPIC_API_KEY", ""),
+}
+AI_DEFAULT_MODELS = {
+    "gemini": ["gemini-2.5-flash", "gemini-3.5-flash", "gemini-3.1-pro", "gemini-3.1-flash-lite"],
+    "openai": ["gpt-5", "gpt-5-mini"],
+    "anthropic": ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"],
+}
+# Claude 안전 필터가 요청을 거절하면 같은 요청을 다른 모델로 다시 처리 (서버 측 대체 모델)
+CLAUDE_FALLBACK_MODELS = {"claude-opus-5-5", "claude-opus-5", "claude-fable-5-1"}
+
+if not any(AI_KEYS.values()):
+    st.error("AI API 키를 찾지 못했습니다. Streamlit Cloud의 Secrets에 GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY 중 하나 이상을 등록해주세요.")
     st.stop()
 
 @st.cache_resource
 def get_genai_client(api_key: str):
     return genai.Client(api_key=api_key)
 
-client = get_genai_client(API_KEY)
+client = get_genai_client(API_KEY) if AI_KEYS["gemini"] else None
+
+@functools.lru_cache(maxsize=4)
+def _openai_client(api_key: str):
+    from openai import OpenAI  # 쓸 때만 불러옴
+    return OpenAI(api_key=api_key)
+
+@functools.lru_cache(maxsize=4)
+def _anthropic_client(api_key: str):
+    import anthropic  # 쓸 때만 불러옴
+    return anthropic.Anthropic(api_key=api_key)
+
+class AiFile:
+    """AI에 함께 보내는 파일 (PDF·이미지). 제공사마다 알맞은 형식으로 바꿔 보냄"""
+    def __init__(self, data: bytes, mime: str, name: str = "file"):
+        self.data, self.mime, self.name = data, mime, name
+
+def split_model_spec(spec: str) -> (str, str):
+    p, _, m = str(spec or "").partition(":")
+    return (p, m) if m and p in AI_PROVIDERS else ("gemini", str(spec or ""))
+
+def _schema_closed(schema):
+    """Claude 구조화 출력용: 모든 object에 additionalProperties: false"""
+    if isinstance(schema, dict):
+        out = {k: _schema_closed(v) for k, v in schema.items()}
+        if out.get("type") == "object":
+            out.setdefault("additionalProperties", False)
+        return out
+    if isinstance(schema, list):
+        return [_schema_closed(v) for v in schema]
+    return schema
+
+GEMINI_INLINE_MAX_BYTES = 15_000_000  # 이보다 큰 PDF는 Gemini 파일 업로드로 보냄
+
+def _gemini_part(gc, f: AiFile):
+    if len(f.data) <= GEMINI_INLINE_MAX_BYTES:
+        return types.Part.from_bytes(data=f.data, mime_type=f.mime)
+    up = gc.files.upload(file=io.BytesIO(f.data), config=types.UploadFileConfig(mime_type=f.mime, display_name=f.name[:100]))
+    for _ in range(60):
+        if str(getattr(up, "state", "")).upper().endswith("ACTIVE"):
+            break
+        time.sleep(3)
+        up = gc.files.get(name=up.name)
+    return up
+
+def llm_json(model_spec: str, contents, schema: Dict, temperature: float = 0.3, gemini_client=None) -> Dict:
+    """JSON 스키마에 맞춘 답을 받아 dict로 돌려줌. contents: 글(str)과 AiFile의 목록 (또는 글 하나)"""
+    provider, model = split_model_spec(model_spec)
+    items = contents if isinstance(contents, list) else [contents]
+    key = AI_KEYS.get(provider, "")
+    if not key:
+        raise RuntimeError(f"{AI_PROVIDERS.get(provider, provider)} API 키가 Secrets에 없습니다.")
+
+    if provider == "openai":
+        parts = []
+        for it in items:
+            if isinstance(it, AiFile):
+                b64 = base64.b64encode(it.data).decode()
+                if it.mime.startswith("image/"):
+                    parts.append({"type": "input_image", "image_url": f"data:{it.mime};base64,{b64}"})
+                else:
+                    parts.append({"type": "input_file", "filename": it.name, "file_data": f"data:{it.mime};base64,{b64}"})
+            else:
+                parts.append({"type": "input_text", "text": str(it)})
+        res = _openai_client(key).responses.create(
+            model=model, input=[{"role": "user", "content": parts}],
+            text={"format": {"type": "json_schema", "name": "result", "schema": schema, "strict": False}})
+        return json.loads(res.output_text.strip())
+
+    if provider == "anthropic":
+        blocks = []
+        for it in items:
+            if isinstance(it, AiFile):
+                b64 = base64.b64encode(it.data).decode()
+                kind = "image" if it.mime.startswith("image/") else "document"
+                blocks.append({"type": kind, "source": {"type": "base64", "media_type": it.mime, "data": b64}})
+            else:
+                blocks.append({"type": "text", "text": str(it)})
+        ac = _anthropic_client(key)
+        req = dict(model=model, max_tokens=64000, messages=[{"role": "user", "content": blocks}],
+                   output_config={"format": {"type": "json_schema", "schema": _schema_closed(schema)}})
+        if model in CLAUDE_FALLBACK_MODELS:
+            stream_ctx = ac.beta.messages.stream(betas=["server-side-fallback-2026-06-01"], fallbacks=[{"model": "claude-opus-4-8"}], **req)
+        else:
+            stream_ctx = ac.messages.stream(**req)
+        with stream_ctx as stream:
+            msg = stream.get_final_message()
+        if msg.stop_reason == "refusal":
+            raise RuntimeError("Claude가 요청을 거절했습니다 (refusal).")
+        if msg.stop_reason == "max_tokens":
+            raise RuntimeError("Claude 답이 너무 길어 중간에 끊겼습니다 (max_tokens).")
+        text = next(b.text for b in msg.content if b.type == "text")
+        return json.loads(text.strip())
+
+    gc = gemini_client or client
+    parts = [(_gemini_part(gc, it) if isinstance(it, AiFile) else it) for it in items]
+    res = gc.models.generate_content(model=model, contents=parts if len(parts) > 1 else parts[0], config=types.GenerateContentConfig(
+        temperature=temperature, response_mime_type="application/json", response_json_schema=schema))
+    return json.loads(res.text.strip())
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def list_ai_models(provider: str) -> List[str]:
+    """그 제공사 키로 쓸 수 있는 글 생성 모델 목록 (불러오지 못하면 기본 목록)"""
+    key = AI_KEYS.get(provider, "")
+    skip = ("image", "tts", "audio", "embedding", "live", "realtime", "transcribe", "search", "moderation", "robotics", "computer", "instruct", "codex", "dall-e", "whisper", "veo", "imagen", "aqa", "banana", "customtools")
+    try:
+        if provider == "gemini":
+            names = [m.name.split("/")[-1] for m in get_genai_client(key).models.list()
+                     if "generateContent" in (getattr(m, "supported_actions", None) or []) and m.name.split("/")[-1].startswith("gemini")]
+        elif provider == "openai":
+            names = [m.id for m in _openai_client(key).models.list() if m.id.startswith(("gpt-", "o1", "o3", "o4"))]
+        else:
+            names = [m.id for m in _anthropic_client(key).models.list()]
+        names = sorted({n for n in names if not any(s in n.lower() for s in skip)}, key=natural_sort_key, reverse=True)
+        return names or AI_DEFAULT_MODELS[provider]
+    except Exception:
+        return AI_DEFAULT_MODELS[provider]
+
 
 # Supabase 클라우드 DB 연결 초기화 (URL 뒤에 경로가 붙어도 순수 도메인만 자동 추출)
 raw_supabase_url = get_secret("SUPABASE_URL", "https://evwqyfmnqiklxcbwaqee.supabase.co")
@@ -2362,16 +2499,7 @@ def analyze_passage(label, text, model_name, target_type="victory", core_context
 
     for attempt in range(max_retries):
         try:
-            res = gen_client.models.generate_content(
-                model=model_name,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.3,
-                    response_mime_type="application/json",
-                    response_json_schema=schema
-                )
-            )
-            result = json.loads(res.text.strip())
+            result = llm_json(model_name, prompt, schema, 0.3, gen_client)
             bad_field = find_degenerate_text(result)
             if bad_field:
                 # 반복 오류 결과는 저장하지 않고 다시 생성
@@ -3358,7 +3486,7 @@ def _generate_item(sb_factory, gclient, item: Dict, opts: Dict, dna_rules: str, 
 def gen_worker_main(api_key: str, sb_url: str, sb_key: str):
     """서버 스레드: 작업 목록에서 대기 중인 지문을 하나씩 처리"""
     sb = create_client(sb_url, sb_key) if (sb_url and sb_key and create_client is not None and IS_CLOUD_DB) else None
-    gclient = genai.Client(api_key=api_key)
+    gclient = genai.Client(api_key=api_key) if api_key else None
     dna = _store_get(sb, DNA_FILE, {}) or {}
     dna_rules = dna.get("rules_text") or DEFAULT_EXAM_DNA["rules_text"]
     essay_rules = dna.get("essay_rules_text", "")
@@ -3697,9 +3825,7 @@ def qb_norm_answer(a: str) -> str:
 def _qb_call(gclient, model: str, prompt: str, schema: Dict, temperature: float, logs: List[str], what: str):
     for attempt in range(4):
         try:
-            res = gclient.models.generate_content(model=model, contents=prompt, config=types.GenerateContentConfig(
-                temperature=temperature, response_mime_type="application/json", response_json_schema=schema))
-            return json.loads(res.text.strip())
+            return llm_json(model, prompt, schema, temperature, gclient)
         except Exception as e:
             err_s = str(e).lower()
             if attempt < 3 and any(k in err_s for k in ["503", "high demand", "429", "unavailable", "quota", "overloaded", "timeout", "timed out", "connection", "500", "internal"]):
@@ -4481,27 +4607,16 @@ def normalize_mock_meta(year: str, month: str, grade: str) -> (str, str, str):
 def mock_exam_key(year: str, month: str, grade: str) -> str:
     return f"[{year}년 {month}월 {grade}]"
 
-PDF_INLINE_MAX_BYTES = 15_000_000  # 이보다 큰 PDF(교과서 전체 등)는 Gemini 파일 업로드로 보냄
-
 def pdf_to_part(uploaded):
-    """작은 PDF는 바로 첨부, 큰 PDF는 Gemini Files API로 올린 뒤 처리 완료를 기다려 첨부"""
-    data = uploaded.getvalue()
-    if len(data) <= PDF_INLINE_MAX_BYTES:
-        return types.Part.from_bytes(data=data, mime_type="application/pdf")
-    f = client.files.upload(file=io.BytesIO(data), config=types.UploadFileConfig(mime_type="application/pdf", display_name=uploaded.name[:100]))
-    for _ in range(60):
-        if str(getattr(f, "state", "")).upper().endswith("ACTIVE"):
-            break
-        time.sleep(3)
-        f = client.files.get(name=f.name)
-    return f
+    """업로드한 PDF를 AI에 보낼 파일로 (큰 PDF는 Gemini일 때 자동으로 파일 업로드 방식으로 보냄)"""
+    return AiFile(uploaded.getvalue(), "application/pdf", uploaded.name)
 
 def extract_mock_exam_passages(pdf_file, answer_file, model_name: str) -> Dict:
     contents = [pdf_to_part(pdf_file)]
     answer_note = ""
     if answer_file is not None:
         ans_mime = answer_file.type if getattr(answer_file, "type", None) else "application/pdf"
-        contents.append(types.Part.from_bytes(data=answer_file.getvalue(), mime_type=ans_mime))
+        contents.append(AiFile(answer_file.getvalue(), ans_mime, answer_file.name))
         answer_note = f"(파일명: {pdf_file.name})과 별도 정답표 파일(파일명: {answer_file.name})"
     else:
         answer_note = f"(파일명: {pdf_file.name})"
@@ -4509,16 +4624,7 @@ def extract_mock_exam_passages(pdf_file, answer_file, model_name: str) -> Dict:
 
     for attempt in range(4):
         try:
-            res = client.models.generate_content(
-                model=model_name,
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    temperature=0.1,
-                    response_mime_type="application/json",
-                    response_json_schema=SCHEMA_MOCK_RESTORE
-                )
-            )
-            return json.loads(res.text.strip())
+            return llm_json(model_name, contents, SCHEMA_MOCK_RESTORE, 0.1)
         except Exception as e:
             err_s = str(e).lower()
             if attempt < 3 and any(k in err_s for k in ["503", "429", "overloaded", "unavailable", "quota", "high demand"]):
@@ -4583,11 +4689,7 @@ def extract_textbook_sections(pdf_file, model_name: str, subject: str, publisher
     contents = [pdf_to_part(pdf_file), TEXTBOOK_PROMPT.format(fname=pdf_file.name, hint=hint)]
     for attempt in range(4):
         try:
-            res = client.models.generate_content(
-                model=model_name, contents=contents,
-                config=types.GenerateContentConfig(temperature=0.1, response_mime_type="application/json", response_json_schema=SCHEMA_TEXTBOOK)
-            )
-            return json.loads(res.text.strip())
+            return llm_json(model_name, contents, SCHEMA_TEXTBOOK, 0.1)
         except Exception as e:
             err_s = str(e).lower()
             if attempt < 3 and any(k in err_s for k in ["503", "429", "overloaded", "unavailable", "quota", "high demand"]):
@@ -4710,6 +4812,8 @@ def default_style_reference_files(limit: int = 2) -> List[str]:
 def generate_passage_image(passage: str, style_refs: List[bytes], model_name: str, style: str = "") -> (bytes, str):
     """(이미지 bytes, 오류 메시지) 반환. 동시 생성 스레드에서 호출되므로 st.* 를 쓰지 않는다.
     참고 이미지는 직접 올린 경우에만 보냄 (입력이 줄어 비용도 적음)."""
+    if client is None:
+        return None, "AI 이미지 생성은 Gemini 키가 있어야 합니다 (Secrets에 GEMINI_API_KEY 등록)"
     contents = [types.Part.from_bytes(data=b, mime_type="image/jpeg") for b in style_refs if b]
     ref_note = "\n- Match the color, lighting and rendering feel of the attached reference images, but draw a completely new scene for this passage (do not copy their people, places or text)." if contents else ""
     contents.append(MOCK_IMAGE_PROMPT.format(passage=passage, style=style or IMAGE_STYLES[0][1], ref_note=ref_note))
@@ -5220,15 +5324,20 @@ with st.sidebar:
     academy_name = st.text_input("🏫 학원명", app_settings.get("academy_name", "포피엠 입시 영어"))
     school_name = st.text_input("🏫 학교명 (표지 및 ANATOMY용)", app_settings.get("school_name", "영어는 영쌤!"))
 
-    model_options = [
-        "gemini-2.5-flash",
-        "gemini-3.5-flash",
-        "gemini-3.1-pro",
-        "gemini-3.1-flash-lite",
-        "gemini-1.5-flash"
-    ]
-    saved_model = app_settings.get("text_model", model_options[0])
-    text_model = st.selectbox("📦 구글 AI 모델", model_options, index=model_options.index(saved_model) if saved_model in model_options else 0)
+    # AI 제공사·모델: Secrets에 키가 있는 제공사만, 모델 목록은 그 키로 자동 조회
+    providers = [p for p in AI_PROVIDERS if AI_KEYS.get(p)]
+    saved_provider, saved_name = split_model_spec(app_settings.get("text_model", "gemini:gemini-2.5-flash"))
+    provider = st.radio("🤖 AI 제공사 (글 생성)", providers, format_func=lambda p: AI_PROVIDERS[p], horizontal=True,
+                        index=providers.index(saved_provider) if saved_provider in providers else 0, key="ai_provider")
+    model_options = list_ai_models(provider)
+    if saved_provider == provider and saved_name and saved_name not in model_options:
+        model_options = [saved_name] + model_options
+    default_name = saved_name if saved_provider == provider else AI_DEFAULT_MODELS[provider][0]
+    model_name = st.selectbox("📦 모델", model_options, index=model_options.index(default_name) if default_name in model_options else 0,
+                              key=f"ai_model_{provider}", help="Secrets의 API 키로 쓸 수 있는 모델을 자동으로 불러옵니다 (1시간마다 새로 확인).")
+    text_model = f"{provider}:{model_name}"
+    if not AI_KEYS.get("gemini"):
+        st.caption("ℹ️ AI 이미지 생성은 Gemini 키가 있어야 쓸 수 있습니다.")
     api_delay = st.slider(
         "⏱️ 지문 간 API 대기 시간(초)",
         min_value=1, max_value=10, value=int(app_settings.get("api_delay", 3)),
@@ -5431,7 +5540,7 @@ with tab6:
         if uploaded_pdfs and st.button("🧠 업로드한 기출 PDF 출제DNA 추출 및 누적 적용", type="primary", use_container_width=True):
             with st.spinner("기출 시험지 PDF의 패러프레이징 패턴과 어휘 함정을 정밀 분석 중입니다..."):
                 try:
-                    contents_payload = [types.Part.from_bytes(data=up_pdf.getvalue(), mime_type="application/pdf") for up_pdf in uploaded_pdfs]
+                    contents_payload = [AiFile(up_pdf.getvalue(), "application/pdf", up_pdf.name) for up_pdf in uploaded_pdfs]
                     dna_prompt = f"""너는 대한민국 고등학교 영어 내신 기출 분석 전문가다.
 업로드된 영어 시험지 PDF({', '.join([u.name for u in uploaded_pdfs])})를 정밀 분석하여 다음 4가지를 추출하라.
 1. 주제/제목/요지/주장 선지에서 원문 표현을 어떤 수준의 상위 개념어(Meta-vocabulary)와 구문으로 패러프레이징하는지 (실제 시험지 속 구체적 영어 예시 포함)
@@ -5456,12 +5565,7 @@ with tab6:
                         "required": ["updated_rules_text", "updated_essay_rules_text", "analysis_summary"]
                     }
                     contents_payload.append(dna_prompt)
-                    res = client.models.generate_content(
-                        model=text_model,
-                        contents=contents_payload,
-                        config=types.GenerateContentConfig(temperature=0.2, response_mime_type="application/json", response_json_schema=dna_schema)
-                    )
-                    parsed_dna = json.loads(res.text.strip())
+                    parsed_dna = llm_json(text_model, contents_payload, dna_schema, 0.2)
                     st.session_state.exam_dna["rules_text"] = parsed_dna["updated_rules_text"]
                     if parsed_dna.get("updated_essay_rules_text", "").strip():
                         st.session_state.exam_dna["essay_rules_text"] = parsed_dna["updated_essay_rules_text"].strip()
@@ -5565,19 +5669,7 @@ with tab7:
 
                 for attempt in range(4):
                     try:
-                        res = client.models.generate_content(
-                            model=text_model,
-                            contents=[
-                                types.Part.from_bytes(data=pdf_file.getvalue(), mime_type="application/pdf"),
-                                prompt_past
-                            ],
-                            config=types.GenerateContentConfig(
-                                temperature=0.2,
-                                response_mime_type="application/json",
-                                response_json_schema=SCHEMA_PAST_PDF_VOCA
-                            )
-                        )
-                        parsed_pdf = json.loads(res.text.strip())
+                        parsed_pdf = llm_json(text_model, [pdf_to_part(pdf_file), prompt_past], SCHEMA_PAST_PDF_VOCA, 0.2)
                         sch_n = override_school.strip() if override_school.strip() else parsed_pdf.get("school_name", "기출").strip()
                         yr_term = parsed_pdf.get("exam_year_term", "").strip()
                         grd = parsed_pdf.get("grade", "").strip()
