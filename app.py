@@ -4302,7 +4302,7 @@ body { font-family: 'Noto Serif KR', serif; font-size: 10.3pt; line-height: 1.62
 .info { display: flex; border-top: 1px solid #111; font-family: 'Noto Sans KR'; font-size: 9.5pt; }
 .info div { flex: 1; padding: 5px 10px; border-right: 1px solid #111; }
 .info div:last-child { border-right: 0; }
-.cols { column-count: 2; column-gap: 9mm; column-rule: 1px solid #111; }
+.cols { column-count: 2; column-gap: 9mm; column-rule: 1px solid #111; column-fill: auto; }  /* 왼쪽 단을 쪽 끝까지 채운 뒤 오른쪽 단으로 (문항이 적어도 반씩 나뉘지 않게) */
 .q { margin: 0 0 14px; }  /* 긴 문항은 쪽·단을 넘겨 이어지게 (통째로 다음 쪽으로 밀리면 첫 쪽이 비어 버림) */
 .q .stem, .q .tag, .q .given { break-after: avoid; }
 .passage p { orphans: 3; widows: 3; }
@@ -4348,7 +4348,7 @@ def render_qbank_exam(qs: List[Dict], meta: Dict, gidx: Dict[str, List[Dict]]) -
         src = c.get("source") if r["difficulty"] == QB_GICHUL_LEVEL else None
         if src:
             badge = (f"<span class='bd real'>실제 기출</span> {html.escape(src.get('exam', ''))} {html.escape(src.get('no', ''))}번"
-                     + (f" · {html.escape(str(src['points']))}점" if src.get("points") else ""))
+                     + (f" · {html.escape(re.sub(r'\s*점\s*$', '', str(src['points'])))}점" if src.get("points") else ""))
         else:
             badge = f"<span class='bd var'>변형 · {html.escape(r.get('school') or '')} 스타일 · {html.escape(r['difficulty'])}</span>"
         t = f"▶ {html.escape(r['passage_label'])} · {html.escape(r['q_type'])} {badge}"
@@ -4421,16 +4421,130 @@ def render_qbank_exam(qs: List[Dict], meta: Dict, gidx: Dict[str, List[Dict]]) -
     return f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>{html.escape(meta.get('title', '변형문제'))}</title><style>{QB_EXAM_CSS}</style></head><body>{''.join(o)}</body></html>"
 
 # ---- 화면 ----
-def _qb_passage_picker(key: str, mock_lib: List[Dict], help_text: str) -> List[str]:
-    labels = [p["label"] for p in sorted(mock_lib, key=natural_sort_key)]
-    groups = list(dict.fromkeys(p.get("exam_key") or extract_group_prefix(p["label"]) for p in sorted(mock_lib, key=natural_sort_key)))
-    g_col1, g_col2 = st.columns([3, 1.2])
-    grp = g_col1.selectbox("📁 시험·교과서 단원 (빠르게 추가)", groups, key=f"{key}_grp")
-    if g_col2.button("➕ 이 묶음 전체 추가", use_container_width=True, key=f"{key}_grp_add"):
-        cur = st.session_state.get(key, [])
-        st.session_state[key] = cur + [p["label"] for p in sorted(mock_lib, key=natural_sort_key)
-                                       if (p.get("exam_key") or extract_group_prefix(p["label"])) == grp and p["label"] not in cur]
-    return st.multiselect("📌 지문 선택 (검색해서 여러 개 고르기)", labels, key=key, help=help_text, placeholder="예: 26년 6월 고1 19")
+# 지문 고르기: 출처 → 학년 → 시험을 고르면 번호가 칩으로 펼쳐지고, 칩 옆 작은 숫자는 쌓인 문제 수.
+# 여러 시험에서 고른 번호는 아래 '고른 지문'에 모여 함께 쓰임
+QB_MOCK_ROWS = [(18, 22), (23, 34), (35, 45)]  # 모의고사 번호 줄 나누기 (대의 파악 · 세부·어법·빈칸 · 순서·삽입·장문)
+QB_SUP = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
+
+QB_PICKER_CSS = """<style>
+[class*="st-key-qb_card_"] { border: 1px solid rgba(128,128,128,.18); border-radius: 18px; padding: 18px 20px 12px;
+  background: rgba(128,128,128,.035); box-shadow: 0 1px 2px rgba(0,0,0,.03), 0 10px 30px rgba(0,0,0,.035); }
+.qb-sec { font-size: 12px; font-weight: 600; letter-spacing: .02em; color: rgba(128,128,128,.95); margin: 2px 0 -6px; }
+.qb-row { font-size: 12px; color: rgba(128,128,128,.9); padding-top: 9px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.qb-basket { font-size: 13px; line-height: 1.7; opacity: .85; }
+.qb-basket b { font-weight: 600; }
+[class*="st-key-qb_card_"] [data-testid="stBaseButton-pills"], [class*="st-key-qb_card_"] [data-testid="stBaseButton-pillsActive"] {
+  border-radius: 999px; font-variant-numeric: tabular-nums; transition: all .15s ease; }
+[class*="st-key-qb_card_"] [data-testid="stBaseButton-pillsActive"],
+[class*="st-key-qb_card_"] [data-testid="stBaseButton-segmented_controlActive"] { background: #0A84FF; border-color: #0A84FF; color: #fff; }
+[class*="st-key-qb_card_"] [data-testid="stBaseButton-pillsActive"] *,
+[class*="st-key-qb_card_"] [data-testid="stBaseButton-segmented_controlActive"] * { color: #fff; }
+</style>"""
+
+@st.cache_data(ttl=60, show_spinner=False)
+def qb_bank_summary(_sb, labels: tuple) -> List[Dict]:
+    """지문별·유형별 개수 표시용 (가벼운 열만, 1분마다 새로 읽음)"""
+    return qb_fetch(_sb, list(labels), "passage_label,q_type,difficulty,school")
+
+def _qb_is_mock(p: Dict) -> bool:
+    return bool(p.get("year") and p.get("month"))
+
+def _qb_group_name(ps: List[Dict]) -> str:
+    p = ps[0]
+    return f"{str(p['year'])[2:]}년 {p['month']}월" if _qb_is_mock(p) else (p.get("exam_key") or extract_group_prefix(p["label"])).strip("[] ")
+
+def _qb_chip_counts(rows: List[Dict], field: str) -> Dict[str, int]:
+    out = {}
+    for r in rows:
+        out[r[field]] = out.get(r[field], 0) + 1
+    return out
+
+def _qb_sup(n) -> str:
+    return f" {str(n).translate(QB_SUP)}" if n else ""
+
+def _qb_count_line(counts: Dict[str, int], names: List[str]):
+    """칩 아래에 고른 지문 기준 개수 (칩 글자를 바꾸면 Streamlit이 다른 칩으로 여겨 선택이 풀리므로 따로 표시)"""
+    have = [f"{n} <b>{counts[n]}</b>" for n in names if counts.get(n)]
+    st.markdown(f"<div class='qb-basket' style='font-size:12px;margin-top:-6px'>{'고른 지문에 있는 문제 · ' + ' · '.join(have) if have else '고른 지문에 해당하는 문제가 아직 없어요.'}</div>",
+                unsafe_allow_html=True)
+
+def _qb_passage_picker(key: str, mock_lib: List[Dict], counts: Dict[str, int]) -> List[str]:
+    """출처·학년·시험을 고른 뒤 번호 칩을 눌러 지문을 고름 (여러 시험에 걸쳐 모아 담김)"""
+    lib = sorted(mock_lib, key=natural_sort_key)
+    groups, group_of = {}, {}
+    for p in lib:
+        g = p.get("exam_key") or extract_group_prefix(p["label"])
+        groups.setdefault(g, []).append(p)
+        group_of[p["label"]] = g
+    order = {p["label"]: i for i, p in enumerate(lib)}
+    by_lbl = {p["label"]: p for p in lib}
+    st.session_state[key] = [l for l in st.session_state.get(key, []) if l in order]
+
+    def set_chosen(labels):
+        st.session_state[key] = sorted(set(labels), key=order.get)
+
+    def sync(pkey, opts):
+        set_chosen([l for l in st.session_state[key] if l not in opts] + list(st.session_state.get(pkey) or []))
+
+    with st.container(key=f"qb_card_{key}"):
+        srcs = [s for s in ("모의고사", "교과서·부교재") if any(_qb_is_mock(ps[0]) == (s == "모의고사") for ps in groups.values())]
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("<div class='qb-sec'>출처</div>", unsafe_allow_html=True)
+            src = st.segmented_control("출처", srcs, default=srcs[0], key=f"{key}_src", label_visibility="collapsed") or srcs[0]
+        gks = [g for g, ps in groups.items() if _qb_is_mock(ps[0]) == (src == "모의고사")]
+        if src == "모의고사":
+            grades = sorted({str(groups[g][0].get("grade", "")) for g in gks})
+            with c2:
+                st.markdown("<div class='qb-sec'>학년</div>", unsafe_allow_html=True)
+                grade = st.segmented_control("학년", grades, default=grades[0], key=f"{key}_grade", label_visibility="collapsed") or grades[0]
+            gks = sorted([g for g in gks if str(groups[g][0].get("grade", "")) == grade],
+                         key=lambda g: (int(groups[g][0]["year"]), int(groups[g][0]["month"])), reverse=True)
+        chosen = st.session_state[key]
+        st.markdown("<div class='qb-sec'>시험 · 단원</div>", unsafe_allow_html=True)
+        exam = st.pills("시험", gks, default=gks[0], key=f"{key}_exam_{src}_{grade if src == '모의고사' else ''}", label_visibility="collapsed",
+                        format_func=lambda g: _qb_group_name(groups[g])) or gks[0]
+
+        ps = groups[exam]
+        if _qb_is_mock(ps[0]):
+            rows = [(f"{a}–{b}", [p for p in ps if a <= (extract_question_number(p["label"]) or 0) <= b]) for a, b in QB_MOCK_ROWS]
+            used = {p["label"] for _, r in rows for p in r}
+            rest = [p for p in ps if p["label"] not in used]
+            rows = [r for r in rows if r[1]] + ([("기타", rest)] if rest else [])
+        else:
+            rows = [("", ps)]
+        fmt = lambda l: str(by_lbl[l].get("number") or extract_question_number(l) or l) + _qb_sup(counts.get(l))
+        st.markdown("<div class='qb-sec'>번호 <span style='font-weight:400'>· 작은 숫자 = 쌓인 문제 수</span></div>", unsafe_allow_html=True)
+        for i, (row_name, row_ps) in enumerate(rows):
+            opts = [p["label"] for p in row_ps]
+            pkey = f"{key}_p_{exam}_{i}"
+            st.session_state[pkey] = [l for l in opts if l in chosen]
+            if row_name:
+                rc1, rc2 = st.columns([0.8, 9.2])
+                rc1.markdown(f"<div class='qb-row'>{row_name}</div>", unsafe_allow_html=True)
+                holder = rc2
+            else:
+                holder = st.container()
+            holder.pills("번호", opts, selection_mode="multi", key=pkey, format_func=fmt, label_visibility="collapsed",
+                         on_change=sync, args=(pkey, opts))
+
+        here = [p["label"] for p in ps]
+        b1, b2, b3, b4 = st.columns([1.1, 1.1, 3.8, 1])
+        b1.button("이 시험 전체", key=f"{key}_all", use_container_width=True, on_click=lambda: set_chosen(st.session_state[key] + here))
+        b2.button("이 시험 해제", key=f"{key}_none", use_container_width=True,
+                  on_click=lambda: set_chosen([l for l in st.session_state[key] if l not in here]))
+        b4.button("모두 비우기", key=f"{key}_clear", use_container_width=True, disabled=not chosen, on_click=lambda: set_chosen([]))
+        if chosen:
+            lines = {}
+            for l in chosen:
+                lines.setdefault(group_of[l], []).append(str(by_lbl[l].get("number") or l))
+            body = "<br>".join(f"<b>{html.escape(_qb_group_name(groups[g]) + ((' ' + str(groups[g][0].get('grade'))) if _qb_is_mock(groups[g][0]) else ''))}</b>"
+                               f" &nbsp;{html.escape(' · '.join(nums))}" for g, nums in lines.items())
+            b3.markdown(f"<div class='qb-basket'>고른 지문 <b>{len(chosen)}개</b> · 쌓인 문제 <b>{sum(counts.get(l, 0) for l in chosen)}개</b><br>{body}</div>",
+                        unsafe_allow_html=True)
+        else:
+            b3.markdown("<div class='qb-basket'>번호를 눌러 지문을 고르세요. 다른 시험으로 바꿔도 고른 번호는 그대로 남아요.</div>", unsafe_allow_html=True)
+    return st.session_state[key]
 
 def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_name: str):
     st.markdown("### 🧩 변형문제 은행 & 시험지 만들기")
@@ -4446,18 +4560,27 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
         st.info("원문 라이브러리에 지문이 없습니다. '📝 원문 라이브러리' 탭에서 모의고사·교과서 원문을 먼저 저장해 주세요.")
         return
     by_label = {p["label"]: p for p in mock_lib}
+    st.markdown(QB_PICKER_CSS, unsafe_allow_html=True)
+    summary = qb_bank_summary(sb, tuple(sorted(by_label)))
+    label_counts = _qb_chip_counts(summary, "passage_label")
     t_gen, t_exam, t_manage, t_gichul = st.tabs(["🛠️ 문제 만들기 (누적)", "📄 시험지 만들기", "🗂️ 문제 보기·삭제", "🏫 기출 표시"])
 
     with t_gen:
         st.caption("고른 지문 × 유형 × 난이도마다 문제를 만들어 계속 쌓습니다. 같은 지문을 다시 만들면 이미 만든 문제와 다른 포인트로 출제합니다.")
-        sel = _qb_passage_picker("qb_gen_labels", mock_lib, "원문 라이브러리의 모의고사 번호·교과서 단락")
-        c1, c2 = st.columns([3, 2])
-        q_types = c1.multiselect("🧷 유형", QB_TYPE_NAMES, default=[t for t in QB_TYPE_NAMES if t not in QB_ESSAY_TYPES], key="qb_gen_types")
-        levels = c2.multiselect("🎚️ 난이도", QB_LEVELS, default=["상", "중"], key="qb_gen_levels")
-        c3, c4, c5 = st.columns([2, 1.5, 2])
-        school = c3.radio("🏫 학교 스타일", QB_SCHOOLS, horizontal=True, key="qb_gen_school")
-        count = c4.number_input("조합당 문제 수", 1, 5, 2, key="qb_gen_count")
-        verify = c5.checkbox("✅ 정답 검증 (AI가 한 번 더 풀어서 정답이 다르면 버림)", value=True, key="qb_gen_verify")
+        sel = _qb_passage_picker("qb_gen_labels", mock_lib, label_counts)
+        with st.container(key="qb_card_gen_opts"):
+            st.markdown("<div class='qb-sec'>유형</div>", unsafe_allow_html=True)
+            q_types = st.pills("유형", QB_TYPE_NAMES, selection_mode="multi", default=[t for t in QB_TYPE_NAMES if t not in QB_ESSAY_TYPES],
+                               key="qb_gen_types", label_visibility="collapsed") or []
+            c2, c3, c4 = st.columns([1.4, 1.2, 1])
+            with c2:
+                st.markdown("<div class='qb-sec'>난이도</div>", unsafe_allow_html=True)
+                levels = st.pills("난이도", QB_LEVELS, selection_mode="multi", default=["상", "중"], key="qb_gen_levels", label_visibility="collapsed") or []
+            with c3:
+                st.markdown("<div class='qb-sec'>학교 스타일</div>", unsafe_allow_html=True)
+                school = st.segmented_control("학교 스타일", QB_SCHOOLS, default=QB_SCHOOLS[0], key="qb_gen_school", label_visibility="collapsed") or QB_SCHOOLS[0]
+            count = c4.number_input("조합당 문제 수", 1, 5, 2, key="qb_gen_count")
+            verify = st.checkbox("✅ 정답 검증 (AI가 한 번 더 풀어서 정답이 다르면 버림)", value=True, key="qb_gen_verify")
         n_jobs = len(sel) * len({("어법 (조합형)" if (t == "어법 (단일)" and lv == "최상") else t, lv) for t in q_types for lv in levels})
         if "어법 (단일)" in q_types and "최상" in levels:
             st.caption("💡 어법 최상은 실제 내신처럼 '옳은/틀린 것만을 있는 대로 고른 것'(ⓐ~ⓗ 조합형)으로 만듭니다.")
@@ -4484,15 +4607,36 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
 
     with t_exam:
         st.caption("고른 번호에서 같은 개수씩 골고루 뽑고, 번호 안에서는 유형을 돌아가며 섞습니다.")
-        sel_e = _qb_passage_picker("qb_exam_labels", mock_lib, "시험지에 넣을 번호")
-        e1, e2, e3 = st.columns([3, 2, 1.4])
-        e_types = e1.multiselect("🧷 넣을 유형", QB_TYPE_NAMES, default=QB_TYPE_NAMES, key="qb_exam_types")
-        e_levels = e2.multiselect("🎚️ 변형문제 난이도", QB_LEVELS, default=QB_LEVELS, key="qb_exam_levels")
-        total = e3.number_input("총 문제 수", 1, 300, 30, key="qb_exam_total")
-        e4, e5, e6 = st.columns([2, 1.6, 2])
-        e_school = e4.radio("🏫 학교 (변형 스타일·기출 학교)", ["전체"] + QB_SCHOOLS, horizontal=True, key="qb_exam_school")
-        e_real = e5.radio("🏫 실제 기출문제", ["함께 섞기", "빼기", "기출만"], horizontal=True, key="qb_exam_real")
-        order = e6.radio("↕️ 문제 순서", ["지문 순서 (오름차순)", "지문 역순 (내림차순)"], horizontal=True, key="qb_exam_order")
+        sel_e = _qb_passage_picker("qb_exam_labels", mock_lib, label_counts)
+        with st.container(key="qb_card_exam_opts"):
+            e4, e5, e6 = st.columns([1.2, 1.3, 1.5])
+            with e4:
+                st.markdown("<div class='qb-sec'>학교 (변형 스타일·기출 학교)</div>", unsafe_allow_html=True)
+                e_school = st.segmented_control("학교", ["전체"] + QB_SCHOOLS, default="전체", key="qb_exam_school", label_visibility="collapsed") or "전체"
+            with e5:
+                st.markdown("<div class='qb-sec'>실제 기출문제</div>", unsafe_allow_html=True)
+                e_real = st.segmented_control("실제 기출", ["함께 섞기", "빼기", "기출만"], default="함께 섞기", key="qb_exam_real", label_visibility="collapsed") or "함께 섞기"
+            with e6:
+                st.markdown("<div class='qb-sec'>문제 순서</div>", unsafe_allow_html=True)
+                order = st.segmented_control("순서", ["지문 순서 (오름차순)", "지문 역순 (내림차순)"], default="지문 순서 (오름차순)", key="qb_exam_order",
+                                             label_visibility="collapsed") or "지문 순서 (오름차순)"
+            sel_set = set(sel_e)
+            pool = [r for r in summary if r["passage_label"] in sel_set and (e_school == "전체" or r.get("school") == e_school)]
+            lv_counts = _qb_chip_counts([r for r in pool if r["difficulty"] != QB_GICHUL_LEVEL], "difficulty")
+            st.markdown("<div class='qb-sec'>변형문제 난이도</div>", unsafe_allow_html=True)
+            e_levels = st.pills("난이도", QB_LEVELS, selection_mode="multi", default=QB_LEVELS, key="qb_exam_levels", label_visibility="collapsed") or []
+            _qb_count_line(lv_counts, QB_LEVELS)
+            pool = [r for r in pool if (r["difficulty"] == QB_GICHUL_LEVEL and e_real != "빼기") or (r["difficulty"] in e_levels and e_real != "기출만")]
+            ty_counts = _qb_chip_counts(pool, "q_type")
+            st.markdown("<div class='qb-sec'>넣을 유형</div>", unsafe_allow_html=True)
+            e_types = st.pills("유형", QB_TYPE_NAMES, selection_mode="multi", default=QB_TYPE_NAMES, key="qb_exam_types", label_visibility="collapsed") or []
+            _qb_count_line(ty_counts, QB_TYPE_NAMES)
+            t1, t2, t3 = st.columns([1, 1, 2.2])
+            t1.button("유형 전체", key="qb_exam_types_all", use_container_width=True, on_click=lambda: st.session_state.update(qb_exam_types=list(QB_TYPE_NAMES)))
+            t2.button("있는 유형만", key="qb_exam_types_have", use_container_width=True, disabled=not ty_counts,
+                      on_click=lambda: st.session_state.update(qb_exam_types=[t for t in QB_TYPE_NAMES if ty_counts.get(t)]))
+            avail = sum(ty_counts.get(t, 0) for t in e_types)
+            total = t3.number_input(f"총 문제 수 (지금 조건으로 뽑을 수 있는 문제 {avail}개)", 1, 300, 30, key="qb_exam_total")
         h1, h2 = st.columns(2)
         default_title = (" · ".join(sel_e[:3]) + (" 외" if len(sel_e) > 3 else "")) if sel_e else ""
         title = h1.text_input("📝 시험지 제목", value="", placeholder=default_title or "예: 고1 26년 6월 19·20·21번 변형문제", key="qb_exam_title")
@@ -4555,6 +4699,7 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
                 st.warning(f"{len(to_del)}문제를 영구 삭제합니다. 되돌릴 수 없습니다.")
                 if st.button("삭제 확정", type="primary", key="qb_manage_del"):
                     qb_delete(sb, to_del)
+                    qb_bank_summary.clear()
                     st.rerun()
             pick = v2.selectbox("👁️ 미리보기", range(len(rows)), format_func=lambda i: f"{i + 1}. {rows[i]['q_type']} · {rows[i]['difficulty']} · {rows[i]['content'].get('focus', '')[:40]}", key="qb_manage_preview")
             components.html(render_qbank_exam([rows[pick]], {"title": m_label, "show_tag": True, "with_answers": True, "show_gichul": True},
