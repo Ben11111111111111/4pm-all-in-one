@@ -108,6 +108,11 @@ class AiFile:
     def __init__(self, data: bytes, mime: str, name: str = "file"):
         self.data, self.mime, self.name = data, mime, name
 
+def ai_model_label(spec: str) -> str:
+    """'anthropic:claude-opus-5-5' → 'Anthropic Claude · claude-opus-5-5'"""
+    p, m = split_model_spec(spec)
+    return f"{AI_PROVIDERS.get(p, p)} · {m}"
+
 def split_model_spec(spec: str) -> (str, str):
     p, _, m = str(spec or "").partition(":")
     return (p, m) if m and p in AI_PROVIDERS else ("gemini", str(spec or ""))
@@ -136,17 +141,127 @@ def _gemini_part(gc, f: AiFile):
         up = gc.files.get(name=up.name)
     return up
 
-# 최근 AI 호출의 토큰 사용량 (입력·캐시로 읽은 입력·출력) — 비용 확인용
-LLM_USAGE: List[Dict] = []
+# ---- AI 사용량·비용 ----
+#   호출마다 토큰(입력·캐시로 읽은 입력·캐시에 새로 쓴 입력·출력)을 모아 달마다 모델별로 더해 DB(ai_usage 문서)에 저장
+#   단가(1M 토큰당 달러)는 2026-11 기준 공개 가격을 넣은 추정치. 정확한 청구액은 각 회사 콘솔(결제 화면)이 기준
+AI_PRICES = [  # (모델 이름에 들어 있는 글자, 입력, 캐시 읽기, 출력) — 위에서부터 먼저 맞는 것을 씀
+    ("claude-fable-5-1", 10, 0.25, 50), ("claude-fable", 10, 1.0, 50), ("claude-mythos", 10, 1.0, 50),
+    ("claude-opus-5-5", 4, 0.20, 20), ("claude-opus", 5, 0.50, 25), ("claude-sonnet", 2, 0.20, 10), ("claude-haiku", 0.10, 0.01, 0.50),
+    ("gpt-5-nano", 0.05, 0.005, 0.40), ("gpt-5-mini", 0.25, 0.025, 2.0), ("gpt-5", 1.25, 0.125, 10.0),
+    ("gpt-4.1-mini", 0.40, 0.10, 1.60), ("gpt-4o-mini", 0.15, 0.075, 0.60), ("gpt-4", 2.0, 0.50, 8.0), ("o4-mini", 1.10, 0.275, 4.40), ("o3", 2.0, 0.50, 8.0),
+    ("flash-lite", 0.10, 0.01, 0.40), ("flash", 0.30, 0.03, 2.50), ("pro", 2.0, 0.20, 12.0),
+]
+AI_PRICE_DEFAULT = (2.0, 0.20, 10.0)
+AI_USAGE_FILE = "ai_usage.json"  # DB 문서 이름 ai_usage (로컬 실행이면 같은 이름 파일)
+LLM_USAGE: List[Dict] = []  # 이번 실행에서 최근 호출 기록 (시험용)
 
-def _log_usage(provider: str, model: str, inp: int, cached: int, out: int):
-    LLM_USAGE.append({"provider": provider, "model": model, "in": int(inp or 0), "cached": int(cached or 0), "out": int(out or 0), "t": time.time()})
+def ai_price(model: str):
+    m = str(model).lower()
+    return next((t[1:] for t in AI_PRICES if t[0] in m), AI_PRICE_DEFAULT)
+
+def ai_cost_usd(model: str, inp: int, cached: int, write: int, out: int) -> float:
+    """inp는 캐시 읽기·쓰기를 포함한 전체 입력. Claude 캐시 쓰기는 입력 단가의 1.25배"""
+    p_in, p_cache, p_out = ai_price(model)
+    plain = max(0, inp - cached - write)
+    return (plain * p_in + cached * p_cache + write * p_in * 1.25 + out * p_out) / 1_000_000
+
+@st.cache_resource
+def _usage_buffer() -> Dict:
+    """아직 DB에 쓰지 않은 사용량 (재실행·백그라운드 작업이 함께 쓰는 하나뿐인 통)"""
+    return {"lock": threading.Lock(), "io": threading.Lock(), "pending": {}, "last": time.time()}
+
+def flush_ai_usage():
+    """모아 둔 사용량을 DB의 달별·모델별 합계에 더함 (실패하면 다음에 다시)"""
+    buf = _usage_buffer()
+    with buf["io"]:
+        with buf["lock"]:
+            pending, buf["pending"], buf["last"] = buf["pending"], {}, time.time()
+        if not pending:
+            return
+        try:
+            sb = globals().get("supabase") if globals().get("IS_CLOUD_DB") else None
+            path = os.path.join(globals().get("BASE_DIR", "."), AI_USAGE_FILE)
+            doc = _store_get(sb, path, {}) or {}
+            months = doc.setdefault("months", {})
+            for month, models in pending.items():
+                for spec, d in models.items():
+                    tot = months.setdefault(month, {}).setdefault(spec, {})
+                    for k, v in d.items():
+                        tot[k] = round(tot.get(k, 0) + v, 6)
+            doc["updated_at"] = time.strftime("%Y-%m-%d %H:%M")
+            _store_put(sb, path, doc)
+        except Exception:
+            with buf["lock"]:
+                for month, models in pending.items():
+                    for spec, d in models.items():
+                        tot = buf["pending"].setdefault(month, {}).setdefault(spec, {})
+                        for k, v in d.items():
+                            tot[k] = tot.get(k, 0) + v
+
+def _log_usage(provider: str, model: str, inp: int, cached: int, out: int, write: int = 0):
+    inp, cached, out, write = int(inp or 0), int(cached or 0), int(out or 0), int(write or 0)
+    usd = ai_cost_usd(model, inp, cached, write, out)
+    LLM_USAGE.append({"provider": provider, "model": model, "in": inp, "cached": cached, "write": write, "out": out, "usd": usd, "t": time.time()})
     del LLM_USAGE[:-500]
+    try:
+        buf = _usage_buffer()
+        with buf["lock"]:
+            d = buf["pending"].setdefault(time.strftime("%Y-%m"), {}).setdefault(f"{provider}:{model}", {})
+            for k, v in (("calls", 1), ("in", inp), ("cached", cached), ("write", write), ("out", out), ("usd", usd)):
+                d[k] = d.get(k, 0) + v
+            due = time.time() - buf["last"] > 30
+        if due:
+            flush_ai_usage()
+    except Exception:
+        pass
+
+def load_ai_usage() -> Dict:
+    """DB 합계 + 아직 쓰지 않은 사용량"""
+    flush_ai_usage()
+    return _store_get(supabase if IS_CLOUD_DB else None, os.path.join(BASE_DIR, AI_USAGE_FILE), {}) or {}
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _ai_usage_cached() -> Dict:
+    return load_ai_usage()
+
+def render_ai_spend():
+    """사이드바: 이번 달·전체 AI 사용 금액 (추정)"""
+    months = (_ai_usage_cached().get("months") or {})
+    this = months.get(time.strftime("%Y-%m"), {})
+    usd_month = sum(d.get("usd", 0) for d in this.values())
+    usd_all = sum(d.get("usd", 0) for m in months.values() for d in m.values())
+    with st.expander(f"💵 AI 사용 금액 · 이번 달 ${usd_month:,.2f}", expanded=False):
+        if not this:
+            st.caption("이번 달에는 아직 기록이 없어요. (이 기능을 넣은 뒤부터 기록됩니다)")
+        for spec, d in sorted(this.items(), key=lambda x: -x[1].get("usd", 0)):
+            hit = d.get("cached", 0) / max(1, d.get("in", 0))
+            st.markdown(f"<b>{html.escape(ai_model_label(spec))}</b><br>${d.get('usd', 0):,.2f} · {int(d.get('calls', 0))}번 · "
+                        f"입력 {d.get('in', 0) / 1000:,.0f}K(캐시 {hit:.0%}) · 출력 {d.get('out', 0) / 1000:,.0f}K", unsafe_allow_html=True)
+        st.caption(f"기록한 뒤 전체 ${usd_all:,.2f} (약 {usd_all * 1400:,.0f}원) · 공개 단가로 계산한 추정치예요. 정확한 청구액은 각 회사 결제 화면에서 확인하세요.")
+
+@st.cache_resource
+def _gemini_cache_store() -> Dict:
+    return {"lock": threading.Lock(), "caches": {}}
+
+GEMINI_CACHE_TTL = 900  # Gemini 명시 캐시 유지 시간(초). 같은 앞부분을 이 시간 안에 다시 쓰면 입력의 약 1/10 값
+
+def _gemini_cached_prefix(gc, model: str, text: str) -> str:
+    """앞부분 글을 Gemini 캐시에 올려 두고 이름을 돌려줌 (자동 캐시는 잘 안 맞아서 직접 만듦)"""
+    store = _gemini_cache_store()
+    k = hashlib.md5(f"{model}\n{text}".encode("utf-8")).hexdigest()
+    with store["lock"]:
+        hit = store["caches"].get(k)
+        if hit and hit["exp"] > time.time() + 60:
+            return hit["name"]
+        c = gc.caches.create(model=model, config=types.CreateCachedContentConfig(
+            contents=[types.Content(role="user", parts=[types.Part(text=text)])], ttl=f"{GEMINI_CACHE_TTL}s"))
+        store["caches"][k] = {"name": c.name, "exp": time.time() + GEMINI_CACHE_TTL}
+        return c.name
 
 def llm_json(model_spec: str, contents, schema: Dict, temperature: float = 0.3, gemini_client=None, cache_first: bool = False) -> Dict:
     """JSON 스키마에 맞춘 답을 받아 dict로 돌려줌. contents: 글(str)과 AiFile의 목록 (또는 글 하나)
-    cache_first=True: 첫 글 조각이 여러 호출에서 똑같은 앞부분이라는 뜻 → Claude는 캐시 표시를 붙여 다음 호출부터 약 1/20 값에 읽음
-    (GPT·Gemini는 앞부분이 같으면 자동으로 캐시)"""
+    cache_first=True: 첫 글 조각이 여러 호출에서 똑같은 앞부분이라는 뜻
+      Claude: 캐시 표시를 붙여 다음 호출부터 약 1/20 값 · GPT: 앞부분이 같으면 자동 캐시(약 1/10) · Gemini: 명시 캐시를 만들어 약 1/10"""
     provider, model = split_model_spec(model_spec)
     items = contents if isinstance(contents, list) else [contents]
     key = AI_KEYS.get(provider, "")
@@ -199,13 +314,19 @@ def llm_json(model_spec: str, contents, schema: Dict, temperature: float = 0.3, 
         text = next(b.text for b in msg.content if b.type == "text")
         u = msg.usage
         _log_usage(provider, model, (u.input_tokens or 0) + (u.cache_read_input_tokens or 0) + (u.cache_creation_input_tokens or 0),
-                   u.cache_read_input_tokens, u.output_tokens)
+                   u.cache_read_input_tokens, u.output_tokens, u.cache_creation_input_tokens)
         return json.loads(text.strip())
 
     gc = gemini_client or client
+    cfg = dict(temperature=temperature, response_mime_type="application/json", response_json_schema=schema)
+    if cache_first and len(items) > 1 and isinstance(items[0], str):
+        try:
+            cfg["cached_content"] = _gemini_cached_prefix(gc, model, items[0])
+            items = items[1:]
+        except Exception:
+            pass  # 캐시를 못 만들면(너무 짧음·지원 안 함 등) 그냥 전부 보냄
     parts = [(_gemini_part(gc, it) if isinstance(it, AiFile) else it) for it in items]
-    res = gc.models.generate_content(model=model, contents=parts if len(parts) > 1 else parts[0], config=types.GenerateContentConfig(
-        temperature=temperature, response_mime_type="application/json", response_json_schema=schema))
+    res = gc.models.generate_content(model=model, contents=parts if len(parts) > 1 else parts[0], config=types.GenerateContentConfig(**cfg))
     u = getattr(res, "usage_metadata", None)
     if u:
         _log_usage(provider, model, u.prompt_token_count, u.cached_content_token_count, (u.candidates_token_count or 0) + (u.thoughts_token_count or 0))
@@ -3539,7 +3660,8 @@ def gen_worker_main(api_key: str, sb_url: str, sb_key: str):
                 _job_update(sb, lambda j: (j.update(status="done", current="", worker=None), _job_log(j, "🎉 모든 작업을 마쳤습니다.")))
                 return
             item = pending[0]
-            _job_update(sb, lambda j: (j.update(current=item["label"]), claim(j)))
+            item_model = item.get("model") or job.get("opts", {}).get("model", "")
+            _job_update(sb, lambda j: (j.update(current=item["label"], current_model=item_model), claim(j)))
             logs = []
             try:
                 sb_factory = (lambda: create_client(sb_url, sb_key)) if sb is not None else (lambda: None)
@@ -3560,12 +3682,14 @@ def gen_worker_main(api_key: str, sb_url: str, sb_key: str):
                         if item.get("img_path"):
                             it["img_path"] = item["img_path"]
                 for m in logs[-8:]:
-                    _job_log(j, m)
+                    _job_log(j, f"{m} · {ai_model_label(item_model)}" if m.startswith("✅") else m)
                 if not ok:
                     _job_log(j, f"❌ {item['label']}: {err} (나중에 '실패한 지문 다시 시도'로 재시도할 수 있어요)")
                 j["current"] = ""
+                j["current_model"] = ""
                 claim(j)
             _job_update(sb, finish)
+            flush_ai_usage()
         except Exception as e:
             # DB 연결이 잠깐 끊기는 등 예상 못 한 오류: 1분 쉬었다가 같은 지점부터 다시
             time.sleep(60)
@@ -3648,7 +3772,9 @@ def _render_gen_job_body(job: Dict):
     st.markdown(f"**⚙️ 교재 생성 작업** — {status_text}")
     st.progress(finished / max(1, c["total"]), text=f"{finished}/{c['total']} 지문 처리 · 실패 {c['failed']}개 · 남음 {c['pending']}개")
     if job.get("current"):
-        st.caption(f"⏳ 지금 처리 중: {job['current']}")
+        st.caption(f"⏳ 지금 처리 중: {job['current']}" + (f" · 🤖 {ai_model_label(job['current_model'])}" if job.get("current_model") else ""))
+    elif job.get("opts", {}).get("model") and status in ("running", "stopping"):
+        st.caption(f"🤖 {ai_model_label(job['opts']['model'])}")
 
     b1, b2, b3, b4 = st.columns(4)
     if status == "running":
@@ -5595,6 +5721,7 @@ with st.sidebar:
     model_name = st.selectbox("📦 모델", model_options, index=model_options.index(default_name) if default_name in model_options else 0,
                               key=f"ai_model_{provider}", help="Secrets의 API 키로 쓸 수 있는 모델을 자동으로 불러옵니다 (1시간마다 새로 확인).")
     text_model = f"{provider}:{model_name}"
+    render_ai_spend()
     if not AI_KEYS.get("gemini"):
         st.caption("ℹ️ AI 이미지 생성은 Gemini 키가 있어야 쓸 수 있습니다.")
     api_delay = st.slider(
