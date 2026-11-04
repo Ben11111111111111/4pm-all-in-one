@@ -4379,6 +4379,31 @@ QB_TRAP_RATE = {"하": 0.0, "중": 0.4, "상": 0.65, "최상": 0.7}
 QB_TRAP_ANS_POS = [2, 3, 4]
 QB_TRAP_ANS_W = [0.45, 0.4, 0.15]
 
+# 어법 '꼭 묻는 개념'을 학교 전체로 고르게: 목표 비율은 실제 기출 빈도의 제곱근(많이 나온 개념도 자주, 드문 개념도 꾸준히),
+#   지금까지 만든 문제(문제 은행 + 이번 실행에서 뽑은 것)에서 목표보다 덜 나온 개념부터 채움
+_QB_GRAMMAR_PICKS: Dict[str, Dict[str, float]] = {}
+
+def qb_grammar_concepts(r: Dict) -> List[str]:
+    """어법 문제 한 개가 다룬 개념 목록 (출제 포인트·해설 글에서 찾음)"""
+    t = " ".join(str(x) for x in [(r.get("content") or {}).get("focus", ""), (r.get("content") or {}).get("explanation", "")])
+    return [c for c, pat in QB_GRAMMAR_RE.items() if re.search(pat, t)]
+
+def _qb_grammar_counter(school: str) -> Dict[str, float]:
+    """학교별 개념 사용 횟수 (처음 한 번만 문제 은행에서 읽어 오고, 그 뒤로는 뽑을 때마다 더함)"""
+    if school not in _QB_GRAMMAR_PICKS:
+        cnt = {c: 0.0 for c in QB_GRAMMAR_FREQ.get(school, QB_GRAMMAR_FREQ["운양고"])}
+        try:
+            if IS_CLOUD_DB:
+                res = supabase.table(QB_TABLE).select("content").eq("school", school).in_("q_type", sorted(QB_GRAMMAR_TYPES)).limit(3000).execute()
+                for r in res.data or []:
+                    for c in qb_grammar_concepts(r):
+                        if c in cnt:
+                            cnt[c] += 1
+        except Exception:
+            pass
+        _QB_GRAMMAR_PICKS[school] = cnt
+    return _QB_GRAMMAR_PICKS[school]
+
 def qb_question_plans(q_type: str, level: str, school: str, count: int, existing: List[Dict], underline: str = "mix", rnd=None) -> List[List[str]]:
     """문항마다 다르게 낼 출제 장치를 무작위로 정함 → [[계획 문장, ...], ...] (문항 수만큼)"""
     rnd = rnd or random.Random()
@@ -4388,21 +4413,27 @@ def qb_question_plans(q_type: str, level: str, school: str, count: int, existing
         freq = QB_GRAMMAR_FREQ.get(school, QB_GRAMMAR_FREQ["운양고"])
         used = {c: 0 for c in freq}
         for r in existing:  # 이 지문에서 이미 물은 개념은 덜 뽑히게
-            t = " ".join(str(x) for x in [(r.get("content") or {}).get("focus", ""), (r.get("content") or {}).get("explanation", "")])
-            for c in freq:
-                if re.search(QB_GRAMMAR_RE.get(c, re.escape(c)), t):
+            for c in qb_grammar_concepts(r):
+                if c in used:
                     used[c] += 1
+        glob = _qb_grammar_counter(school)
+        tw = {c: math.sqrt(freq[c]) for c in freq}
+        tsum = sum(tw.values())
         k = 3 if q_type == "어법 (조합형)" else 2
         for pl in plans:
             pool = list(freq)
             pick = []
             for _ in range(k):
-                w = [math.sqrt(freq[c]) / (1 + used[c]) for c in pool]   # 빈도 제곱근: 상위 개념도 자주, 드문 개념도 꼭 나오게
-                c = rnd.choices(pool, weights=w)[0]
+                total = sum(glob.values()) + 1
+                # 목표 몫보다 얼마나 덜 나왔나(+) - 이 지문에서 이미 물었나 + 약간의 무작위 → 가장 큰 개념
+                score = {c: tw[c] / tsum * total - glob.get(c, 0) - 3 * used[c] + rnd.random() * 1.5 for c in pool}
+                c = max(pool, key=score.get)
                 pick.append(c)
                 pool.remove(c)
                 used[c] += 1
-            pl.append("이 문항에 꼭 넣을 어법 개념(밑줄 포인트로, 틀린 곳이든 맞게 쓴 함정이든): " + ", ".join(pick) + " — 나머지 밑줄은 이 개념들과 겹치지 않는 다른 개념으로")
+                glob[c] = glob.get(c, 0) + 1
+            pl.append("이 문항에 꼭 넣을 어법 개념(밑줄 포인트로, 틀린 곳이든 맞게 쓴 함정이든): " + ", ".join(pick)
+                      + " — 나머지 밑줄도 이 개념들과 겹치지 않게 학교 기출 개념 목록에서 골고루 고른다(분사·관계사처럼 많이 나온 개념만 반복하지 않는다)")
             rate = {"word": 0.0, "sentence": 1.0}.get(underline, QB_SENTENCE_RATE.get(school, {}).get(q_type, 0.3))
             if rnd.random() < rate:
                 if q_type == "서술형 (어법 수정)":
@@ -4459,7 +4490,7 @@ def qb_question_plans(q_type: str, level: str, school: str, count: int, existing
                     line += (f". 함정 배치(실제 내신 방식): {CIRCLED[tp]}에는 지문의 핵심 단어·표현을 그대로 여러 개 가져와 언뜻 정답처럼 보이지만 "
                              f"범위·초점·논리(주장 뒤집기·부분만 맞음 등)가 어긋난 '낚는 선지'를 둔다. 정답 {CIRCLED[pos]}는 지문 단어를 거의 쓰지 않고 "
                              f"완전히 다른 말(상위 개념어·동의어·구조 변경)로 재진술해서, 지문 단어가 보이는 {CIRCLED[tp]}보다 덜 정답처럼 보이게 한다. "
-                             f"앞에서부터 읽던 학생이 {CIRCLED[tp]}에서 멈추고 고르게 만드는 것이 목표다")
+                             f"앞에서부터 읽던 학생이 {CIRCLED[tp]}에서 멈추고 고르게 만드는 것이 목표다. 단, {CIRCLED[tp]}에도 지문 근거로 분명히 틀린 곳이 있어야 한다(복수 정답 금지)")
             else:
                 line = f"정답 번호: {CIRCLED[pos]} (지문 속 ①~⑤ 중 {CIRCLED[pos]} 자리가 정답이 되게 만든다)"
             pl.append(line)
@@ -5144,7 +5175,20 @@ def qb_pick(rows: List[Dict], labels: List[str], total: int, seed: int) -> (List
                      + (" → 모자란 만큼 다른 지문에서 더 뽑았습니다." if short <= 0 else ""))
     if short > 0:
         notes.append(f"조건에 맞는 문제가 모자라 {total - short}문제로 만들었습니다 ({short}문제 부족). '문제 만들기'에서 더 생성해 주세요.")
-    return [q for l in labels for q in taken.get(l, [])], notes
+    picked = [q for l in labels for q in taken.get(l, [])]
+    # 어법 문제는 시험지 전체에서 개념이 고르게: 같은 지문·유형·난이도의 안 뽑힌 문제 중 이미 나온 개념과 덜 겹치는 것으로 바꿈
+    ids = {id(q) for q in picked}
+    seen: Dict[str, int] = {}
+    for i, q in enumerate(picked):
+        if q.get("q_type") not in QB_GRAMMAR_TYPES:
+            continue
+        cands = [q] + [r for r in pools.get(q["passage_label"], []) if id(r) not in ids and r.get("q_type") == q["q_type"] and r.get("difficulty") == q.get("difficulty")]
+        best = min(cands, key=lambda r: (sum(seen.get(c, 0) for c in qb_grammar_concepts(r)), 0 if r is q else 1))
+        if best is not q:
+            ids.discard(id(q)); ids.add(id(best)); picked[i] = best
+        for c in qb_grammar_concepts(best):
+            seen[c] = seen.get(c, 0) + 1
+    return picked, notes
 
 def qb_html(s) -> str:
     """AI가 쓴 글에서 <u>, <b>만 살리고 나머지는 글자로 표시"""
@@ -6815,7 +6859,7 @@ APP_HELP = {
 - **💸 반값 모드**: 켜면 생성 비용이 절반이에요. 대신 결과가 바로 안 나오고 보통 몇 분~몇 시간, 길면 24시간 뒤에 들어와요. 급할 때는 끄고, 시간이 있을 때(예: 밤에 넣어 두고 다음 날) 켜세요. 창을 닫아도 서버가 2분마다 확인해서 들어온 것부터 저장해요.
 - 같은 지문을 다시 만들면 이미 쌓인 문제와 **다른 포인트**로 출제해요.
 - **어법 밑줄**: 섞기(학교 기출 비율로 단어·구 밑줄과 문장 전체 밑줄을 무작위로) / 단어·구 / 문장 전체.
-- **문항마다 출제 장치를 무작위로 정해요** (AI 비용 추가 없음): 어법은 실제 기출 개념 약 20가지 중 2~3개를 '꼭 묻기'로 뽑되 이 지문에서 이미 물은 개념은 덜 뽑혀요.
+- **문항마다 출제 장치를 무작위로 정해요** (AI 비용 추가 없음): 어법은 실제 기출 개념 약 20가지 중 2~3개를 '꼭 묻기'로 뽑아요. 학교마다 지금까지 만든 문제를 세서 덜 나온 개념부터 채우기 때문에, 분사처럼 많이 나온 개념만 반복되지 않고 실제 출제된 개념(5형식·관계부사·대명사 지칭·복합관계사 등)이 모두 고르게 나와요. 시험지를 뽑을 때도 어법 문제는 이미 나온 개념과 덜 겹치는 것을 골라요.
   영어 선택지·<보기>·요약문은 두 학교 모두 늘 재진술하고, 주제를 뒤집은 오답(제일고 1~2개, 운양고 가끔)을 넣어요.
   정답 번호도 프로그램이 ①~⑤에 고르게 정해요. 상·최상은 실제 내신처럼 지문 단어를 그대로 쓴 '낚는 선지'를 ①·②에, 완전히 다른 말로 바꾼 정답을 ③·④(가끔 ⑤)에 둬요.
   제일고 상·최상은 순서 문제의 덩어리를 새로 써서 원문과 다른 순서로 만들거나, 지문 전체를 다시 쓰기도 해요.
