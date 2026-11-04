@@ -4346,6 +4346,34 @@ QB_UNDERLINE_OPTS = {"mix": "섞기 (학교 기출 비율)", "word": "단어·�
 QB_NOCOPY_TYPES = {"주제", "제목", "요지·주장", "내용 일치·불일치", "<보기> 일치 조합형", "요약문 (A)(B)", "함축 의미"}
 QB_NOCOPY_MARK = "지문 쓰기: passage에는 '원문' 두 글자만 쓴다"
 QB_POS_TYPES = {"어법 (단일)", "낱말 (문맥상)", "무관한 문장"}  # 지문 속 ①~⑤가 선택지인데 정답 자리를 고를 수 있는 유형
+# ---- '우리 학교 시험 같다'는 느낌을 주는 헷갈림 장치 (2026-11-05, 운양고 25년 2학기 중간 고1 100점 시험지에서 학생이 '어렵다'고 별표 친 문항 분석) ----
+#   잘하는 학생이 헷갈린 이유는 대부분 "지문 단어가 보이면 맞다 / 바꿔 쓴 말이면 틀리다"는 습관을 역이용한 것
+#   문항별 출제 계획(프롬프트 맨 뒤)에만 붙여서 캐시되는 공통 앞부분은 그대로 둠
+QB_FEEL_RATE = {"하": 0.0, "중": 0.25, "상": 0.6, "최상": 0.9}
+QB_FEEL_DEVICES = {
+    "topic": ["헷갈림 장치(구체어 함정): 오답 하나는 글의 일부(특히 후반)에서 가장 눈에 띄는 구체적 용어 2~3개를 그대로 묶은 '부분 주제'로 써서 정답보다 더 정답처럼 보이게 하고, "
+              "정답은 글 앞부분과 뒷부분을 함께 아우르는 상위 표현으로 쓴다(함정 배치 줄이 있으면 이 오답을 그 '낚는 선지' 자리에 둔다). "
+              "실제 예: 조직 문화·갈등 관리 글에서 오답 'Comparing Mechanistic and Organic Structures'(후반 용어 그대로) vs 정답 'Cultural Diversity and Conflict Management within Organizations'."],
+    "summary": ["헷갈림 장치(한 칸으로 안 갈림): (A) 선택지에 문맥상 둘 다 그럴듯한 비슷한 뜻의 단어 2개를 넣어 (A)만으로는 고를 수 없게 하고, 그중 하나는 (B)가 틀려 (B)까지 따져야 정답이 정해지게 한다. "
+                "실제 예: 'at a disadvantage' 자리에 vulnerable(정답 쌍)과 disempowered(오답 쌍)를 함께 둠.",
+                "헷갈림 장치(반쪽 지문 단어): 오답 하나는 한 칸은 지문 단어를 그대로 쓰고 다른 칸은 반대 뜻으로 써서, 익숙한 한 칸만 보고 고르게 만든다. 정답 쌍은 두 칸 모두 지문에 없는 동의어로 쓴다. "
+                "실제 예: 'independent power … observe a scene' 글에서 오답 'subordinate …… observe' vs 정답 'autonomous …… inspect'."],
+    "tf": ["헷갈림 장치(맞는 선지 낯설게): 내용에 맞는 진술은 지문에 없는 상위어·구조 변경으로 바꿔 써서 처음 보면 틀려 보이게 하고, 틀린 진술은 지문 단어를 그대로 쓰면서 핵심 한 단어만 뒤집는다"
+           "(예: 'very different functions' → 'identical functions', 'When they die' → 'when they are alive'). 익숙한 단어가 보이면 맞다고 넘어가는 학생이 걸리게 한다.",
+           "헷갈림 장치(암시만 된 내용): 진술 하나는 지문이 암시만 하고 직접 말하지 않은 내용을 지문 단어로 그럴듯하게 써서, 지문에 나온 것처럼 착각하게 만든다"
+           "(예: 산소가 수온 상승보다 빨리 줄었다는 글에서 '다른 원인'을 지문이 밝힌 것처럼 쓴 진술). 일치/불일치 판단 근거는 explanation에 밝힌다."],
+    "blank": ["헷갈림 장치(암시 함정): 오답 하나는 지문이 암시만 하거나 한 예시에만 맞는 내용을 지문 단어로 써서 그럴듯하게 만들고, 정답은 빈칸 앞뒤의 역접·인과 논리를 따라가야만 확정되게 한다."],
+    "insert": ["헷갈림 장치(가짜 자리): 주어진 문장의 단어가 바로 앞 문장의 단어와 겹쳐 표면적으로 이어져 보이는 가짜 자리를 하나 둔다. 진짜 자리는 주어진 문장 첫머리 연결어(So, This, Such 등)가 받는 내용과 "
+               "바로 뒤 문장의 핵심어로만 확정되게 한다. 실제 예: 'So when you start to watch television … see the world as being shaped like television'이 'see things differently' 뒤에도, 'TV teaches you …' 앞에도 들어갈 듯해 보임."],
+    "order": ["헷갈림 장치(두 순서 그럴듯): 덩어리 첫머리의 지시어(this, these, such, they)가 두 덩어리에 모두 걸리는 것처럼 보이게 하고, 정답 순서는 내용 논리(일반 → 예시 → 결론, 문제 → 해결)를 따라가야만 확정되게 한다."],
+    "grammar": ["헷갈림 장치(같은 함정 두 번 + 긴 주어): 같은 어법 포인트(예: one of + 복수명사, 수일치, 관계사 what/that)를 밑줄 두 곳에 넣어 한 곳만 보고 판단하면 틀리게 하고, 맞게 쓴 밑줄에는 동명사구·삽입구가 붙은 긴 주어를 써서 틀려 보이게 한다. "
+                "실제 예: 'one of the most famous non-great composer' / 'one of the world's great composer'(둘 다 틀림), 'Distributing food and other goods to neighborhood vendors allows …'(맞음), "
+                "'The musical forms, or ideas expressed within them, were …'(맞음)."],
+}
+QB_FEEL_GROUP = {"주제": "topic", "제목": "topic", "요지·주장": "topic", "요약문 (A)(B)": "summary", "내용 일치·불일치": "tf", "<보기> 일치 조합형": "tf",
+                 "빈칸": "blank", "함축 의미": "blank", "삽입": "insert", "순서": "order", "어법 (단일)": "grammar", "어법 (조합형)": "grammar"}
+QB_FEEL_EXPLAIN = "explanation 마지막 줄에 '헷갈리는 포인트: (끌리는 오답 번호·자리)가 끌리는 이유 → 실제로 틀린 이유'를 한 줄로 쓴다(학생이 '이래서 시험에서 틀렸구나'를 알 수 있게)."
+
 # 함정형 문항 비율(난이도별)과 함정형 문항의 정답 번호 가중치 (③·④·⑤ = 45%·40%·15%) — 출제DNA 탭 현황판도 이 값을 그대로 보여 줌
 QB_TRAP_RATE = {"하": 0.0, "중": 0.4, "상": 0.65, "최상": 0.7}
 QB_TRAP_ANS_POS = [2, 3, 4]
@@ -4402,6 +4430,13 @@ def qb_question_plans(q_type: str, level: str, school: str, count: int, existing
                 n = 1 if (level != "하" and rnd.random() < 0.5) else 0
             if n:
                 pl.append(QB_OPPOSITE_TRAP.format(n=n))
+    # 헷갈림 장치: 상·최상(중은 가끔)에서 유형에 맞는 장치 하나 + 해설에 '헷갈리는 포인트' 한 줄
+    grp = QB_FEEL_DEVICES.get(QB_FEEL_GROUP.get(q_type, ""))
+    if grp and level in ("상", "최상", "중"):
+        for pl in plans:
+            if rnd.random() < QB_FEEL_RATE.get(level, 0):
+                pl.append(rnd.choice(grp))
+                pl.append(QB_FEEL_EXPLAIN)
     # 정답 번호와 함정 배치 (2026-11-04 측정: 실제 기출은 정답이 ①~⑤에 고르게, 원문 단어를 쓴 가장 그럴듯한 오답이 정답보다 앞 번호인 경우가 운양고 62%·제일고 50%.
     #   AI에 맡기면 정답이 ③에 몰리고(제일고 상 65%) ⑤는 거의 안 나와서 파이썬이 정해 줌)
     if q_type in QB_CHOICE_TYPES or q_type in QB_POS_TYPES:
@@ -5637,7 +5672,6 @@ def _qb_passage_picker(key: str, mock_lib: List[Dict], counts: Dict[str, int]) -
     return st.session_state[key]
 
 def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_name: str):
-    st.markdown("### 🧩 변형문제 은행 & 시험지 만들기")
     sb = supabase if IS_CLOUD_DB else None
     ready, err = qb_table_status(sb)
     if not ready:
@@ -5647,7 +5681,7 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
         return
     mock_lib = [p for p in st.session_state.saved_mock if p.get("body_text")]
     if not mock_lib:
-        st.info("원문 라이브러리에 지문이 없습니다. '📝 원문 라이브러리' 탭에서 모의고사·교과서 원문을 먼저 저장해 주세요.")
+        st.info("원문 라이브러리에 지문이 없습니다. 왼쪽 메뉴 '📝 원문 라이브러리'에서 모의고사·교과서 원문을 먼저 저장해 주세요.")
         return
     by_label = {p["label"]: p for p in mock_lib}
     st.markdown(QB_PICKER_CSS, unsafe_allow_html=True)
@@ -6342,7 +6376,6 @@ def render_mock_image_section(selected: List[Dict]):
                             st.error("❌ 이미지를 읽지 못했습니다.")
 
 def render_mock_exam_tab(text_model: str, api_delay: int, academy_name: str, school_name: str):
-    st.markdown("### 📝 원문 라이브러리 (모의고사·교과서 PDF → 원문 저장 → 번호 클릭으로 교재 생성)")
     kind_label = st.segmented_control("자료 종류", ["모의고사", "교과서"], default="모의고사", key="src_kind") or "모의고사"
     is_textbook = kind_label == "교과서"
     if is_textbook:
@@ -6659,7 +6692,7 @@ def render_mock_exam_tab(text_model: str, api_delay: int, academy_name: str, sch
 
     a_col1, a_col2 = st.columns(2)
     a_col1.download_button(
-        "📊 선택 지문 엑셀 다운로드 (엑셀 원클릭 생성 탭 형식)",
+        "📊 선택 지문 엑셀 다운로드 (엑셀 원클릭 생성 메뉴 형식)",
         data=build_mock_excel_bytes(selected),
         file_name="모의고사_원문.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -6695,13 +6728,12 @@ def render_mock_exam_tab(text_model: str, api_delay: int, academy_name: str, sch
                 n_added = enqueue_generation(rows, types_list, text_model, api_delay, academy_name, school_name)
                 st.session_state.gen_flash = f"✅ {n_added}개 지문을 생성 작업에 추가했습니다. 창을 닫아도 서버에서 계속 진행됩니다."
                 st.rerun()
-        st.caption("👉 생성된 교재는 각 교재 탭(한판승·Self-Note·Core·Voca)에서 같은 이름으로 확인·렌더링할 수 있습니다.")
+        st.caption("👉 생성된 교재는 왼쪽 메뉴 '교재 출력'(한판승·Self-Note·Core·Voca)에서 같은 이름으로 확인·렌더링할 수 있습니다.")
 
 
 # -----------------------------
 # 6. 메인 UI 화면 및 사이드바 구성
 # -----------------------------
-st.title("🦅 4pm 올인원 교재 통합 시스템")
 
 # ---- 사용 설명서 (처음 쓰는 사람용 · 글만 보여 주므로 DB·AI 호출 없음) ----
 APP_HELP = {
@@ -6710,19 +6742,21 @@ APP_HELP = {
 지문(원문)을 모아 두고 → AI로 교재·변형문제를 만들어 **클라우드 DB(Supabase)에 쌓은 뒤** → 원하는 것만 골라 **HTML 단행본으로 출력**하는 앱이에요.
 만든 결과는 모두 DB에 저장되므로 창을 닫거나 앱이 다시 시작돼도 사라지지 않아요.
 
-##### 🔁 기본 흐름 (위 탭 순서)
+##### 🔁 기본 흐름 (왼쪽 메뉴)
 | 순서 | 어디서 | 무엇을 |
 |---|---|---|
 | ① 원문 모으기 | 📝 원문 라이브러리 | 모의고사·교과서 PDF를 올리면 AI가 원문을 복원 → 표에서 확인·수정 → 저장 |
 | ② 교재 만들기 | 📝 원문 라이브러리 아래쪽 / 🚀 엑셀 원클릭 | 지문을 골라 One-Shot·Self-Note·Core·Voca 생성 (서버에서 백그라운드로 진행) |
-| ③ 출력 | 🏆 🦅 💎 📖 각 교재 탭 | 지문을 골라 '단행본 렌더링' → HTML 다운로드 → 열어서 **인쇄 / PDF로 저장** |
+| ③ 출력 | 🖨️ 교재 출력 (🏆 🦅 💎 📖) | 지문을 골라 '단행본 렌더링' → HTML 다운로드 → 열어서 **인쇄 / PDF로 저장** |
 | ④ 변형문제 | 🧩 변형문제 은행·시험지 | 문제를 계속 쌓아 두고, 조건에 맞게 뽑아 시험지·책으로 출력 |
 | ⑤ 학교 스타일 학습 | 🎯 출제DNA 학습기 · 📚 기출 어휘 | 운양고·제일고 기출 PDF로 출제 규칙과 어휘를 쌓음 → ②·④ 생성에 반영 |
 
-##### ⚙️ 왼쪽 사이드바 (모든 탭에 공통으로 적용)
-- **로고·학원명·학교명**: 교재 머리말·꼬리말·표지에 들어가요. 바꾸면 자동 저장돼요.
-- **AI 제공사·모델**: 모든 AI 작업(교재·변형문제·PDF 분석)에 이 모델을 써요. 모델마다 **값과 품질이 크게 달라요** → 바로 아래 '📊 모델 고르기 참고표'를 보고 고르세요.
+##### ⚙️ 왼쪽 메뉴 아래 (모든 화면에 공통으로 적용)
+- **🤖 AI 모델**: 모든 AI 작업(교재·변형문제·PDF 분석)에 이 모델을 써요. 모델마다 **값과 품질이 크게 달라요** → 바로 아래 '📊 모델 고르기 참고표'를 보고 고르세요.
 - **💵 AI 사용 금액**: 이번 달 모델별 금액이에요. 실제로 쓴 토큰으로 계산한 금액이에요 (제공사 청구서와 조금 다를 수 있어요).
+
+##### 🛠️ ⚙️ 설정 메뉴
+- **로고·학원명·학교명**: 교재 머리말·꼬리말·표지에 들어가요. 바꾸면 자동 저장돼요.
 - **지문 간 API 대기 시간**: 지문 하나를 끝내고 다음 지문까지 쉬는 시간이에요. 너무 줄이면 제공사가 요청을 막을 수 있어요.
 - **저장소 상태**: 🟢 클라우드 DB 연결됨이어야 정상이에요. 🟡 로컬 모드면 저장이 이 PC에만 돼요.
 
@@ -6745,7 +6779,7 @@ APP_HELP = {
 3. **AI 이미지 생성 체크**: 이미지가 없는 지문만 AI가 지문 내용으로 그려요 (장당 약 10초, 비용 발생). 화풍·이미지 모델을 고를 수 있어요.
 4. **만들 교재 체크** → **🚀 올인원 통합 생성 시작**: 작업 칸에 올라가 서버에서 진행돼요.
    - Core에서 쓴 패러프레이징 어휘는 Voca 단어장에 자동으로 들어가요.
-5. 다 되면 🏆 🦅 💎 📖 각 탭에서 골라 출력하세요.
+5. 다 되면 왼쪽 메뉴 '교재 출력'(🏆 🦅 💎 📖)에서 골라 출력하세요.
 """,
 "mock": """
 ##### 📝 원문 라이브러리 — 모든 교재·변형문제의 '원본 창고'
@@ -6802,7 +6836,7 @@ APP_HELP = {
 AI가 짝지은 원문과 내용 단어가 20%도 안 겹치면 잘못 연결된 것으로 보고 연결하지 않아요.
 """,
 "library": """
-##### 📚 교재 탭 (🏆 One-Shot · 🦅 Self-Note · 💎 Core · 📖 Voca) — 만든 교재를 골라 출력하는 곳
+##### 📚 교재 출력 (🏆 One-Shot · 🦅 Self-Note · 💎 Core · 📖 Voca) — 만든 교재를 골라 출력하는 곳
 - **🔄 누락된 N개 지문 자동 생성** (Core·Voca만, 비용 발생): 다른 교재는 있는데 이 교재만 없는 지문을 찾아 만들어요. 엑셀을 다시 올릴 필요가 없어요.
 - **🔗 CORE 어휘를 VOCA에 병합** (Voca만, 무료): Core에 쓰인 패러프레이징 어휘를 단어장에 넣어요.
 - **고르기**: 그룹 필터·검색 → **✅ 검색 결과 전체 선택**, 또는 번호를 적고 **⚡ 입력한 번호만 선택 추가**. 카드를 눌러도 선택/해제돼요.
@@ -6814,7 +6848,7 @@ AI가 짝지은 원문과 내용 단어가 20%도 안 겹치면 잘못 연결된
 ##### 🎯 출제DNA 학습기 — 학교 출제 스타일을 AI에게 가르치는 곳
 여기 저장된 **출제 DNA 규칙**은 교재·변형문제를 만들 때 AI에게 함께 전달돼요. 그래서 이 규칙이 좋을수록 '그 학교다운' 문제가 나와요.
 - 맨 위 **📊 현황판**: 학교별로 참고하는 기출 시험지 수, 실제 시험에 많이 나온 유형·어법 개념, 지문을 얼마나 바꾸는지, 그래서 문제를 어떻게 만드는지를 보여 줘요. 시험지를 더 올리면 바로 바뀌어요 (보기만 하는 화면이라 비용 없음).
-  - 시험지 수·유형 통계는 **🧩 변형문제 은행·시험지 → 🏫 기출 표시**에 올린 시험지에서, 학습 기록은 이 탭의 PDF 업로드에서 쌓여요.
+  - 시험지 수·유형 통계는 **🧩 변형문제 은행·시험지 → 🏫 기출 표시**에 올린 시험지에서, 학습 기록은 이 화면의 PDF 업로드에서 쌓여요.
 - **기출 PDF 업로드 → 🧠 출제DNA 추출 및 누적 적용** (비용 발생): AI가 주제·요약 패러프레이징 방식, 빈칸 어휘 수준, 어휘 함정 패턴을 분석해 규칙에 **덧붙여요**.
 - **규칙 글을 직접 고치고 💾 수동 저장**할 수도 있어요. 서술형 규칙은 따로 **💾 서술형 출제 DNA 저장**.
 - **🔄 운양고·제일고 기본값으로 초기화**: 지금까지 쌓은 규칙이 처음 상태로 돌아가요. **되돌릴 수 없어요.**
@@ -6969,168 +7003,89 @@ def render_dna_board():
             with st.container(border=True):
                 st.markdown(f"**{h_idx}. {h_item.get('title', '기출 분석')}**")
                 st.caption(h_item.get("summary", ""))
-        st.caption("시험지 목록·유형 통계는 '🧩 변형문제 은행·시험지' 탭 → '🏫 기출 표시'에 올린 시험지에서, 출제 규칙 학습 기록은 아래 '기출 PDF 업로드'에서 쌓입니다.")
+        st.caption("시험지 목록·유형 통계는 '🧩 변형문제 은행·시험지' 메뉴 → '🏫 기출 표시' 탭에 올린 시험지에서, 출제 규칙 학습 기록은 아래 '기출 PDF 업로드'에서 쌓입니다.")
 
 
-def render_help(key: str, title: str = "❓ 이 탭 사용법"):
-    with st.expander(title, expanded=False):
-        st.markdown(APP_HELP[key])
+# -----------------------------
+# 6-B. 화면 구성: 왼쪽 메뉴(그룹별) → 고른 화면 하나만 그림
+#   - 예전에는 탭 9개를 매번 전부 그려서 버튼 하나만 눌러도 모든 교재 목록·미리보기를 다시 만들었음
+#   - 지금은 고른 메뉴만 그리므로 같은 동작이 더 빠르고, 주소(…/qbank)로 바로 들어갈 수 있음
+# -----------------------------
+# 다른 메뉴로 갔다 와도 필터·칩·입력값이 그대로 남도록 위젯 값을 붙잡아 둠 (Streamlit 공식 방법)
+#   버튼·파일 업로드·표 편집처럼 값을 직접 넣을 수 없는 위젯은 건너뜀
+_KEEP_VALUE_TYPES = {"bool_value", "string_value", "int_value", "double_value",
+                     "double_array_value", "int_array_value", "string_array_value"}
 
-with st.sidebar:
-    st.markdown("### 🖼️ 로고 및 정보 설정")
-    st.caption("💾 한 번 올린 로고와 입력한 정보는 자동 저장되어, 바꾸기 전까지 계속 유지됩니다.")
-    app_settings = st.session_state.app_settings
-    settings_changed = False
+def keep_widget_state():
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+        inner = get_script_run_ctx().session_state._state
+        mapper, meta = inner._key_id_mapper, inner._new_widget_state.widget_metadata
+    except Exception:
+        return  # Streamlit 내부가 바뀌면 그냥 건너뜀 (값이 초기화될 뿐 기능은 그대로)
+    for k in list(st.session_state.keys()):
+        wid = mapper.get_id_from_key(k, None)
+        m = meta.get(wid) if wid else None
+        if m is None or m.value_type not in _KEEP_VALUE_TYPES:
+            continue
+        try:
+            v = st.session_state[k]
+            if v is None or isinstance(v, dict):
+                continue
+            st.session_state[k] = v
+        except Exception:
+            pass
 
-    logo_urls = {}
-    for slot, label in [("h", "머리말 로고"), ("f", "꼬리말 로고"), ("e", "영쌤 로고")]:
-        up = st.file_uploader(label, type=["png", "jpg", "jpeg"], key=slot)
-        if up is not None:
-            # 같은 파일이 화면을 다시 그릴 때마다 저장되지 않도록 내용 해시로 비교
-            up_hash = hashlib.md5(up.getvalue()).hexdigest()
-            if app_settings.get(f"logo_{slot}_hash") != up_hash:
-                app_settings[f"logo_{slot}"] = logo_upload_to_data_url(up)
-                app_settings[f"logo_{slot}_hash"] = up_hash
-                settings_changed = True
-        logo_urls[slot] = app_settings.get(f"logo_{slot}") or DEFAULT_LOGO_URL
-        if app_settings.get(f"logo_{slot}") and up is None:
-            st.image(app_settings[f"logo_{slot}"], width=48, caption=f"저장된 {label}")
+keep_widget_state()
 
-    if any(app_settings.get(f"logo_{s}") for s in "hfe"):
-        if st.button("🔄 저장된 로고 모두 기본값으로", use_container_width=True, key="reset_logos"):
-            for s in "hfe":
-                app_settings.pop(f"logo_{s}", None)
-                app_settings.pop(f"logo_{s}_hash", None)
-            save_app_settings(app_settings)
-            st.rerun()
-
-    academy_name = st.text_input("🏫 학원명", app_settings.get("academy_name", "포피엠 입시 영어"))
-    school_name = st.text_input("🏫 학교명 (표지 및 ANATOMY용)", app_settings.get("school_name", "영어는 영쌤!"))
-
-    # AI 제공사·모델: Secrets에 키가 있는 제공사만, 모델 목록은 그 키로 자동 조회
-    providers = [p for p in AI_PROVIDERS if AI_KEYS.get(p)]
-    saved_provider, saved_name = split_model_spec(app_settings.get("text_model", "gemini:gemini-2.5-flash"))
-    provider = st.radio("🤖 AI 제공사 (글 생성)", providers, format_func=lambda p: AI_PROVIDERS[p], horizontal=True,
-                        index=providers.index(saved_provider) if saved_provider in providers else 0, key="ai_provider")
-    model_options = list_ai_models(provider)
-    if saved_provider == provider and saved_name and saved_name not in model_options:
-        model_options = [saved_name] + model_options
-    default_name = saved_name if saved_provider == provider else AI_DEFAULT_MODELS[provider][0]
-    model_name = st.selectbox("📦 모델", model_options, index=model_options.index(default_name) if default_name in model_options else 0,
-                              key=f"ai_model_{provider}", help="Secrets의 API 키로 쓸 수 있는 모델을 자동으로 불러옵니다 (1시간마다 새로 확인).")
-    text_model = f"{provider}:{model_name}"
-    render_ai_spend()
-    render_model_guide()
-    if not AI_KEYS.get("gemini"):
-        st.caption("ℹ️ AI 이미지 생성은 Gemini 키가 있어야 쓸 수 있습니다.")
-    api_delay = st.slider(
-        "⏱️ 지문 간 API 대기 시간(초)",
-        min_value=1, max_value=10, value=int(app_settings.get("api_delay", 3)),
-        help="유료 Tier 1 이상이면 1~2초로 줄여 생성 속도를 높일 수 있습니다."
-    )
-
-    for k, v in [("academy_name", academy_name), ("school_name", school_name), ("text_model", text_model), ("api_delay", api_delay)]:
-        if app_settings.get(k) != v:
-            app_settings[k] = v
-            settings_changed = True
-    if settings_changed:
-        save_app_settings(app_settings)
-
-    st.markdown("---")
-    st.markdown(f"### ☁️ 저장소 상태: {'**클라우드 DB 연결됨 🟢**' if IS_CLOUD_DB else '**로컬 PC 모드 🟡**'}")
-    with st.expander("📦 기존 PC 데이터 클라우드 이전 / 백업"):
-        st.caption("💡 이미지는 Supabase의 [Storage -> image_assets 버킷]에 직접 드래그해 올리거나, 구글 드라이브에서 받은 ZIP 파일 1개로 한 번에 올릴 수 있습니다.")
-        up_jsons = st.file_uploader(
-            "1) 기존 JSON 파일 업로드 (victory, anatomy, core, voca, past_voca)",
-            type=["json"],
-            accept_multiple_files=True,
-            key="cloud_mig_json"
-        )
-        up_zip = st.file_uploader(
-            "2) [선택] image_assets.zip 압축 파일 1개로 통째 업로드",
-            type=["zip"],
-            key="cloud_mig_zip"
-        )
-        if st.button("🚀 클라우드 DB로 데이터 이식 실행", type="primary", use_container_width=True):
-            with st.spinner("데이터를 클라우드 DB에 동기화 중입니다..."):
-                if up_zip is not None:
-                    with zipfile.ZipFile(up_zip) as zf:
-                        img_entries = [info for info in zf.infolist() if not info.is_dir() and info.filename.lower().endswith((".png", ".jpg", ".jpeg"))]
-                        prog = st.progress(0)
-                        for idx, info in enumerate(img_entries):
-                            fname = os.path.basename(info.filename)
-                            if not fname or fname.startswith("."):
-                                continue
-                            raw_bytes = zf.read(info.filename)
-                            with open(os.path.join(IMAGE_DIR, fname), "wb") as f:
-                                f.write(raw_bytes)
-                            if IS_CLOUD_DB:
-                                try:
-                                    supabase.storage.from_("image_assets").upload(
-                                        path=fname,
-                                        file=raw_bytes,
-                                        file_options={"content-type": "image/png", "upsert": "true"}
-                                    )
-                                except Exception:
-                                    pass
-                            prog.progress((idx + 1) / max(1, len(img_entries)))
-                        prog.empty()
-
-                for uj in (up_jsons or []):
-                    j_data = json.load(uj)
-                    if isinstance(j_data, list):
-                        j_data, _ = normalize_passage_records(j_data)
-                        fname = uj.name.lower()
-                        if "victory" in fname:
-                            st.session_state.saved_v = j_data
-                            save_to_file(VICTORY_FILE, j_data)
-                        elif "anatomy" in fname:
-                            st.session_state.saved_a = j_data
-                            save_to_file(ANATOMY_FILE, j_data)
-                        elif "core" in fname:
-                            st.session_state.saved_c = j_data
-                            save_to_file(CORE_FILE, j_data)
-                        elif "mock" in fname:
-                            st.session_state.saved_mock = j_data
-                            save_to_file(MOCK_FILE, j_data)
-                        elif "past" in fname:
-                            j_data, _ = consolidate_past_voca_records(j_data)
-                            st.session_state.saved_past_voca = j_data
-                            save_to_file(PAST_VOCA_FILE, j_data)
-                        elif "voca" in fname:
-                            st.session_state.saved_w = j_data
-                            save_to_file(VOCA_FILE, j_data)
-                st.cache_data.clear()
-                st.success("✅ 클라우드 DB로 모든 데이터 이식이 완료되었습니다!")
-                st.rerun()
-
+# 사이드바 밖(⚙️ 설정 화면)에서 고치는 값은 저장된 설정에서 바로 읽음
+app_settings = st.session_state.app_settings
+academy_name = app_settings.get("academy_name", "포피엠 입시 영어")
+school_name = app_settings.get("school_name", "영어는 영쌤!")
+api_delay = int(app_settings.get("api_delay", 3))
+logo_urls = {s: app_settings.get(f"logo_{s}") or DEFAULT_LOGO_URL for s in "hfe"}
 h_url, f_url, e_url = logo_urls["h"], logo_urls["f"], logo_urls["e"]
 CSS_VICTORY = build_css_victory(h_url, f_url, e_url)
 CSS_ANATOMY = build_css_anatomy(h_url, f_url, e_url)
 CSS_CORE = build_css_core(h_url, f_url, e_url)
 CSS_VOCA = build_css_voca(h_url, f_url)
 
-# 진행 중이거나 남아 있는 교재 생성 작업 (어느 탭에서든 보이도록 탭 위에 표시)
-# 작업이 없어도 빈 칸을 항상 만들어 두어, 작업 칸이 생기거나 사라질 때 보고 있던 탭이 첫 탭으로 돌아가지 않게 함
-with st.container():
-    render_gen_job_panel()
-render_help("overview", "📖 처음 쓰는 분을 위한 사용 설명서 — 시스템 원리·버튼 역할")
+# 화면 여백만 살짝 다듬음 (외부 글꼴·이미지 없이 몇 줄짜리 CSS라 속도 영향 없음)
+st.markdown("""<style>
+.block-container { padding-top: 2.4rem; padding-bottom: 3rem; max-width: 1480px; }
+.pg-crumb { font-size: 0.8rem; color: #64748b; margin-bottom: -0.2rem; }
+.pg-desc { font-size: 0.9rem; color: #475569; margin-top: -0.4rem; line-height: 1.55; }
+.home-tile-desc { font-size: 0.82rem; color: #64748b; margin: -0.3rem 0 0.2rem 0.2rem; line-height: 1.45; }
+.home-count { font-size: 0.78rem; color: #0047AB; font-weight: 700; margin-left: 0.2rem; }
+[data-testid="stSidebarNav"] { padding-top: 0.4rem; }
+</style>""", unsafe_allow_html=True)
 
-tab1, tab_mock, tab_qb, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-    "🚀 엑셀 원클릭 통합 생성",
-    "📝 원문 라이브러리 (모의고사·교과서)",
-    "🧩 변형문제 은행·시험지",
-    "🏆 Anatomy One-Shot (한판승)",
-    "🦅 Anatomy Self-Note",
-    "💎 Anatomy Core",
-    "📖 Anatomy Voca",
-    "🎯 기출 PDF 출제DNA 학습기",
-    "📚 기출 어휘 독립 라이브러리"
-], key="main_tabs", on_change="rerun")  # 탭을 바꿀 때 다시 그려, 다른 교재 탭에서 고른 지문이 바로 보이게 함
 
-with tab1:
-    render_help("excel")
-    st.info("💡 엑셀과 이미지를 업로드하고 생성 버튼을 누르면, **Anatomy One-Shot(한판승)**, **Anatomy Self-Note**, **Anatomy Core**, **Anatomy Voca**가 동시에 생성되며, **Core에 쓰인 패러프레이징 어휘들이 Voca 단어장에 자동으로 포함**됩니다.")
+def page_home():
+    st.markdown("#### 무엇을 하시겠어요?")
+    st.markdown("<div class='pg-desc'>자주 쓰는 일을 목적별로 모았어요. 왼쪽 메뉴에서도 언제든 바로 갈 수 있어요.</div>", unsafe_allow_html=True)
+    st.write("")
+    n_src = len(st.session_state.saved_mock)
+    counts = {
+        "source": f"원문 {n_src}개", "oneshot": f"{len(st.session_state.saved_v)}개", "selfnote": f"{len(st.session_state.saved_a)}개",
+        "core": f"{len(st.session_state.saved_c)}개", "voca": f"{len(st.session_state.saved_w)}개",
+        "past-voca": f"시험지 {len(st.session_state.saved_past_voca)}개",
+    }
+    for group, keys in HOME_GROUPS:
+        st.markdown(f"##### {group}")
+        cols = st.columns(len(keys))
+        for i, key in enumerate(keys):
+            info = PAGE_INFO[key]
+            with cols[i].container(border=True):
+                st.page_link(PAGES[key], label=f"**{info['title']}**", icon=info["icon"], use_container_width=True)
+                cnt = f"<span class='home-count'>· 저장 {counts[key]}</span>" if key in counts else ""
+                st.markdown(f"<div class='home-tile-desc'>{info['short']}{cnt}</div>", unsafe_allow_html=True)
+        st.write("")
+    with st.expander("📖 처음 쓰는 분을 위한 사용 설명서 — 시스템 원리·버튼 역할", expanded=False):
+        st.markdown(APP_HELP["overview"])
+
+
+def page_excel():
     xlsx = st.file_uploader("📂 엑셀 업로드", type=["xlsx"])
     imgs = st.file_uploader("🖼️ 이미지 대량 업로드 (선택)", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
 
@@ -7189,39 +7144,38 @@ with tab1:
             st.session_state.gen_flash = f"✅ {n_added}개 지문을 생성 작업에 추가했습니다. 창을 닫아도 서버에서 계속 진행됩니다."
             st.rerun()
 
-with tab_mock:
-    render_help("mock")
+
+def page_source():
     render_mock_exam_tab(text_model, api_delay, academy_name, school_name)
 
-with tab_qb:
-    render_help("qbank")
+
+def page_qbank():
     render_qbank_tab(text_model, api_delay, academy_name, school_name)
 
-with tab2:
-    render_help("library")
+
+def page_oneshot():
     render_library_manager("v", "Anatomy One-Shot", VICTORY_FILE, CSS_VICTORY, "victory", text_model, api_delay, academy_name, school_name, h_url, f_url)
 
-with tab3:
-    render_help("library")
+
+def page_selfnote():
     render_library_manager("a", "Anatomy Self-Note", ANATOMY_FILE, CSS_ANATOMY, "anatomy", text_model, api_delay, academy_name, school_name, h_url, f_url)
 
-with tab4:
-    render_help("library")
+
+def page_core():
     render_library_manager("c", "Anatomy Core", CORE_FILE, CSS_CORE, "core", text_model, api_delay, academy_name, school_name, h_url, f_url)
 
-with tab5:
-    render_help("library")
+
+def page_voca():
     render_library_manager("w", "Anatomy Voca", VOCA_FILE, CSS_VOCA, "voca", text_model, api_delay, academy_name, school_name, h_url, f_url)
 
-with tab6:
-    render_help("dna")
-    st.markdown("### 🎯 학교별 기출 시험지 PDF 출제DNA 분석 & 누적 학습기")
+
+def page_dna():
     render_dna_board()
     st.divider()
     st.markdown("#### ➕ 기출 시험지 PDF로 출제 규칙 더 학습시키기")
     st.info(
         "💡 새 시험지 PDF를 올리면 AI가 **주제·요약문 패러프레이징 방식, 빈칸 타겟 어휘 수준, 어휘 추론 함정 패턴**을 분석해 출제 규칙에 덧붙이고 클라우드 DB에 영구 누적합니다. "
-        "문항 유형·배점 통계와 '기출 이력'은 '🧩 변형문제 은행·시험지' 탭 → '🏫 기출 표시'에 시험지를 올려야 쌓여요."
+        "문항 유형·배점 통계와 '기출 이력'은 '🧩 변형문제 은행·시험지' 메뉴 → '🏫 기출 표시' 탭에 시험지를 올려야 쌓여요."
     )
 
     col_dna1, col_dna2 = st.columns([1.2, 1.8])
@@ -7315,17 +7269,8 @@ with tab6:
             save_exam_dna(st.session_state.exam_dna)
             st.success("✅ 서술형 출제 DNA가 저장되었습니다!")
 
-# ==========================================
-# 📚 탭 7: 기출 어휘 독립 라이브러리 (시험지 단위 통합 & 시험지별 페이지 구분)
-# ==========================================
-with tab7:
-    render_help("pastvoca")
-    st.markdown("### 📚 학교별 기출 시험지 어휘 독립 라이브러리 (시험지 단위 연속 출력 & 시험지 간 페이지 분리)")
-    st.info(
-        "💡 **한 시험지(예: `[운양고 26년 1학기 중간 고1]`)의 모든 문항 단어들이 여백 없이 연달아서 이어서 출력**되며, "
-        "**다음 시험지(예: `[운양고 26년 1학기 기말 고1]`)로 바뀔 때만 다음 장(새 페이지)부터 시작**합니다. "
-        "각 단어 아래에는 몇 년도 몇 학년 몇 번 문제(본문/선지)에서 나왔는지 상세 출처가 자동 표기됩니다."
-    )
+
+def page_past_voca():
 
     with st.container(border=True):
         up_past_pdfs = st.file_uploader(
@@ -7421,3 +7366,206 @@ with tab7:
 
     st.markdown("---")
     render_library_manager("past_v", "기출 어휘 단어장", PAST_VOCA_FILE, CSS_VOCA, "past_voca", text_model, api_delay, academy_name, school_name, h_url, f_url)
+
+
+
+def page_settings():
+    settings_changed = False
+    with st.container(border=True):
+        st.markdown("##### 🏫 교재에 들어가는 정보")
+        st.caption("표지·머리말·꼬리말에 들어가요. 바꾸면 바로 저장되고, 다시 바꾸기 전까지 유지돼요.")
+        s1, s2 = st.columns(2)
+        new_academy = s1.text_input("학원명", academy_name, key="set_academy_name")
+        new_school = s2.text_input("학교명 (표지 및 ANATOMY용)", school_name, key="set_school_name")
+        for k, v in [("academy_name", new_academy), ("school_name", new_school)]:
+            if app_settings.get(k) != v:
+                app_settings[k] = v
+                settings_changed = True
+
+    with st.container(border=True):
+        st.markdown("##### 🖼️ 로고")
+        st.caption("한 번 올린 로고는 자동 저장돼요. 올리지 않은 자리는 기본 로고가 들어가요.")
+        lcols = st.columns(3)
+        for col, (slot, label) in zip(lcols, [("h", "머리말 로고"), ("f", "꼬리말 로고"), ("e", "영쌤 로고")]):
+            with col:
+                up = st.file_uploader(label, type=["png", "jpg", "jpeg"], key=slot)
+                if up is not None:
+                    # 같은 파일이 화면을 다시 그릴 때마다 저장되지 않도록 내용 해시로 비교
+                    up_hash = hashlib.md5(up.getvalue()).hexdigest()
+                    if app_settings.get(f"logo_{slot}_hash") != up_hash:
+                        app_settings[f"logo_{slot}"] = logo_upload_to_data_url(up)
+                        app_settings[f"logo_{slot}_hash"] = up_hash
+                        settings_changed = True
+                elif app_settings.get(f"logo_{slot}"):
+                    st.image(app_settings[f"logo_{slot}"], width=56, caption=f"저장된 {label}")
+        if any(app_settings.get(f"logo_{s}") for s in "hfe"):
+            if st.button("🔄 저장된 로고 모두 기본값으로", key="reset_logos"):
+                for s in "hfe":
+                    app_settings.pop(f"logo_{s}", None)
+                    app_settings.pop(f"logo_{s}_hash", None)
+                save_app_settings(app_settings)
+                st.rerun()
+
+    with st.container(border=True):
+        st.markdown("##### ⏱️ 생성 속도")
+        new_delay = st.slider(
+            "지문 간 API 대기 시간(초)", min_value=1, max_value=10, value=api_delay, key="set_api_delay",
+            help="유료 Tier 1 이상이면 1~2초로 줄여 생성 속도를 높일 수 있습니다. 너무 줄이면 제공사가 요청을 막을 수 있어요."
+        )
+        if app_settings.get("api_delay") != new_delay:
+            app_settings["api_delay"] = new_delay
+            settings_changed = True
+        if not AI_KEYS.get("gemini"):
+            st.caption("ℹ️ AI 이미지 생성은 Gemini 키가 있어야 쓸 수 있습니다.")
+
+    if settings_changed:
+        save_app_settings(app_settings)
+
+    with st.container(border=True):
+        st.markdown(f"##### ☁️ 저장소 · {'클라우드 DB 연결됨 🟢' if IS_CLOUD_DB else '로컬 PC 모드 🟡'}")
+        st.markdown("**📦 기존 PC 데이터 클라우드 이전 / 백업**")
+        st.caption("💡 이미지는 Supabase의 [Storage -> image_assets 버킷]에 직접 드래그해 올리거나, 구글 드라이브에서 받은 ZIP 파일 1개로 한 번에 올릴 수 있습니다.")
+        up_jsons = st.file_uploader(
+            "1) 기존 JSON 파일 업로드 (victory, anatomy, core, voca, past_voca)",
+            type=["json"],
+            accept_multiple_files=True,
+            key="cloud_mig_json"
+        )
+        up_zip = st.file_uploader(
+            "2) [선택] image_assets.zip 압축 파일 1개로 통째 업로드",
+            type=["zip"],
+            key="cloud_mig_zip"
+        )
+        if st.button("🚀 클라우드 DB로 데이터 이식 실행", type="primary", use_container_width=True):
+            with st.spinner("데이터를 클라우드 DB에 동기화 중입니다..."):
+                if up_zip is not None:
+                    with zipfile.ZipFile(up_zip) as zf:
+                        img_entries = [info for info in zf.infolist() if not info.is_dir() and info.filename.lower().endswith((".png", ".jpg", ".jpeg"))]
+                        prog = st.progress(0)
+                        for idx, info in enumerate(img_entries):
+                            fname = os.path.basename(info.filename)
+                            if not fname or fname.startswith("."):
+                                continue
+                            raw_bytes = zf.read(info.filename)
+                            with open(os.path.join(IMAGE_DIR, fname), "wb") as f:
+                                f.write(raw_bytes)
+                            if IS_CLOUD_DB:
+                                try:
+                                    supabase.storage.from_("image_assets").upload(
+                                        path=fname,
+                                        file=raw_bytes,
+                                        file_options={"content-type": "image/png", "upsert": "true"}
+                                    )
+                                except Exception:
+                                    pass
+                            prog.progress((idx + 1) / max(1, len(img_entries)))
+                        prog.empty()
+
+                for uj in (up_jsons or []):
+                    j_data = json.load(uj)
+                    if isinstance(j_data, list):
+                        j_data, _ = normalize_passage_records(j_data)
+                        fname = uj.name.lower()
+                        if "victory" in fname:
+                            st.session_state.saved_v = j_data
+                            save_to_file(VICTORY_FILE, j_data)
+                        elif "anatomy" in fname:
+                            st.session_state.saved_a = j_data
+                            save_to_file(ANATOMY_FILE, j_data)
+                        elif "core" in fname:
+                            st.session_state.saved_c = j_data
+                            save_to_file(CORE_FILE, j_data)
+                        elif "mock" in fname:
+                            st.session_state.saved_mock = j_data
+                            save_to_file(MOCK_FILE, j_data)
+                        elif "past" in fname:
+                            j_data, _ = consolidate_past_voca_records(j_data)
+                            st.session_state.saved_past_voca = j_data
+                            save_to_file(PAST_VOCA_FILE, j_data)
+                        elif "voca" in fname:
+                            st.session_state.saved_w = j_data
+                            save_to_file(VOCA_FILE, j_data)
+                st.cache_data.clear()
+                st.success("✅ 클라우드 DB로 모든 데이터 이식이 완료되었습니다!")
+                st.rerun()
+
+
+# ---- 메뉴 정의 (title: 메뉴 이름, short: 홈 화면 한 줄 설명, desc: 화면 위 설명, help: 사용법 키) ----
+PAGE_INFO = {
+    "home": {"title": "홈", "icon": "🏠", "group": "", "func": page_home, "short": "", "desc": "", "help": None},
+    "source": {"title": "원문 라이브러리", "icon": "📝", "group": "만들기", "func": page_source,
+               "short": "모의고사·교과서 PDF → 원문 저장 → 번호 골라 교재 생성",
+               "desc": "모의고사·교과서 PDF를 올려 원문을 저장하고, 번호를 골라 교재를 만들어요. 모든 교재·변형문제의 원본 창고예요.", "help": "mock"},
+    "qbank": {"title": "변형문제 은행·시험지", "icon": "🧩", "group": "만들기", "func": page_qbank,
+              "short": "유형·난이도별 문제를 쌓고, 조건대로 뽑아 시험지 출력",
+              "desc": "문제를 만들 때마다 은행에 쌓이고, 시험지는 쌓인 문제에서 뽑기만 해요 (시험지 만들기는 AI 비용 없음).", "help": "qbank"},
+    "excel": {"title": "엑셀 원클릭 생성", "icon": "🚀", "group": "만들기", "func": page_excel,
+              "short": "엑셀 한 장으로 교재 4종을 한 번에",
+              "desc": "엑셀과 이미지를 올리면 One-Shot(한판승)·Self-Note·Core·Voca를 함께 만들고, Core에 쓰인 패러프레이징 어휘는 Voca 단어장에 자동으로 들어가요.", "help": "excel"},
+    "oneshot": {"title": "One-Shot (한판승)", "icon": "🏆", "group": "교재 출력", "func": page_oneshot,
+                "short": "골라서 단행본 출력 · 수업용 PPT", "desc": "만든 Anatomy One-Shot(한판승)을 골라 단행본으로 출력하거나 수업용 PPT로 받아요.", "help": "library"},
+    "selfnote": {"title": "Self-Note", "icon": "🦅", "group": "교재 출력", "func": page_selfnote,
+                 "short": "골라서 단행본 출력", "desc": "만든 Anatomy Self-Note를 골라 단행본으로 출력해요.", "help": "library"},
+    "core": {"title": "Core", "icon": "💎", "group": "교재 출력", "func": page_core,
+             "short": "골라서 단행본 출력 · 빠진 지문 자동 생성", "desc": "만든 Anatomy Core를 골라 단행본으로 출력해요. 다른 교재만 있는 지문은 여기서 바로 만들 수 있어요.", "help": "library"},
+    "voca": {"title": "Voca", "icon": "📖", "group": "교재 출력", "func": page_voca,
+             "short": "단어장 출력 · 엑셀/CSV 받기", "desc": "만든 Anatomy Voca 단어장을 골라 출력하거나 엑셀·CSV로 받아요.", "help": "library"},
+    "dna": {"title": "출제 DNA", "icon": "🎯", "group": "기출 분석", "func": page_dna,
+            "short": "학교별 출제 방식 현황판 · 기출 PDF로 규칙 학습",
+            "desc": "운양고·제일고 기출 시험지로 출제 규칙을 쌓아요. 여기 규칙이 교재·변형문제 생성에 함께 쓰여요.", "help": "dna"},
+    "past-voca": {"title": "기출 어휘", "icon": "📚", "group": "기출 분석", "func": page_past_voca,
+                  "short": "기출 시험지 PDF → 시험지별 단어장",
+                  "desc": "기출 시험지 PDF에서 단어를 뽑아 출처(학년·번호·본문/선지)와 함께 시험지별 단어장으로 저장해요. 한 시험지 단어는 이어서, 다음 시험지는 새 쪽부터 출력돼요.", "help": "pastvoca"},
+    "settings": {"title": "설정", "icon": "⚙️", "group": "설정", "func": page_settings,
+                 "short": "로고·학원명·생성 속도·데이터 이전", "desc": "교재에 들어가는 로고·학원명, 생성 속도, 데이터 이전·백업을 관리해요. AI 모델은 왼쪽 메뉴 아래에서 골라요.", "help": None},
+}
+HOME_GROUPS = [("✍️ 만들기", ["source", "qbank", "excel"]),
+               ("🖨️ 교재 출력", ["oneshot", "selfnote", "core", "voca"]),
+               ("🏫 기출 분석", ["dna", "past-voca"])]
+PAGES = {k: st.Page(v["func"], title=v["title"], icon=v["icon"], url_path=k, default=(k == "home")) for k, v in PAGE_INFO.items()}
+nav = {}
+for k, v in PAGE_INFO.items():
+    nav.setdefault(v["group"], []).append(PAGES[k])
+current = st.navigation(nav, position="sidebar")
+
+with st.sidebar:
+    # AI 제공사·모델: 모든 화면에서 쓰므로 메뉴 바로 아래에 둠. Secrets에 키가 있는 제공사만, 모델 목록은 그 키로 자동 조회
+    st.markdown("##### 🤖 AI 모델")
+    providers = [p for p in AI_PROVIDERS if AI_KEYS.get(p)]
+    saved_provider, saved_name = split_model_spec(app_settings.get("text_model", "gemini:gemini-2.5-flash"))
+    provider = st.radio("AI 제공사 (글 생성)", providers, format_func=lambda p: AI_PROVIDERS[p], horizontal=True,
+                        index=providers.index(saved_provider) if saved_provider in providers else 0, key="ai_provider",
+                        label_visibility="collapsed")
+    model_options = list_ai_models(provider)
+    if saved_provider == provider and saved_name and saved_name not in model_options:
+        model_options = [saved_name] + model_options
+    default_name = saved_name if saved_provider == provider else AI_DEFAULT_MODELS[provider][0]
+    model_name = st.selectbox("모델", model_options, index=model_options.index(default_name) if default_name in model_options else 0,
+                              key=f"ai_model_{provider}", label_visibility="collapsed",
+                              help="Secrets의 API 키로 쓸 수 있는 모델을 자동으로 불러옵니다 (1시간마다 새로 확인).")
+    text_model = f"{provider}:{model_name}"
+    if app_settings.get("text_model") != text_model:
+        app_settings["text_model"] = text_model
+        save_app_settings(app_settings)
+    render_ai_spend()
+    render_model_guide()
+    st.caption(f"{'🟢 클라우드 DB 연결됨' if IS_CLOUD_DB else '🟡 로컬 PC 모드 (이 PC에만 저장)'} · {academy_name}")
+
+# ---- 화면 머리: 위치 표시 · 제목 · 한 줄 설명 · 사용법 ----
+cur_key = next((k for k, v in PAGE_INFO.items() if v["title"] == current.title), "home")
+cur = PAGE_INFO.get(cur_key, PAGE_INFO["home"])
+h1, h2 = st.columns([6, 1], vertical_alignment="bottom")
+with h1:
+    crumb = "4pm 올인원 교재 시스템" + (f" › {cur['group']}" if cur["group"] and cur["group"] != cur["title"] else "")
+    st.markdown(f"<div class='pg-crumb'>{crumb}</div>", unsafe_allow_html=True)
+    st.markdown(f"## {cur['icon']} {'4pm 올인원 교재 시스템' if cur_key == 'home' else cur['title']}")
+    if cur["desc"]:
+        st.markdown(f"<div class='pg-desc'>{cur['desc']}</div>", unsafe_allow_html=True)
+if cur["help"]:
+    with h2.popover("❓ 사용법", use_container_width=True):
+        st.markdown(APP_HELP[cur["help"]])
+
+# 진행 중이거나 남아 있는 생성 작업은 어느 화면에서든 위에 보임
+render_gen_job_panel()
+
+current.run()

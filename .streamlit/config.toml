@@ -10,3 +10,7 @@ showWidgetBorder = true
 baseRadius = "0.6rem"
 buttonRadius = "0.6rem"
 redColor = "#E11D48"
+
+[global]
+# 다른 메뉴로 갔다 와도 입력값을 유지하는 코드(keep_widget_state) 때문에 뜨는 안내 경고를 끔
+disableWidgetStateDuplicationWarning = true
