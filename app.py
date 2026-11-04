@@ -4915,7 +4915,20 @@ QB_PICKER_CSS = """<style>
 @st.cache_data(ttl=60, show_spinner=False)
 def qb_bank_summary(_sb, labels: tuple) -> List[Dict]:
     """지문별·유형별 개수 표시용 (가벼운 열만, 1분마다 새로 읽음)"""
-    return qb_fetch(_sb, list(labels), "passage_label,q_type,difficulty,school")
+    return qb_fetch(_sb, list(labels), "id,passage_label,q_type,difficulty,school")
+
+# 저장한 시험지 기록: 시험지마다 넣은 문항 id → 다음 시험지에서 '이미 낸 문항 빼기' (app_storage 문서 하나, 읽기는 1분 캐시)
+QB_EXAM_LOG_FILE = os.path.join(BASE_DIR, "qb_exam_log.json")
+
+@st.cache_data(ttl=60, show_spinner=False)
+def qb_exam_log(_sb) -> List[Dict]:
+    return (_store_get(_sb, QB_EXAM_LOG_FILE, {}) or {}).get("records", [])
+
+def qb_exam_log_update(sb, change):
+    """저장 직전에 최신 기록을 다시 읽어 바꿈 (다른 창에서 저장한 기록을 덮어쓰지 않게)"""
+    records = (_store_get(sb, QB_EXAM_LOG_FILE, {}) or {}).get("records", [])
+    _store_put(sb, QB_EXAM_LOG_FILE, {"records": change(records)})
+    qb_exam_log.clear()
 
 def _qb_is_mock(p: Dict) -> bool:
     return bool(p.get("year") and p.get("month"))
@@ -5089,8 +5102,29 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
                                                        label_visibility="collapsed", help="변형문제는 그 학교 스타일, 실제 기출은 그 학교 시험만") or "전체"
             e_real = _qb_row("실제 기출").segmented_control("실제 기출", ["함께 섞기", "빼기", "기출만"], default="함께 섞기", key="qb_exam_real",
                                                          label_visibility="collapsed") or "함께 섞기"
+            logs = qb_exam_log(sb)
+            excl = set()
+            if logs:
+                names = {x["id"]: f"{x['name']} · {x['date']} · {x['n']}문항" for x in logs}
+                st.session_state["qb_exam_excl"] = [i for i in st.session_state.get("qb_exam_excl", []) if i in names]
+                x1, x2 = _qb_row("이미 낸 문항").columns([5, 1.3], vertical_alignment="center")
+                chosen = x1.multiselect("이미 낸 문항 빼기", list(names), format_func=names.get, key="qb_exam_excl", label_visibility="collapsed",
+                                        placeholder="저장한 시험지를 고르면 그 시험지에 들어간 문항은 빼고 뽑아요")
+                for x in logs:
+                    if x["id"] in chosen:
+                        excl.update(x["qids"])
+                with x2.popover("기록 관리", use_container_width=True):
+                    st.caption("기록만 지워요. 문제은행의 문제는 그대로 남아요.")
+                    for x in logs:
+                        d1, d2 = st.columns([4, 1], vertical_alignment="center")
+                        d1.markdown(f"{x['name']}  \n<span style='color:gray;font-size:12px'>{x['date']} · {x['n']}문항 · {x.get('title', '')}</span>", unsafe_allow_html=True)
+                        if d2.button("삭제", key=f"qb_exam_log_del_{x['id']}"):
+                            qb_exam_log_update(sb, lambda rs, i=x["id"]: [r for r in rs if r["id"] != i])
+                            st.rerun()
+                if excl:
+                    x1.markdown(f"<div class='qb-note'>고른 기록 {len(chosen)}개 · 문항 <b>{len(excl)}개</b>를 빼고 뽑아요</div>", unsafe_allow_html=True)
             sel_set = set(sel_e)
-            pool = [r for r in summary if r["passage_label"] in sel_set and (e_school == "전체" or r.get("school") == e_school)]
+            pool = [r for r in summary if r["passage_label"] in sel_set and (e_school == "전체" or r.get("school") == e_school) and r.get("id") not in excl]
             lv_counts = _qb_chip_counts([r for r in pool if r["difficulty"] != QB_GICHUL_LEVEL], "difficulty")
             lv_box = _qb_row("난이도")
             e_levels = lv_box.pills("난이도", QB_LEVELS, selection_mode="multi", default=QB_LEVELS, key="qb_exam_levels", label_visibility="collapsed") or []
@@ -5107,9 +5141,25 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
             order = _qb_row("순서").segmented_control("순서", ["지문 순서 (오름차순)", "지문 역순 (내림차순)"], default="지문 순서 (오름차순)",
                                                      key="qb_exam_order", label_visibility="collapsed") or "지문 순서 (오름차순)"
             avail = sum(ty_counts.get(t, 0) for t in e_types)
-            n1, n2 = _qb_row("문제 수").columns([1.3, 6], vertical_alignment="center")
-            total = n1.number_input("총 문제 수", 1, 300, 30, key="qb_exam_total", label_visibility="collapsed")
-            n2.markdown(f"<div class='qb-note' style='margin-top:0'>지금 조건으로 뽑을 수 있는 문제 <b>{avail}개</b></div>", unsafe_allow_html=True)
+            mix = "자동으로 섞기"
+            if e_school == "전체":
+                mix = _qb_row("학교 비율").segmented_control("학교 비율", ["자동으로 섞기", "학교별 문제 수 정하기"], default="자동으로 섞기",
+                                                         key="qb_exam_mix", label_visibility="collapsed",
+                                                         help="예: 운양고 스타일 20문제 + 제일고 스타일 10문제 (실제 기출은 그 학교 시험 문제로 셈)") or "자동으로 섞기"
+            split = {}
+            if mix == "학교별 문제 수 정하기":
+                s_avail = {sc: sum(1 for r in pool if r["q_type"] in e_types and r.get("school") == sc) for sc in QB_SCHOOLS}
+                n_box = _qb_row("문제 수")
+                n_cols = n_box.columns([1.3] * len(QB_SCHOOLS) + [6 - 1.3 * len(QB_SCHOOLS) + 1.3], vertical_alignment="bottom")
+                for i, sc in enumerate(QB_SCHOOLS):
+                    split[sc] = int(n_cols[i].number_input(f"{sc} 스타일", 0, 300, 15, key=f"qb_exam_n_{sc}"))
+                total = sum(split.values())
+                n_cols[-1].markdown("<div class='qb-note' style='margin-top:0'>총 <b>" + str(total) + "문제</b> · 뽑을 수 있는 문제 "
+                                    + " · ".join(f"{sc} <b>{s_avail[sc]}개</b>" for sc in QB_SCHOOLS) + "</div>", unsafe_allow_html=True)
+            else:
+                n1, n2 = _qb_row("문제 수").columns([1.3, 6], vertical_alignment="center")
+                total = n1.number_input("총 문제 수", 1, 300, 30, key="qb_exam_total", label_visibility="collapsed")
+                n2.markdown(f"<div class='qb-note' style='margin-top:0'>지금 조건으로 뽑을 수 있는 문제 <b>{avail}개</b></div>", unsafe_allow_html=True)
             _qb_hr()
             default_title = (" · ".join(sel_e[:3]) + (" 외" if len(sel_e) > 3 else "")) if sel_e else ""
             title = _qb_row("제목").text_input("시험지 제목", value="", placeholder=default_title or "예: 고1 26년 6월 19·20·21번 변형문제", key="qb_exam_title",
@@ -5125,7 +5175,8 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
             as_book = o4.checkbox("ANATOMY VISION 책으로", value=True, key="qb_exam_book",
                                   help="앞표지·사용법·제작 소개 2쪽을 앞에, 저작권·뒤표지를 뒤에 붙여 양면 인쇄하면 한 권의 책처럼 나와요")
         b1, b2 = st.columns([2, 1])
-        make = b1.button("📄 시험지 만들기", type="primary", disabled=not sel_e or not e_types or (not e_levels and e_real != "기출만"), use_container_width=True, key="qb_exam_btn")
+        make = b1.button("📄 시험지 만들기", type="primary", disabled=not sel_e or not e_types or (not e_levels and e_real != "기출만") or total < 1,
+                         use_container_width=True, key="qb_exam_btn")
         reshuffle = b2.button("🔀 다른 조합으로 다시 뽑기", disabled="qb_exam_html" not in st.session_state, use_container_width=True, key="qb_exam_shuffle")
         if make or reshuffle:
             seed = random.randint(1, 10**9)
@@ -5134,9 +5185,22 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
                 is_real = r["difficulty"] == QB_GICHUL_LEVEL
                 if (is_real and e_real == "빼기") or (not is_real and (e_real == "기출만" or r["difficulty"] not in e_levels)):
                     return False
-                return r["q_type"] in e_types and (e_school == "전체" or r.get("school") == e_school)
+                return r["q_type"] in e_types and (e_school == "전체" or r.get("school") == e_school) and r["id"] not in excl
             rows = [r for r in qb_fetch(sb, labels_ordered) if wanted(r)]
-            picked, notes = qb_pick(rows, labels_ordered, int(total), seed)
+            if split:
+                # 학교마다 따로 골고루 뽑은 뒤 지문 순서대로 합침 (이미 불러온 문제 안에서만 계산 · DB·AI 호출 추가 없음)
+                picked, notes = [], []
+                for sc, n in split.items():
+                    if n <= 0:
+                        continue
+                    got, _ = qb_pick([r for r in rows if r.get("school") == sc], labels_ordered, n, seed)
+                    picked += got
+                    if len(got) < n:
+                        notes.append(f"{sc} 스타일은 조건에 맞는 문제가 {len(got)}개뿐이라 {n}문제 중 {len(got)}문제만 넣었습니다. '문제 만들기'에서 더 생성해 주세요.")
+                pos = {l: i for i, l in enumerate(labels_ordered)}
+                picked.sort(key=lambda r: pos.get(r["passage_label"], 0))
+            else:
+                picked, notes = qb_pick(rows, labels_ordered, int(total), seed)
             if picked:
                 labels_all = set(by_label)
                 meta = {"brand": "변형문제 TEST", "kind": kind, "title": title or default_title,
@@ -5151,6 +5215,8 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
                     meta["book_stats"] = qb_book_stats(gmap, gidx)
                 st.session_state.qb_exam_html = render_qbank_exam(picked, meta, gidx)
                 st.session_state.qb_exam_info = (len(picked), notes, title or default_title or "변형문제")
+                st.session_state.qb_exam_qids = [r["id"] for r in picked]
+                st.session_state.qb_exam_logged = False
             else:
                 st.session_state.pop("qb_exam_html", None)
                 st.warning("조건에 맞는 문제가 없습니다. '문제 만들기'에서 먼저 생성해 주세요.")
@@ -5161,6 +5227,18 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
             safe = re.sub(r'[\\/:*?"<>|]', "", fname).strip() or "변형문제"
             st.download_button(f"📥 시험지 HTML 다운로드 ({n}문항) — 열어서 '인쇄 / PDF로 저장'", st.session_state.qb_exam_html,
                                f"{safe}.html", "text/html", use_container_width=True, key="qb_exam_dl")
+            s1, s2 = st.columns([3, 1.2], vertical_alignment="bottom")
+            log_name = s1.text_input("이 시험지 기록 이름", placeholder="예: 김민수 1차 · 고1 A반 중간 대비", key="qb_exam_log_name",
+                                     help="기록해 두면 다음 시험지를 만들 때 '이미 낸 문항'에서 골라 이 문항들을 뺄 수 있어요")
+            if st.session_state.get("qb_exam_logged"):
+                s2.button("✅ 기록했어요", disabled=True, use_container_width=True, key="qb_exam_log_done")
+            elif s2.button("💾 문항 기록 저장", use_container_width=True, key="qb_exam_log_save", disabled=not log_name.strip()):
+                from datetime import datetime, timedelta, timezone
+                rec = {"id": uuid.uuid4().hex[:10], "name": log_name.strip(), "title": fname, "n": n,
+                       "date": datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d"), "qids": st.session_state.get("qb_exam_qids", [])}
+                qb_exam_log_update(sb, lambda rs: [rec] + rs)
+                st.session_state.qb_exam_logged = True
+                st.rerun()
             components.html(st.session_state.qb_exam_html, height=850, scrolling=True)
 
     with t_manage:
@@ -5680,7 +5758,8 @@ def render_mock_exam_tab(text_model: str, api_delay: int, academy_name: str, sch
                             continue
                         draft_rows.append({
                             "번호": num, "유형": sec.get("title", ""), "정답": "",
-                            "확인필요": bool(sec.get("needs_review", False)),
+                            # 교과서는 AI가 이유 없이 모두 '확인 필요'로 표시하는 일이 많아, 이유(메모)를 적은 단락만 표시
+                            "확인필요": bool(sec.get("needs_review", False)) and bool(str(sec.get("note", "")).strip()),
                             "복원 원문": sec.get("text", "").strip(), "복원 메모": sec.get("note", ""),
                         })
                     for k in ["mock_draft_editor", "tb_draft_subject", "tb_draft_publisher", "tb_draft_unit"]:
@@ -5920,6 +5999,31 @@ def render_mock_exam_tab(text_model: str, api_delay: int, academy_name: str, sch
 
     st.markdown(f"🛒 **선택된 지문 {len(selected)}개:** " + ", ".join(md_safe(p["label"]) for p in selected[:20]) + (f" ... 외 {len(selected) - 20}개" if len(selected) > 20 else ""))
 
+    def _drop_pill_state():
+        # 번호 칩 상태를 지워 다음 화면에서 pick_store 기준으로 다시 그림 (그려진 칩의 상태는 콜백에서만 바꿀 수 있음)
+        for k in [k for k in st.session_state.keys() if str(k).startswith("mock_pick_") and k != "mock_pick_store"]:
+            del st.session_state[k]
+
+    def _clear_all_picks():
+        st.session_state["mock_pick_store"] = {}
+        _drop_pill_state()
+
+    def _mark_checked(ids):
+        for p in st.session_state.saved_mock:
+            if p["id"] in ids:
+                p["needs_review"] = False
+        save_to_file(MOCK_FILE, st.session_state.saved_mock)
+        _drop_pill_state()   # ⚠️가 빠지면 칩 글자가 바뀌므로 선택이 풀리지 않게 다시 그림
+
+    flagged = [p for p in selected if p.get("needs_review")]
+    c_col1, c_col2, _ = st.columns([1, 1.6, 2.4])
+    c_col1.button("🧹 선택 모두 해제", use_container_width=True, key="mock_clear_all", on_click=_clear_all_picks,
+                  help="필터에 안 보이는 시험·교과서에서 고른 번호까지 모두 해제해요")
+    if flagged:
+        c_col2.button(f"✅ 확인 완료 — 선택 지문 ⚠️ {len(flagged)}개 지우기", use_container_width=True, key="mock_mark_checked",
+                      on_click=_mark_checked, args=({p["id"] for p in flagged},),
+                      help="⚠️는 AI가 정답표를 못 찾았거나 복원이 확실하지 않을 때 붙여요. 원문을 확인했다면 지워도 돼요")
+
     with st.expander("🔎 선택 지문 원문 확인·수정", expanded=False):
         pick_lbl = st.selectbox("지문 선택", [p["label"] for p in selected], key="mock_view_select")
         target = by_label[pick_lbl]
@@ -5979,6 +6083,126 @@ def render_mock_exam_tab(text_model: str, api_delay: int, academy_name: str, sch
 # 6. 메인 UI 화면 및 사이드바 구성
 # -----------------------------
 st.title("🦅 4pm 올인원 교재 통합 시스템")
+
+# ---- 사용 설명서 (처음 쓰는 사람용 · 글만 보여 주므로 DB·AI 호출 없음) ----
+APP_HELP = {
+"overview": """
+##### 🧭 이 시스템이 하는 일
+지문(원문)을 모아 두고 → AI로 교재·변형문제를 만들어 **클라우드 DB(Supabase)에 쌓은 뒤** → 원하는 것만 골라 **HTML 단행본으로 출력**하는 앱이에요.
+만든 결과는 모두 DB에 저장되므로 창을 닫거나 앱이 다시 시작돼도 사라지지 않아요.
+
+##### 🔁 기본 흐름 (위 탭 순서)
+| 순서 | 어디서 | 무엇을 |
+|---|---|---|
+| ① 원문 모으기 | 📝 원문 라이브러리 | 모의고사·교과서 PDF를 올리면 AI가 원문을 복원 → 표에서 확인·수정 → 저장 |
+| ② 교재 만들기 | 📝 원문 라이브러리 아래쪽 / 🚀 엑셀 원클릭 | 지문을 골라 One-Shot·Self-Note·Core·Voca 생성 (서버에서 백그라운드로 진행) |
+| ③ 출력 | 🏆 🦅 💎 📖 각 교재 탭 | 지문을 골라 '단행본 렌더링' → HTML 다운로드 → 열어서 **인쇄 / PDF로 저장** |
+| ④ 변형문제 | 🧩 변형문제 은행·시험지 | 문제를 계속 쌓아 두고, 조건에 맞게 뽑아 시험지·책으로 출력 |
+| ⑤ 학교 스타일 학습 | 🎯 출제DNA 학습기 · 📚 기출 어휘 | 운양고·제일고 기출 PDF로 출제 규칙과 어휘를 쌓음 → ②·④ 생성에 반영 |
+
+##### ⚙️ 왼쪽 사이드바 (모든 탭에 공통으로 적용)
+- **로고·학원명·학교명**: 교재 머리말·꼬리말·표지에 들어가요. 바꾸면 자동 저장돼요.
+- **AI 제공사·모델**: 모든 AI 작업(교재·변형문제·PDF 분석)에 이 모델을 써요. 모델마다 **값과 품질이 크게 달라요** → 바로 아래 '📊 모델 고르기 참고표'를 보고 고르세요.
+- **💵 AI 사용 금액**: 이번 달 모델별 금액이에요. 실제로 쓴 토큰으로 계산한 금액이에요 (제공사 청구서와 조금 다를 수 있어요).
+- **지문 간 API 대기 시간**: 지문 하나를 끝내고 다음 지문까지 쉬는 시간이에요. 너무 줄이면 제공사가 요청을 막을 수 있어요.
+- **저장소 상태**: 🟢 클라우드 DB 연결됨이어야 정상이에요. 🟡 로컬 모드면 저장이 이 PC에만 돼요.
+
+##### 📦 위쪽 '작업' 칸 (생성 중일 때만 보임)
+생성 버튼을 누르면 작업이 **서버 대기열**에 들어가 하나씩 처리돼요. 창을 닫아도 계속 진행돼요.
+- **⏸️ 생성 중단**: 지금 하던 지문만 끝내고 멈춰요. **▶️ 다시 시작**: 남은 것부터 이어서 해요 (사이드바에서 고른 모델로).
+- **🔁 실패한 N개 다시 시도**: 오류 난 지문만 다시 해요. **🧹 작업 기록 지우기**: 끝난 작업 목록만 지워요 (만든 교재는 그대로).
+- **남은 작업을 사이드바 모델로**: 작업 중에 모델을 바꿨다면, 남은 지문부터 새 모델로 만들어요.
+
+##### 💰 비용이 드는 버튼 / 안 드는 버튼
+- **AI 비용이 드는 것**: 생성 시작·자동 생성·원문 복원·본문 추출·PDF 분석·DNA 추출·이미지 생성 버튼.
+- **무료인 것**: 고르기·검색·정렬·렌더링·다운로드·인쇄·시험지 만들기(이미 쌓인 문제에서 뽑기만 함)·삭제.
+- **되돌릴 수 없는 것**: 🗑️ 삭제 (한 번 더 '삭제 확정'을 눌러야 지워져요)와 '기본값으로 초기화'.
+""",
+"excel": """
+##### 🚀 엑셀 원클릭 통합 생성
+엑셀 한 장으로 여러 지문의 교재 4종을 한 번에 만들어요. **원문 라이브러리에 없는 지문**(학교 프린트·외부 지문 등)에 쓰면 편해요.
+1. **엑셀 업로드**: 열 이름은 `label`(라벨)·`passage`(지문)·`school`(학교명, 선택)·`image_name`(이미지명, 선택).
+2. **이미지 대량 업로드 (선택)**: 엑셀의 이미지명과 파일명이 같으면 그 지문에 붙어요.
+3. **AI 이미지 생성 체크**: 이미지가 없는 지문만 AI가 지문 내용으로 그려요 (장당 약 10초, 비용 발생). 화풍·이미지 모델을 고를 수 있어요.
+4. **만들 교재 체크** → **🚀 올인원 통합 생성 시작**: 작업 칸에 올라가 서버에서 진행돼요.
+   - Core에서 쓴 패러프레이징 어휘는 Voca 단어장에 자동으로 들어가요.
+5. 다 되면 🏆 🦅 💎 📖 각 탭에서 골라 출력하세요.
+""",
+"mock": """
+##### 📝 원문 라이브러리 — 모든 교재·변형문제의 '원본 창고'
+**① 올리기 → ② 확인·저장 → ③ 골라서 교재 만들기** 순서예요. 맨 위에서 **모의고사 / 교과서**를 먼저 고르세요.
+
+**모의고사**
+- 시험지 PDF + 정답표를 올리고 **🧠 정답 반영 원문 복원 시작**: AI가 18~45번 지문을 정답이 반영된 원래 글로 되돌려요
+  (빈칸 채우기, 순서 재배열, 삽입 문장 넣기, 무관한 문장 빼기, 어법·어휘 고치기).
+- 결과 표에서 고칠 곳을 바로 고치고, **🔍 지문 하나씩 크게 보기**로 확인 → **💾 원문 라이브러리에 저장**. 마음에 안 들면 **✖️ 검수 취소**.
+
+**교과서**
+- 과목·출판사·단원을 적고(비우면 자동 인식) **📘 단락별 본문 추출 시작** → 단락마다 `4-1, 4-2…`처럼 나뉘어 저장돼요. 단원 하나씩 올리면 가장 정확해요.
+
+**저장된 원문 쓰기 (아래쪽)**
+- 년도·월·학년 필터로 좁힌 뒤 번호를 눌러 지문을 골라요 (**전체 선택 / 선택 해제**).
+- 고른 번호는 필터를 바꿔도 유지돼요. 한 번에 다 풀려면 '선택된 지문' 아래 **🧹 선택 모두 해제**를 누르세요.
+- **⚠️ 표시**: AI가 정답표를 못 찾았거나 복원이 확실하지 않은 지문이에요. 원문을 확인했다면 **✅ 확인 완료**로 지울 수 있어요 (지워도 기능에는 영향 없음).
+- **🔎 선택 지문 원문 확인·수정**: 저장된 원문을 고치고 **💾 이 지문 수정 저장**. ⚠️ 표시는 정답 확인이 필요한 지문이에요.
+- **🎨 이미지 생성 / 📤 내 이미지로 교체**: 한판승·Self-Note에 들어갈 지문 그림이에요.
+- 만들 교재를 체크하고 **🚀 선택한 N개 지문 교재 생성 시작** → 작업 칸에서 진행돼요.
+- **🗑️ 선택 지문 삭제**: 원문만 지워요. 이미 만든 교재는 남지만, 그 지문의 변형문제는 지문 목록에서 고를 수 없게 돼요.
+""",
+"qbank": """
+##### 🧩 변형문제 은행 — '쌓기'와 '뽑기'가 나뉘어 있어요
+문제를 만들 때마다 **문제 은행(DB)에 계속 쌓이고**, 시험지는 쌓인 문제에서 **뽑기만** 해요. 그래서 시험지를 몇 번 만들어도 AI 비용이 들지 않아요.
+
+**🛠️ 문제 만들기 (누적) — 비용 발생**
+- 위 칩에서 **시험·번호**를 골라 지문을 정해요.
+- **유형 × 난이도**마다 **조합당 문제 수**만큼 만들어요. 예를 들어 지문 3개 × 유형 2개 × 난이도 2개 × 2문제면 24문제예요. 버튼 위에 예상 개수·비용·시간이 나와요.
+- **학교 스타일**: 운양고 / 제일고 중 어느 학교 출제 방식으로 만들지 정해요 (🎯 출제DNA가 반영돼요).
+- **정답 검증**: AI가 만든 문제를 한 번 더 풀어 보고, 정답이 다르면 버려요 (비용 약 10~20% 추가, 품질↑).
+- **하·중은 가벼운 모델로**: 쉬운 문제는 싼 모델로, 상·최상은 지금 모델로 만들어 비용을 줄여요.
+- 같은 지문을 다시 만들면 이미 쌓인 문제와 **다른 포인트**로 출제해요.
+
+**📄 시험지 만들기 — 무료**
+- 지문을 고르고 **학교·실제 기출 포함 여부·난이도·유형·순서·문제 수**를 정해요. 칩 아래에 '지금 뽑을 수 있는 문제 수'가 나와요.
+- **학교 비율 → 학교별 문제 수 정하기**: 예) 운양고 스타일 20 + 제일고 스타일 10. 한쪽이 모자라면 다른 학교로 채우지 않고 알려 줘요.
+- **이미 낸 문항**: 전에 '문항 기록 저장'한 시험지를 고르면 **그 문항을 빼고** 뽑아요 (추가로 풀 학생에게 새 문제만 줄 때).
+- 뽑는 원리: 고른 지문에서 **같은 개수씩 골고루**, 지문 안에서는 **유형을 돌아가며** 뽑아요. 모자란 지문 몫은 문제가 많은 지문이 채워요.
+- **📄 시험지 만들기**: 미리보기·HTML 다운로드. **🔀 다른 조합으로 다시 뽑기**: 같은 조건에서 다른 문제로 다시 뽑아요.
+- **💾 문항 기록 저장**: 이름(예: 김민수 1차)을 붙여 이 시험지 문항을 기록해요. 다음 시험지에서 빼는 데 써요. 지우기는 '기록 관리'에서 해요 (문제는 그대로).
+- **표시 옵션**: 출처·구분, 같은 지문 기출 이력, 정답·해설, 학교 스타일 표시, 문항별 권장 풀이 시간(단어 수·유형으로 계산), **ANATOMY VISION 책으로**(앞뒤 표지·사용법·제작 소개·저작권 쪽 추가).
+
+**🗂️ 문제 보기·삭제**: 지문 하나를 골라 쌓인 문제를 표로 보고, 체크해서 지울 수 있어요. ⚠️ 정답 확인 = 검증에서 답이 엇갈린 문제예요.
+
+**🏫 기출 표시 — 비용 발생 (시험지 1개 약 60원)**: 운양고·제일고 실제 시험지 PDF를 올리면 문항마다 **어느 모의고사 몇 번 지문인지** 찾아요.
+그 결과로 시험지에 '같은 지문 기출 이력'이 붙고, 원문 라이브러리 지문으로 낸 문항은 **실제 기출문제**로 문제 은행에 들어가요. 이미 올린 PDF는 다시 분석하지 않아요.
+""",
+"library": """
+##### 📚 교재 탭 (🏆 One-Shot · 🦅 Self-Note · 💎 Core · 📖 Voca) — 만든 교재를 골라 출력하는 곳
+- **🔄 누락된 N개 지문 자동 생성** (Core·Voca만, 비용 발생): 다른 교재는 있는데 이 교재만 없는 지문을 찾아 만들어요. 엑셀을 다시 올릴 필요가 없어요.
+- **🔗 CORE 어휘를 VOCA에 병합** (Voca만, 무료): Core에 쓰인 패러프레이징 어휘를 단어장에 넣어요.
+- **고르기**: 그룹 필터·검색 → **✅ 검색 결과 전체 선택**, 또는 번호를 적고 **⚡ 입력한 번호만 선택 추가**. 카드를 눌러도 선택/해제돼요.
+  - **누른 순서대로 출력**돼요. 번호순으로 하려면 **🔢 이름/번호순 정렬**을 누르세요.
+- **⬜ 전체 선택 해제** / **🗑️ 선택 항목 삭제**: 삭제는 이 교재 데이터만 지워요 (원문은 남아요).
+- **👁️ 단행본 렌더링** → **HTML 다운로드** → 받은 파일을 크롬으로 열어 **인쇄 / PDF로 저장**. Voca는 엑셀·CSV로도 받을 수 있어요.
+""",
+"dna": """
+##### 🎯 출제DNA 학습기 — 학교 출제 스타일을 AI에게 가르치는 곳
+여기 저장된 **출제 DNA 규칙**은 교재·변형문제를 만들 때 AI에게 함께 전달돼요. 그래서 이 규칙이 좋을수록 '그 학교다운' 문제가 나와요.
+- **기출 PDF 업로드 → 🧠 출제DNA 추출 및 누적 적용** (비용 발생): AI가 주제·요약 패러프레이징 방식, 빈칸 어휘 수준, 어휘 함정 패턴을 분석해 규칙에 **덧붙여요**.
+- **규칙 글을 직접 고치고 💾 수동 저장**할 수도 있어요. 서술형 규칙은 따로 **💾 서술형 출제 DNA 저장**.
+- **🔄 운양고·제일고 기본값으로 초기화**: 지금까지 쌓은 규칙이 처음 상태로 돌아가요. **되돌릴 수 없어요.**
+""",
+"pastvoca": """
+##### 📚 기출 어휘 독립 라이브러리 — 학교 시험지별 단어장
+- 기출 시험지 PDF를 여러 개 올리고 **🚀 어휘 일괄 추출 및 저장** (비용 발생): 시험지마다 단어를 뽑아 **출처(몇 년도·학년·몇 번, 본문/선지)**와 함께 저장해요.
+  - 학교명을 비우면 파일명·시험지에서 자동으로 알아내요. 틀리게 잡히면 '학교명 강제 지정'에 적으세요.
+- 아래 목록에서 **운양고 / 제일고 / 전체 일괄 선택** 또는 카드로 고른 뒤 렌더링해서 출력해요.
+- 한 시험지 단어는 이어서 나오고, **다음 시험지부터 새 쪽**에서 시작해요.
+""",
+}
+
+def render_help(key: str, title: str = "❓ 이 탭 사용법"):
+    with st.expander(title, expanded=False):
+        st.markdown(APP_HELP[key])
 
 with st.sidebar:
     st.markdown("### 🖼️ 로고 및 정보 설정")
@@ -6118,6 +6342,7 @@ CSS_VOCA = build_css_voca(h_url, f_url)
 # 작업이 없어도 빈 칸을 항상 만들어 두어, 작업 칸이 생기거나 사라질 때 보고 있던 탭이 첫 탭으로 돌아가지 않게 함
 with st.container():
     render_gen_job_panel()
+render_help("overview", "📖 처음 쓰는 분을 위한 사용 설명서 — 시스템 원리·버튼 역할")
 
 tab1, tab_mock, tab_qb, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "🚀 엑셀 원클릭 통합 생성",
@@ -6132,6 +6357,7 @@ tab1, tab_mock, tab_qb, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
 ], key="main_tabs", on_change="rerun")  # 탭을 바꿀 때 다시 그려, 다른 교재 탭에서 고른 지문이 바로 보이게 함
 
 with tab1:
+    render_help("excel")
     st.info("💡 엑셀과 이미지를 업로드하고 생성 버튼을 누르면, **Anatomy One-Shot(한판승)**, **Anatomy Self-Note**, **Anatomy Core**, **Anatomy Voca**가 동시에 생성되며, **Core에 쓰인 패러프레이징 어휘들이 Voca 단어장에 자동으로 포함**됩니다.")
     xlsx = st.file_uploader("📂 엑셀 업로드", type=["xlsx"])
     imgs = st.file_uploader("🖼️ 이미지 대량 업로드 (선택)", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
@@ -6192,24 +6418,31 @@ with tab1:
             st.rerun()
 
 with tab_mock:
+    render_help("mock")
     render_mock_exam_tab(text_model, api_delay, academy_name, school_name)
 
 with tab_qb:
+    render_help("qbank")
     render_qbank_tab(text_model, api_delay, academy_name, school_name)
 
 with tab2:
+    render_help("library")
     render_library_manager("v", "Anatomy One-Shot", VICTORY_FILE, CSS_VICTORY, "victory", text_model, api_delay, academy_name, school_name, h_url, f_url)
 
 with tab3:
+    render_help("library")
     render_library_manager("a", "Anatomy Self-Note", ANATOMY_FILE, CSS_ANATOMY, "anatomy", text_model, api_delay, academy_name, school_name, h_url, f_url)
 
 with tab4:
+    render_help("library")
     render_library_manager("c", "Anatomy Core", CORE_FILE, CSS_CORE, "core", text_model, api_delay, academy_name, school_name, h_url, f_url)
 
 with tab5:
+    render_help("library")
     render_library_manager("w", "Anatomy Voca", VOCA_FILE, CSS_VOCA, "voca", text_model, api_delay, academy_name, school_name, h_url, f_url)
 
 with tab6:
+    render_help("dna")
     st.markdown("### 🎯 학교별 기출 시험지 PDF 출제DNA 분석 & 누적 학습기")
     st.info(
         "💡 **운양고(고1·2·3) 7개 시험지 및 제일고(고2) 1개 시험지의 출제 DNA가 기본 탑재**되어 있습니다. "
@@ -6315,6 +6548,7 @@ with tab6:
 # 📚 탭 7: 기출 어휘 독립 라이브러리 (시험지 단위 통합 & 시험지별 페이지 구분)
 # ==========================================
 with tab7:
+    render_help("pastvoca")
     st.markdown("### 📚 학교별 기출 시험지 어휘 독립 라이브러리 (시험지 단위 연속 출력 & 시험지 간 페이지 분리)")
     st.info(
         "💡 **한 시험지(예: `[운양고 26년 1학기 중간 고1]`)의 모든 문항 단어들이 여백 없이 연달아서 이어서 출력**되며, "
