@@ -1020,94 +1020,238 @@ BOOK_COVER_CSS = """
 }
 """
 
-def build_booklet_front_and_back(book_type: str, h_img: str, f_img: str, academy: str, school: str, passage_count: int) -> (str, str):
-    meta_map = {
-        "victory": {
-            "main_first": "Anatomy",
-            "main_Highlight": "One-Shot",
-            "sub_en": "Intensive Syntax Analysis & Direct Comprehension System",
-            "sub_ko": "시험 직전 최후의 승자 — 문장별 구조 분석과 직독직해 한판승"
-        },
-        "anatomy": {
-            "main_first": "Anatomy",
-            "main_Highlight": "Self-Note",
-            "sub_en": "Comprehensive Text Dissection, Grammar & Structure Workbook",
-            "sub_ko": "내신과 수능 1등급을 위한 지문 해부 & 자기주도 필기·복습 노트"
-        },
-        "core": {
-            "main_first": "Anatomy",
-            "main_Highlight": "Core",
-            "sub_en": "Essential Paraphrasing, Topics, Main Ideas & Summary Master",
-            "sub_ko": "학교 내신 변형 1순위 — 다중 주제·제목·요지·요약문 패러프레이징"
-        },
-        "voca": {
-            "main_first": "Anatomy",
-            "main_Highlight": "Voca",
-            "sub_en": "Contextual Vocabulary, Idioms, Synonyms & Antonyms Master",
-            "sub_ko": "문맥 중심 중고등 필수 어휘 및 패러프레이징 유의어·반의어 마스터"
-        },
-        "past_voca": {
-            "main_first": "Anatomy",
-            "main_Highlight": "Voca",
-            "sub_en": "Actual Past Exam Paper Vocabulary & Choices Master",
-            "sub_ko": "학교별 실제 기출 시험지 본문·선지 출제 어휘 완벽 마스터"
-        }
-    }
-    cfg = meta_map.get(book_type, meta_map["victory"])
-    acad_esc = esc(academy)
-    sch_esc = esc(school)
+def booklet_stats(book_type: str, passages: List[Dict]) -> Dict:
+    """표지·소개 쪽에 넣을 숫자를 고른 지문 데이터에서 직접 셈 (AI 호출 없음)"""
+    datas = [p.get("data") or {} for p in passages]
+    st_ = {"passages": len(passages)}
+    if book_type == "victory":
+        rows = [r for d in datas for r in d.get("analysis", []) or []]
+        st_["sentences"] = len(rows)
+        st_["points"] = sum(len([g for g in r.get("grammar_points", []) or [] if g.get("title") or g.get("explain")]) or (1 if r.get("grammar") else 0) for r in rows)
+    elif book_type == "anatomy":
+        st_["quizzes"] = sum(len(d.get("quizzes", []) or []) for d in datas)
+        st_["grammar"] = sum(len(d.get("grammar_points", []) or []) for d in datas)
+    elif book_type == "core":
+        st_["sentences"] = sum(len(d.get(k, []) or []) for d in datas for k in ("topics", "titles", "main_ideas", "summaries"))
+        st_["tf"] = sum(len(d.get("paraphrased_tf", []) or []) for d in datas)
+        try:
+            exams = list((load_gichul_map().get("exams") or {}).values())
+        except Exception:
+            exams = []
+        years = sorted({int(m.group(1)) for ex in exams for m in [re.search(r"(\d{2})\s*년", str(ex.get("exam_name", "")))] if m})
+        st_["exams"] = len(exams)
+        st_["years"] = (2000 + years[0], 2000 + years[-1]) if years else None
+    else:  # voca, past_voca
+        recs = consolidate_past_voca_records(passages)[0] if book_type == "past_voca" else passages
+        items = [it for p in recs for it in (p.get("data") or {}).get("voca_list", []) or []]
+        is_core = lambda it: any(k in str(it.get("category", "지문핵심")).upper() for k in ["CORE", "패러", "요약", "주제", "선지"])
+        st_["exams"] = len(recs)
+        st_["words"] = len(items)
+        st_["core_words"] = sum(1 for it in items if is_core(it))
+        st_["key_words"] = st_["words"] - st_["core_words"]
+        st_["related"] = sum(len([x for x in (it.get("synonyms", []) or []) + (it.get("antonyms", []) or []) if x.get("word")]) for it in items)
+    return st_
 
-    front_pages_html = f"""
-    <div class="book-special-page">
-        <div class="cover-accent-bar"></div>
-        <div class="cover-side-line"></div>
-        <div class="book-cover-inner">
-            <div class="cover-top-meta">
-                <div class="cover-series-tag">PQRS YOUNG ENGLISH CURRICULUM SERIES</div>
-                <div class="cover-logo-circle" style="background-image: url('{h_img}');"></div>
-            </div>
-            <div class="cover-hero">
-                <div class="cover-edition-pill">PREMIUM EDITION &bull; {passage_count} SECTIONS INCLUDED</div>
-                <h1 class="cover-main-title">{cfg['main_first']} <span>{cfg['main_Highlight']}</span></h1>
-                <div class="cover-subtitle-en">{cfg['sub_en']}</div>
-                <div class="cover-subtitle-ko">{cfg['sub_ko']}</div>
-                <div class="cover-divider"></div>
-                <div class="cover-author-credit">Created &amp; Designed by <span>PQRS Young</span></div>
-            </div>
-            <div class="cover-bottom-area">
-                <div class="cover-Creator-block">
-                    <div style="font-weight:900; color:#0f172a; font-size:13px; margin-bottom:2px;">PQRS Young &times; {acad_esc}</div>
-                    <div>High School English Exam &amp; CSAT Preparation</div>
-                    <div style="font-size:10.5px; color:#94a3b8;">Original Pedagogical System by PQRS Young</div>
-                </div>
-                <div class="cover-student-box">
-                    <div class="cover-student-row"><span>SCHOOL</span><span style="color:#64748b; font-weight:500;">{sch_esc if sch_esc else ''}</span></div>
-                    <div class="cover-student-row"><span>GRADE / CLASS</span><span></span></div>
-                    <div class="cover-student-row"><span>STUDENT NAME</span><span></span></div>
-                </div>
-            </div>
-        </div>
-    </div>
-    <div class="book-special-page"></div>
-    """
 
-    back_page_html = f"""
-    <div class="book-special-page book-last-page">
-        <div class="back-cover-inner">
-            <div class="copyright-box-right">
-                <div class="copyright-title-en">{cfg['main_first'].upper()} {cfg['main_Highlight'].upper()} &mdash; CREATED BY PQRS YOUNG</div>
-                <div class="copyright-ko-legal">
-                    본 교재의 모든 저작권은 제작자인 <b>PQRS영쌤</b>에게 있으며, 저작권자의 사전 서면 동의 없는 무단 복제, 배포, 전송, 스캔 및 도용 시 저작권법에 의거하여 민·형사상의 엄중한 법적 처벌을 받을 수 있습니다.
-                </div>
-                <div class="copyright-en-sub">
-                    Copyright &copy; PQRS Young ({acad_esc}). All rights reserved.<br>
-                    Unauthorized reproduction, distribution, or plagiarism of this material is strictly prohibited and subject to legal prosecution.
-                </div>
-            </div>
-        </div>
-    </div>
-    """
-    return front_pages_html, back_page_html
+# 소개 쪽 'ANATOMY 시리즈, 언제 무엇을 보나요?' 표 (모든 교재 공통)
+SERIES_ROADMAP = [("One-Shot", "수업 전·후", "구문 분석·문법을 혼자 정리하는 참고서 (예습용으로도 좋아요)"),
+                  ("Self-Note", "수업 시간", "시험에 나올 내용을 직접 필기하고, 그 필기로 복습"),
+                  ("Core", "수업 후·시험 직전", "수업 후 복습, 시험 직전 주제·제목·요지·요약문 핵심 정리"),
+                  ("Voca", "매일", "시험 범위 지문에서 출제될 수 있는 관련 단어를 모두 담은 단어장"),
+                  ("Vision", "공부를 마친 뒤", "우리 학교 스타일 변형문제를 충분히 풀며 실전 연습")]
+
+
+def build_booklet_front_and_back(book_type: str, h_img: str, f_img: str, academy: str, school: str, passages: List[Dict]) -> (str, str):
+    """한판승·Self-Note·Core·Voca·기출 어휘 단행본의 앞쪽 4쪽(앞표지·사용법·이렇게 만들었습니다·이런 점이 다릅니다)과
+    뒤쪽(빈 쪽 넣기용 공란·저작권·뒤표지). 모양은 ANATOMY VISION과 같은 QB_BOOK_CSS를 씀"""
+    acad = esc(academy or "포피엠 입시 영어")
+    sch = esc(school or "")
+    s = booklet_stats(book_type, passages)
+    np_ = s["passages"]
+
+    def stat_line(parts):  # 0인 항목은 빼고 ' · '로 이음 (예전 데이터는 일부 항목이 없을 수 있음)
+        return " · ".join(t for t, v in parts if v)
+
+    def howto(items):
+        lis = "".join(f"<li><b>{h}</b><br>{b}</li>" for h, b in items)
+        return f"<div class='vpage'><div class='kicker'>HOW TO USE</div><h2>이 교재 사용법</h2><ol class='howto'>{lis}</ol></div>"
+
+    def made(kick, h2, lead, intro, steps):
+        st_html = "".join(f"<div class='step'><h3><span>STEP {i}</span>{t}</h3><ul>{''.join(f'<li>{x}</li>' for x in xs)}</ul></div>"
+                          for i, (t, xs) in enumerate(steps, 1))
+        return f"<div class='vpage'><div class='kicker'>{kick}</div><h2>{h2}</h2><div class='lead'>{lead}</div><p>{intro}</p>{st_html}</div>"
+
+    def feature(name, josa, left_t, left, right, so):
+        rows = "".join(
+            f"<tr{' class=\"me\"' if b == name else ''}><td class='nw'>ANATOMY {b}</td><td class='nw'>{w}</td><td style='text-align:left'>{d}</td></tr>"
+            for b, w, d in SERIES_ROADMAP)
+        li = lambda xs: "".join(f"<li>{x}</li>" for x in xs)
+        return f"""<div class='vpage'><div class='kicker'>WHAT MAKES IT DIFFERENT</div><h2>{name}{josa} 이런 점이 다릅니다</h2>
+  <div class='two'><div><h3 class='u'>{left_t}</h3><ul>{li(left)}</ul></div><div><h3 class='j'>ANATOMY {name.upper()}{josa}</h3><ul>{li(right)}</ul></div></div>
+  <div class='so'><b>그래서 ANATOMY {name.upper()}{josa}</b><ul>{li(so)}</ul></div>
+  <div class='step' style='margin-top:16px'><h3><span>SERIES</span>ANATOMY 시리즈, 언제 무엇을 보나요?</h3>
+  <table class='series-tbl'><tr><th>교재</th><th>언제</th><th>무엇을</th></tr>{rows}</table></div>
+  <div class='quote'>"우리 학교 시험지를 가장 많이 본 사람이 만든 교재."<span>— {acad} PQRS영T</span></div></div>"""
+
+    def cover(hl, pill, en, ko, meta):
+        return f"""
+<div class='vcover'><div class='bar'></div><div class='inner'>
+  <div class='top'><span>PQRS YOUNG ENGLISH CURRICULUM SERIES</span><span>ANATOMY SERIES</span></div>
+  <div>
+    <div class='pill'>{pill}</div>
+    <h1>ANATOMY <span>{hl}</span></h1>
+    <div class='en'>{en}</div>
+    <div class='ko'>{ko}</div>
+    <div class='rule'></div>
+    <div class='meta'>{meta}</div>
+    <div class='credit'>Created &amp; Designed by <b>PQRS Young</b> &times; {acad}</div>
+  </div>
+  <div class='bottom'>
+    <div><b style='color:#0f172a;font-size:13px'>PQRS Young &times; {acad}</b><br>High School English Exam &amp; CSAT Preparation</div>
+    <div class='student'><div><span>SCHOOL</span><span style='font-weight:500;color:#64748b'>{sch}</span></div><div><span>GRADE / CLASS</span><span></span></div><div><span>STUDENT NAME</span><span></span></div></div>
+  </div>
+</div></div>"""
+
+    def back(hl, line):
+        ser = " &middot; ".join(f"<b>{x}</b>" if x == hl else x for x in ["One-Shot", "Self-Note", "Core", "Voca", "Vision"])
+        return f"""
+<div class='vcover blank filler'></div>
+<div class='vcover copy'><div class='inner'><div class='cbox'>
+  <div class='t'>ANATOMY {hl.upper()} &mdash; CREATED BY PQRS YOUNG</div>
+  <div class='k'>본 교재의 모든 저작권은 제작자인 <b>PQRS영쌤</b>에게 있으며, 저작권자의 사전 서면 동의 없는 무단 복제, 배포, 전송, 스캔 및 도용 시 저작권법에 의거하여 민·형사상의 엄중한 법적 처벌을 받을 수 있습니다.</div>
+  <div class='e'>Copyright &copy; PQRS Young ({acad}). All rights reserved.<br>Unauthorized reproduction, distribution, or plagiarism of this material is strictly prohibited and subject to legal prosecution.</div>
+</div></div></div>
+<div class='vcover back' style='break-after:auto;page-break-after:auto'><div class='bar'></div><div class='inner'>
+  <h1>ANATOMY <span>{hl}</span></h1>
+  <div class='line'>{line}</div>
+  <div class='series'>Anatomy {ser}</div>
+</div><div class='foot2'><span>장기동 {acad} · PQRS영T</span><span>031-991-1199</span></div></div>"""
+
+    if book_type == "victory":
+        line = stat_line([(f"지문 {np_}개", np_), (f"문장 {s['sentences']}개 구조 분석", s["sentences"]), (f"어법 POINT {s['points']}곳", s["points"])])
+        front = cover("One-Shot", f"SELF-STUDY REFERENCE &bull; {np_} PASSAGES",
+                      "Intensive Syntax Analysis &amp; Direct Comprehension System",
+                      "수업 전·후 혼자 정리하는 문장별 구조 분석 · 직독직해 · 문법 참고서", line) + howto([
+            ("수업 전: 배울 지문을 한판승으로 먼저 읽고 오세요.",
+             "문장마다 끊어 읽기와 직독직해가 달려 있어요. 문장 구조를 미리 알고 수업을 들으면 훨씬 잘 따라갈 수 있어요. 수업이 빠르게 느껴지는 학생일수록 꼭 예습하세요."),
+            ("'반드시 알아야 할 핵심 키워드'와 'Sentence Vocab'은 수업 전에 외우세요.",
+             "단어를 알고 들어가면 수업 시간에는 구조와 문법에만 집중할 수 있어요."),
+            ("수업 후: '+ 어법 POINT'와 'Grammar Point'로 그날 배운 문법을 혼자 정리하세요.",
+             "표시된 문장마다 왜 그 형태인지 한 줄로 설명할 수 있으면 돼요. 막히는 문장은 표시해 두고 다음 수업 때 질문하세요."),
+            ("마지막으로 '영쌤의 한판승 코칭'과 '한판승 핵심 요약'으로 글 전체를 정리하세요.",
+             "요약을 가리고 이 글이 무슨 말을 하는지 두 문장으로 말할 수 있으면 그 지문은 끝난 거예요."),
+        ]) + made("HOW ANATOMY ONE-SHOT WAS MADE", "ANATOMY ONE-SHOT은 이렇게 만들었습니다",
+            '"수업을 따라가기 어려운 학생도, 혼자서 지문을 끝까지 이해할 수 있게."',
+            "수업 시간에 처음 보는 문장을 그 자리에서 분석하기는 쉽지 않습니다. 한판승은 문장 하나하나의 구조와 문법을 미리 풀어 둔 참고서입니다. 수업 전에는 예습으로 수업을 따라갈 준비를 하고, 수업 후에는 배운 구문과 문법을 혼자 다시 정리할 수 있게 만들었습니다.",
+            [("시험 범위 원문 지문 정리", [f"교과서·모의고사 시험 범위 지문 <b>{np_}개</b>를 문장 단위로 나눴습니다."]),
+             ("문장 하나하나 구조 분석", [f"<b>{s['sentences']}개 문장</b>마다 끊어 읽기와 직독직해, 문장 어휘를 달아 혼자 읽어도 이해되게 했습니다." if s["sentences"] else
+                                     "문장마다 끊어 읽기와 직독직해, 문장 어휘를 달아 혼자 읽어도 이해되게 했습니다."]),
+             ("어법 출제 자리 표시", [f"수일치·관계사·분사·준동사처럼 내신에 자주 나오는 어법 자리{f' <b>{s['points']}곳</b>' if s['points'] else ''}에 '+ 어법 POINT'를 표시했습니다."]),
+             ("한 줄 요약과 코칭", ["지문마다 핵심 요약과 '영쌤의 한판승 코칭'을 넣어, 글 전체 흐름까지 정리되게 했습니다."])]
+        ) + feature("One-Shot", "은", "보통의 해설서는",
+            ["해석과 문법 설명이 따로 떨어져 있어 앞뒤로 넘겨 봐야 합니다.", "설명이 어려워 혼자 예습하기 힘듭니다."],
+            ["문장 바로 아래에 끊어 읽기·직독직해·어휘·어법이 함께 있습니다.", "혼자 읽어도 이해되게 문장 단위로 풀어 썼습니다.", "어법이 나올 자리를 문장 옆에 직접 표시했습니다."],
+            ["예습과 복습 모두에 쓰는 참고서로 만들었습니다.", "모든 문장에 직독직해를 달았습니다.", "어법 출제 자리를 문장 단위로 표시했습니다."])
+        return front, back("One-Shot", line)
+
+    if book_type == "anatomy":
+        line = stat_line([(f"지문 {np_}개", np_), (f"OX 퀴즈 {s['quizzes']}문항", s["quizzes"]), (f"문법 Point {s['grammar']}개", s["grammar"])])
+        front = cover("Self-Note", f"IN-CLASS EDITION &bull; {np_} PASSAGES",
+                      "Comprehensive Text Dissection, Grammar &amp; Structure Workbook",
+                      "수업 시간에 시험에 나올 것을 직접 필기하고 복습하는 노트", line) + howto([
+            ("Self-Note는 수업 시간에 펴 놓고 쓰는 교재예요.",
+             "수업 시작 전에 ANATOMY PREVIEW의 '영쌤의 쉬운 지문 설명'과 Vocabulary만 가볍게 훑어 두세요."),
+            ("수업 중: 선생님이 '시험에 나온다'고 짚는 것을 SELF-NOTE 여백에 직접 적으세요.",
+             "어법 자리, 바꿔 쓸 수 있는 표현, 주제문처럼 시험에 나올 것을 너만의 손필기로 채우는 쪽이에요. 깔끔함보다 '내가 알아볼 수 있게'가 중요해요."),
+            ("수업 후: REVIEW-NOTE의 '영쌤의 필기노트'와 내 필기를 비교하세요.",
+             "빠뜨린 내용은 다른 색 펜으로 채우고, 따라 쓰며 복습하세요."),
+            ("마지막: STRUCTURE &amp; QUIZ로 확인하세요.",
+             "글의 흐름을 보고 OX 퀴즈 5문항을 풀어요. 틀린 문항은 '주요 문법 Point 3'과 '지문 해석'에서 이유를 찾으세요."),
+        ]) + made("HOW ANATOMY SELF-NOTE WAS MADE", "ANATOMY SELF-NOTE는 이렇게 만들었습니다",
+            '"시험에 나올 것을 내 손으로 적고, 내 필기로 복습하는 노트."',
+            "필기를 받아 적기만 하면 시험 때 무엇이 중요한지 다시 찾아야 합니다. Self-Note는 수업 시간에 시험 포인트를 스스로 필기하고, 수업 후에 영쌤 필기와 비교하고, 퀴즈로 확인하는 순서를 지문마다 반복하게 만들어 수업 한 번으로 지문이 내 것이 되게 했습니다.",
+            [("지문마다 4단계 구성", ["PREVIEW · SELF-NOTE · REVIEW-NOTE · STRUCTURE &amp; QUIZ를 같은 순서로 배치해, 어느 지문이든 같은 방법으로 공부할 수 있게 했습니다."]),
+             ("쉬운 설명과 동의어 어휘", ["어려운 지문도 '영쌤의 쉬운 지문 설명'으로 먼저 큰 그림을 잡게 하고, 어휘는 동의어 뜻까지 함께 실었습니다."]),
+             ("영쌤의 필기노트", ["수업 시간에 실제로 짚는 내용을 필기노트로 정리해, 내 필기와 비교할 기준을 만들었습니다."]),
+             ("OX 퀴즈와 문법 Point", [f"지문마다 OX 퀴즈 5문항{f'(전체 <b>{s['quizzes']}문항</b>)' if s['quizzes'] else ''}과 주요 문법 Point 3개로 이해했는지 바로 확인하게 했습니다."])]
+        ) + feature("Self-Note", "는", "보통의 필기 노트는",
+            ["원문만 있고 무엇을 적어야 할지 알려 주지 않습니다.", "필기가 맞았는지 확인할 방법이 없습니다."],
+            ["수업 중 필기 → 수업 후 비교 → 퀴즈 순서가 정해져 있습니다.", "영쌤의 필기노트로 내 필기를 바로 점검합니다.", "OX 퀴즈로 이해했는지 그 자리에서 확인합니다."],
+            ["모든 지문을 같은 4단계로 구성했습니다.", "지문마다 OX 퀴즈 5문항을 넣었습니다.", "필기 공간을 넉넉히 두어 너만의 노트가 되게 했습니다."])
+        return front, back("Self-Note", line)
+
+    if book_type == "core":
+        ne = s["exams"]
+        yrs = f"{s['years'][0]}~{s['years'][1]}년 " if s.get("years") else ""
+        line = stat_line([(f"기출 시험지 {ne}회분 분석", ne), (f"지문 {np_}개", np_), (f"선지 예상 문장 {s['sentences']}개", s["sentences"]), (f"T/F 선지 {s['tf']}개", s["tf"])])
+        front = cover("Core", f"PARAPHRASING EDITION &bull; {np_} PASSAGES",
+                      "Essential Paraphrasing, Topics, Main Ideas &amp; Summary Master",
+                      "기출 시험지 전수 분석 — 선지에 나올 주제·제목·요지·요약문 패러프레이징", line) + howto([
+            ("수업이 끝난 날, 그날 배운 지문의 Core를 바로 보며 복습하세요.",
+             "이 글의 주제를 먼저 내 말로 한 줄 써 보고, '출제 1순위 영문 주제 3선'과 비교하세요. 내 문장과 어떤 단어가 다른지 보는 것이 핵심이에요."),
+            ("제목·요지 문장의 단어가 원문 어느 표현을 바꾼 것인지 연결하세요.",
+             "학교 시험 선택지는 원문 단어를 그대로 쓰지 않아요. 바뀐 표현을 알아보는 연습이에요."),
+            ("요약문 빈칸 (A)(B)는 보기 전에 직접 골라 보세요.", "고른 근거가 되는 원문 문장에 밑줄을 그으세요."),
+            ("T/F 선지는 틀린 선지가 어디서 틀렸는지 표시하세요.", "'패러프레이징 핵심 어휘'에서 문맥에 맞는 단어를 고르며 마무리하세요."),
+            ("시험 직전에는 Core만 다시 훑으세요.",
+             "지문마다 주제·제목·요지·요약문이 한곳에 모여 있어서, 시험 전 짧은 시간에 전 범위 핵심 내용을 다시 볼 수 있어요."),
+        ]) + made("HOW ANATOMY CORE WAS MADE", "ANATOMY CORE는 이렇게 만들었습니다",
+            '"실제 기출 시험지를 전수 분석해, 선지에 나올 가능성이 가장 높은 문장만."',
+            "주제·제목·요지·요약문 문제의 선택지는 원문 표현을 상위 개념어와 다른 구조로 바꿔 씁니다. 학교마다 바꾸는 방식도 다릅니다. ANATOMY CORE는 먼저 실제 기출 시험지를 전수 분석해 출제 유형과 선지를 바꿔 쓰는 방식을 정리하고, 그 기준으로 우리 학교 시험지 선지에 등장할 가능성이 가장 높은 문장들을 골라 실었습니다. 수업이 끝난 뒤에는 복습 교재로, 시험 직전에는 전 범위 핵심 정리 교재로 쓰도록 지문마다 핵심 내용을 한곳에 모았습니다.",
+            [("실제 기출 시험지 전수 분석", [f"운양고·제일고 {yrs}중간·기말 시험지{f' <b>{ne}회분</b>' if ne else ''}의 주제·제목·요지·요약문·&lt;보기&gt;형 문항과 선지를 하나하나 분석했습니다."]),
+             ("출제 유형 마스터", ["원문의 어떤 표현을 어떤 상위 개념어와 구조로 바꾸는지, 학교별로 자주 쓰는 출제 유형과 선지 패턴을 정리해 출제 기준으로 삼았습니다."]),
+             ("선지에 나올 가능성이 가장 높은 문장 수록", ["그 기준으로 지문마다 영문 주제 3개, 제목 3개, 요지·주장 문장, 요약문 3개와 빈칸 (A)(B)를 만들었습니다. 실제 시험지 선지에 등장할 가능성이 가장 높은 문장들입니다."]),
+             ("&lt;보기&gt;형 T/F 선지와 어휘 연동", [f"패러프레이징한 진위 선지{f' <b>{s['tf']}개</b>' if s['tf'] else ''}를 순서를 섞어 싣고, 바꿔 쓴 어휘는 ANATOMY VOCA 단어장에도 자동으로 들어가게 했습니다."])]
+        ) + feature("Core", "는", "보통의 요약 자료는",
+            ["주제·요지를 한 가지 문장으로만 알려 줍니다.", "우리 학교 시험이 선지를 어떻게 바꾸는지와 상관없이 만들어집니다."],
+            ["실제 기출 시험지 전수 분석으로 출제 유형을 정리했습니다.", "선지에 나올 가능성이 가장 높은 문장을 3가지 이상 표현으로 보여 줍니다.", "T/F 선지로 바뀐 표현이 맞는지 직접 판단합니다."],
+            ["기출 시험지를 전수 분석해 출제 기준을 세웠습니다.", "주제·제목·요약문을 지문마다 3개씩 실었습니다.", "수업 후 복습과 시험 직전 정리에 모두 쓰게 만들었습니다."])
+        return front, back("Core", line)
+
+    if book_type == "past_voca":
+        ne, nw = s["exams"], s["words"]
+        line = stat_line([(f"실제 기출 시험지 {ne}회분", ne), (f"본문·선지 어휘 {nw}개", nw)])
+        front = cover("Voca", f"PAST EXAM EDITION &bull; {ne} EXAMS",
+                      "Actual Past Exam Paper Vocabulary &amp; Choices Master",
+                      "학교별 실제 기출 시험지 본문·선지 출제 어휘 완벽 마스터", line) + howto([
+            ("시험지 단위로 묶여 있어요. 한 회분씩 끊어서 외우세요.", "시험지가 바뀔 때마다 새 쪽에서 시작해요. 한 번에 한 회분이 목표예요."),
+            ("본문뿐 아니라 선지에 나온 단어도 꼭 외우세요.", "선지 어휘는 다음 시험에도 바뀐 표현으로 다시 나와요."),
+            ("[유의어/대체]·[반의어/함정]을 함께 보세요.", "우리 학교 출제자가 즐겨 쓰는 단어 바꾸기 방식이 보여요."),
+            ("암기체크 두 칸(□ □)으로 두 번 외우세요.", "두 칸이 다 차지 않은 단어만 시험 전날 다시 보세요."),
+        ]) + made("HOW IT WAS MADE", "기출 어휘 단어장은 이렇게 만들었습니다",
+            '"우리 학교 출제자가 실제로 쓴 단어."',
+            "같은 지문이라도 학교마다 시험지에 쓰는 단어가 다릅니다. 기출 어휘 단어장은 우리 학교 실제 시험지의 본문과 선택지에 쓰인 단어를 그대로 모아, 출제자가 즐겨 쓰는 어휘를 미리 익히게 했습니다.",
+            [("실제 기출 시험지 수집", [f"{sch + ' ' if sch else ''}실제 시험지{f' <b>{ne}회분</b>' if ne else ''}을 모았습니다."]),
+             ("본문·선지 어휘 추출", [f"본문과 선택지에 쓰인 어휘{f' <b>{nw}개</b>' if nw else ''}를 시험지별로 정리했습니다."]),
+             ("문맥 의미·유의어·반의어", ["시험지 속 뜻과 함께 유의어·반의어를 붙였습니다."]),
+             ("시험지 단위 구성", ["시험지가 바뀔 때만 쪽을 넘겨, 한 회분씩 끊어 외우기 좋게 했습니다."])])
+        # 기출 어휘는 시안대로 '이런 점이 다릅니다' 쪽이 없어 앞쪽이 3쪽 → 본문이 오른쪽 면(5쪽)에서 시작하도록 빈 쪽 하나를 넣음
+        return front + "<div class='vcover blank'></div>", back("Voca", line)
+
+    # voca (시험 범위 지문 단어장)
+    line = stat_line([(f"지문 {np_}개", np_), (f"지문 핵심 단어 {s['key_words']}개", s["key_words"]),
+                      (f"CORE 단어 {s['core_words']}개", s["core_words"]), (f"유의어·반의어 {s['related']:,}개", s["related"])])
+    front = cover("Voca", f"EXAM-RANGE VOCA EDITION &bull; {np_} PASSAGES",
+                  "Contextual Vocabulary, Idioms, Synonyms &amp; Antonyms Master",
+                  "시험 범위 지문으로 만든, 출제될 수 있는 모든 관련 단어 마스터", line) + howto([
+        ("이 단어장의 단어는 두 종류예요.",
+         "<b>지문 핵심 단어</b>는 시험 범위 지문 본문에 실제로 쓰인 단어예요. <b>CORE 단어</b>(색이 다른 줄)는 주제·제목·요지·요약문 선택지에서 원문 표현을 바꿔 쓸 때 나오는 단어예요. 둘 다 외워야 해요."),
+        ("단어는 사전 뜻이 아니라 '문맥 의미'로 외우세요.", "같은 단어도 지문마다 뜻이 달라요. 이 교재의 뜻은 시험 범위 지문 속 뜻이에요."),
+        ("[유의어/대체]는 선택지에 바뀌어 나올 단어, [반의어/함정]은 낱말 문제의 함정이에요.",
+         "원문 단어 대신 유의어가 선택지에 나오고, 문맥상 낱말 문제에서는 반의어로 바꿔 내요."),
+        ("암기체크 두 칸(□ □)으로 두 번 외우세요.", "1회독에 첫 칸, 시험 3일 전 2회독에 둘째 칸. 두 칸이 다 차지 않은 단어만 마지막에 다시 보세요."),
+    ]) + made("HOW ANATOMY VOCA WAS MADE", "ANATOMY VOCA는 이렇게 만들었습니다",
+        '"시험 범위 지문으로, 실제로 출제될 수 있는 관련 단어를 모두."',
+        "두꺼운 단어책의 단어 대부분은 이번 시험에 나오지 않습니다. 반대로 시험 범위 지문과 관련된 단어는 하나만 몰라도 문제를 틀릴 수 있습니다. ANATOMY VOCA는 이번 시험 범위에 쓰인 지문을 가지고, 지문에 나온 단어는 물론 선택지에서 바꿔 쓸 수 있는 단어와 유의어·반의어까지 실제로 출제될 수 있는 관련 단어를 모두 담았습니다.",
+        [("지문 핵심 단어", [f"시험 범위 지문 {np_}개 본문에서 해석과 어법·낱말 문제에 꼭 필요한 단어·숙어{f' <b>{s['key_words']}개</b>' if s['key_words'] else ''}를 골랐습니다. 단어마다 어느 지문에서 나왔는지 출처를 적었습니다."]),
+         ("CORE 단어", [f"주제·제목·요지·요약문 선택지는 원문 단어를 상위 개념어로 바꿔 씁니다. ANATOMY CORE에서 이렇게 바꿔 쓴 단어{f' <b>{s['core_words']}개</b>' if s['core_words'] else ''}를 따로 표시해 함께 실었습니다."]),
+         ("유의어와 함정 반의어", [f"단어마다 선택지에 바뀌어 나올 유의어와 낱말 문제 함정으로 쓰일 반의어{f'(<b>{s['related']:,}개</b>)' if s['related'] else ''}를 붙였습니다."]),
+         ("문맥 의미와 한글 발음", ["사전 뜻이 아니라 그 지문 속 뜻을 적고, 읽기 어려운 단어는 한글 발음을 달았습니다."])]
+    ) + feature("Voca", "는", "보통의 단어장은",
+        ["시험 범위와 상관없는 단어가 대부분입니다.", "지문에 나온 단어만 있고, 선택지에 바뀌어 나올 단어는 없습니다."],
+        ["시험 범위 지문으로 만들었습니다.", "지문 핵심 단어와 CORE 단어를 함께 담았습니다.", "유의어·함정 반의어까지 출제될 수 있는 관련 단어를 모두 외웁니다."],
+        ["지문 핵심 단어와 CORE 단어를 구분해 표시했습니다.", "단어마다 출처 지문과 문맥 의미를 적었습니다.", "암기체크 두 칸으로 두 번 확인하게 했습니다."])
+    return front, back("Voca", line)
 
 
 # -----------------------------
@@ -1494,9 +1638,10 @@ def get_studio_toolbar_html(mode_type: str = "standard") -> str:
 }}
 </style>
 <nav class="studio-toolbar no-print">
-    <div class="st-title"><span>⚡ 4pm 실시간 교재 스튜디오 (표지·공란·저작권 페이지 자동 탑재)</span></div>
+    <div class="st-title"><span>⚡ 4pm 실시간 교재 스튜디오 (표지·사용법·소개·저작권·뒤표지 자동 탑재)</span></div>
     <div class="st-actions">
         {extra_btns}
+        <label title="양면 인쇄 때 뒤표지가 맨 뒷면에 오게 하려면 전체 쪽수가 짝수여야 해요" style="font-size:12px; color:#cbd5e1; cursor:pointer;"><input type="checkbox" onchange="document.body.classList.toggle('addblank', this.checked)"> 인쇄 미리보기 쪽수가 홀수면 체크 → 뒤표지 앞에 빈 쪽 넣기</label>
         <button class="studio-btn" onclick="toggleOrderDrawer()">📋 지문/시험지 순서 변경 / 제외</button>
         <button id="btn-edit-mode" class="studio-btn" onclick="toggleEditMode()">✏️ 화면 텍스트 직접 수정: OFF</button>
         <button class="studio-btn" onclick="downloadEditedHtml()">💾 단행본 전체 HTML 저장</button>
@@ -1505,7 +1650,7 @@ def get_studio_toolbar_html(mode_type: str = "standard") -> str:
 </nav>
 <div id="studio-order-drawer" class="studio-drawer no-print">
     <div style="font-size:12px; font-weight:700; margin-bottom:8px; color:#38bdf8;">
-        💡 화살표를 눌러 본문 순서를 실시간으로 바꾸거나 특정 항목을 제외할 수 있습니다. (앞표지·공란·뒤표지는 항상 고정됩니다)
+        💡 화살표를 눌러 본문 순서를 실시간으로 바꾸거나 특정 항목을 제외할 수 있습니다. (앞표지·사용법·소개·저작권·뒤표지는 항상 고정됩니다)
     </div>
     <div id="drawer-list"></div>
 </div>
@@ -3582,10 +3727,11 @@ def render_library_manager(prefix: str, title_name: str, file_path: str, css_str
             )
 
         if render_clicked:
-            with st.spinner(f"{title_name} 단행본(표지+공란+본문+저작권) 교재를 렌더링 중입니다..."):
+            with st.spinner(f"{title_name} 단행본(표지·사용법·소개·본문·저작권·뒤표지) 교재를 렌더링 중입니다..."):
                 front_html, back_html = build_booklet_front_and_back(
-                    target_type, h_url, f_url, academy_name, school_name, len(sel_passages)
+                    target_type, h_url, f_url, academy_name, school_name, sel_passages
                 )
+                front_html = f"<style>{QB_BOOK_CSS}</style>" + front_html
                 if target_type == "victory":
                     body_str = "".join([render_victory(p) for p in sel_passages])
                     final_html = wrap_full_html_victory(body_str, css_str, front_html, back_html)
@@ -5038,11 +5184,12 @@ QB_BOOK_CSS = """
 @page vcover { size: A4; margin: 0; }
 .vcover { width: 210mm; height: 297mm; margin: 0 auto 10mm; position: relative; overflow: hidden; background: #fff;
   box-shadow: 0 0 12px rgba(0,0,0,.12); font-family: 'Inter', 'Noto Sans KR', sans-serif; color: #0f172a; break-after: page; page-break-after: always; }
-.vcover .bar { position: absolute; top: 0; left: 0; right: 0; height: 10mm; background: linear-gradient(90deg, #0f172a 0%, #0047AB 65%, #38bdf8 100%); }
-.vcover .inner { position: absolute; inset: 26mm 24mm 22mm; display: flex; flex-direction: column; justify-content: space-between; }
+/* 프린터가 종이 가장자리 5~10mm를 못 찍어서, 표지·소개 쪽의 글자와 띠는 모두 종이 끝에서 25mm 이상 안쪽에 둠 */
+.vcover .bar { position: absolute; top: 10mm; left: 14mm; right: 14mm; height: 5mm; border-radius: 3px; background: linear-gradient(90deg, #0f172a 0%, #0047AB 65%, #38bdf8 100%); }
+.vcover .inner { position: absolute; inset: 30mm 28mm 26mm; display: flex; flex-direction: column; justify-content: space-between; }
 .vcover .top { display: flex; justify-content: space-between; border-bottom: 1.5px solid #0f172a; padding-bottom: 12px; font-size: 10.5px; font-weight: 800; letter-spacing: 3px; color: #0047AB; }
 .vcover .pill { display: inline-block; background: #b91c1c; color: #fff; font-size: 10.5px; font-weight: 800; letter-spacing: 2px; padding: 5px 12px; border-radius: 4px; margin-bottom: 18px; }
-.vcover h1 { font-size: 60px; font-weight: 900; letter-spacing: -1.5px; line-height: 1.02; margin: 0 0 14px; }
+.vcover h1 { font-size: 50px; font-weight: 900; letter-spacing: -1.5px; line-height: 1.02; margin: 0 0 14px; white-space: nowrap; }
 .vcover h1 span { color: #0047AB; }
 .vcover .en { font-size: 15px; font-weight: 600; color: #475569; margin-bottom: 8px; }
 .vcover .ko { font-size: 14px; font-weight: 500; color: #334155; }
@@ -5061,14 +5208,16 @@ QB_BOOK_CSS = """
 .vcover.back .line { font-family: 'Noto Sans KR'; font-size: 13px; color: #334155; margin: 10px 0 26px; }
 .vcover.back .series { font-size: 12px; font-weight: 600; color: #64748b; letter-spacing: .5px; }
 .vcover.back .series b { color: #0047AB; }
-.vcover.back .foot2 { position: absolute; bottom: 22mm; left: 24mm; right: 24mm; border-top: 1px solid #cbd5e1; padding-top: 12px;
+.vcover.back .foot2 { position: absolute; bottom: 26mm; left: 28mm; right: 28mm; border-top: 1px solid #cbd5e1; padding-top: 12px;
   font-family: 'Noto Sans KR'; font-size: 11px; color: #475569; display: flex; justify-content: space-between; }
 .vcover.copy .inner { justify-content: flex-end; align-items: flex-end; }
 .vcover.copy .cbox { text-align: right; max-width: 125mm; border-right: 4px solid #0047AB; padding-right: 14px; }
 .vcover.copy .cbox .t { font-size: 12px; font-weight: 900; letter-spacing: 1.5px; margin-bottom: 6px; }
 .vcover.copy .cbox .k { font-family: 'Noto Sans KR'; font-size: 10.5px; font-weight: 700; color: #334155; line-height: 1.65; word-break: keep-all; margin-bottom: 6px; }
 .vcover.copy .cbox .e { font-size: 9px; color: #94a3b8; line-height: 1.4; }
-.vpage { min-height: 266mm; font-family: 'Noto Sans KR', sans-serif; color: #0f172a; break-after: page; page-break-after: always; line-height: 1.6; }
+@page vintro { size: A4; margin: 20mm 25mm; }
+.vpage { width: 210mm; min-height: 297mm; box-sizing: border-box; padding: 20mm 25mm; margin: 0 auto 10mm; background: #fff; box-shadow: 0 0 12px rgba(0,0,0,.12);
+  font-family: 'Noto Sans KR', sans-serif; color: #0f172a; break-after: page; page-break-after: always; line-height: 1.6; text-align: left; }
 .vpage .kicker { font-family: 'Inter'; font-size: 10px; font-weight: 800; letter-spacing: 3px; color: #0047AB; }
 .vpage h2 { font-size: 21pt; font-weight: 900; margin: 4px 0 4px; letter-spacing: -.5px; }
 .vpage .lead { font-size: 12pt; font-weight: 700; color: #0047AB; margin: 0 0 10px; }
@@ -5093,11 +5242,14 @@ QB_BOOK_CSS = """
 .vpage .quote span { display: block; font-size: 9.5pt; font-weight: 400; color: #475569; }
 .vpage .howto li { margin-bottom: 12px; font-size: 10.5pt; }
 .vpage .howto b { color: #0047AB; }
+.vpage .series-tbl td.nw { white-space: nowrap; }
+.vpage .series-tbl tr.me td { background: #eef2ff; font-weight: 700; }
 .vcover.filler { display: none; }
 body.addblank .vcover.filler { display: block; }
 .printbar label { font-family: 'Noto Sans KR'; font-size: 12px; margin-right: 10px; color: #334155; }
 @media print {
   .vcover { page: vcover; margin: 0 !important; box-shadow: none !important; height: 296mm; }
+  .vpage { page: vintro; width: auto; min-height: 255mm; padding: 0; margin: 0 !important; box-shadow: none !important; background: #fff; }  /* Self-Note처럼 바탕이 회색인 교재에서도 소개 쪽은 흰 바탕 */
 }
 """
 
@@ -5177,7 +5329,7 @@ def render_vision_book(meta: Dict, stats: Dict, n_total: int, n_real: int, total
   <div class='kicker'>THROUGH THE EXAMINER'S EYES</div><h2>운양고·제일고 출제자의 시선</h2>
   <div class='two'>
     <div><h3 class='u'>운양고 출제자는 이렇게 냅니다</h3><ul>
-      <li><b>"원문을 외웠는지 정확히 확인한다."</b><br>지문은 원문에 가깝게 두고, 주어진 문장과 선택지를 바꿔 씁니다.<br><i>at three degrees of warming</i> → <i>when the temperature rises by three or four more degrees</i></li>
+      <li><b>"원문을 잘 이해했는지 정확히 확인한다."</b><br>지문은 원문에 가깝게 두고, 주어진 문장과 선택지를 바꿔 씁니다.<br><i>at three degrees of warming</i> → <i>when the temperature rises by three or four more degrees</i></li>
       <li><b>"있는 대로 모두 고르게 한다."</b><br>어법은 ⓐ~ⓖ 중 틀린/옳은 것을 모두 고르는 조합형이 대부분이라, 하나만 알아서는 풀 수 없습니다.</li>
       <li><b>{e(gram.get('운양고', (0, ['수일치']))[1][0].split()[0])}를 가장 많이 묻습니다.</b><br>긴 수식어 뒤의 진짜 주어, 동명사구 주어 같은 함정입니다.</li></ul></div>
     <div><h3 class='j'>제일고 출제자는 이렇게 냅니다</h3><ul>
