@@ -4527,7 +4527,9 @@ QB_EXAM_CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;700;900&family=Noto+Serif+KR:wght@400;700&display=swap');
 @page { size: A4; margin: 14mm 12mm 14mm 12mm; }
 * { box-sizing: border-box; }
-body { font-family: 'Noto Serif KR', serif; font-size: 10.3pt; line-height: 1.62; color: #111; margin: 0; background: #fff; }
+body { font-family: 'Noto Serif KR', serif; font-size: 10.3pt; line-height: 1.62; color: #111; margin: 0; background: #fff;
+  -webkit-print-color-adjust: exact; print-color-adjust: exact; }  /* 인쇄 창의 '배경 그래픽'을 꺼도 표지 색·검은 배지가 나오게 */
+.q .stem .tm { float: right; font-family: 'Noto Sans KR'; font-size: 7.8pt; font-weight: 700; color: #0047AB; border: 1px solid #0047AB; border-radius: 9px; padding: 0 6px; margin-left: 4px; }
 .sheet { max-width: 186mm; margin: 0 auto; }
 .head { border: 2px solid #111; margin-bottom: 8px; }
 .head .top { display: flex; align-items: center; justify-content: space-between; padding: 6px 12px; border-bottom: 1px solid #111; }
@@ -4665,7 +4667,7 @@ def qb_book_stats(gmap: Dict, gidx: Dict) -> Dict:
     return {"exams": len(exams), "by_school": {sc: sum(1 for ex in exams if sc in str(ex.get("school", ""))) for sc in QB_SCHOOLS},
             "years": (2000 + years[0], 2000 + years[-1]) if years else None, "linked": len(gidx), "grammar": grammar}
 
-def render_vision_book(meta: Dict, stats: Dict, n_total: int, n_real: int) -> (str, str):
+def render_vision_book(meta: Dict, stats: Dict, n_total: int, n_real: int, total_min: int = 0) -> (str, str):
     """앞쪽 4쪽(앞표지·사용법·제작 소개 ①②)과 뒤쪽 2쪽(저작권·뒤표지) HTML"""
     e = html.escape
     acad = e(meta.get("academy") or "포피엠 입시 영어")
@@ -4678,6 +4680,9 @@ def render_vision_book(meta: Dict, stats: Dict, n_total: int, n_real: int) -> (s
     gram_rows = "".join(f"<tr><td>{e(sc)}</td><td>{v[0]}개</td><td>{e(' · '.join(v[1]))}</td></tr>" for sc, v in gram.items())
     pass_rows = "".join(f"<tr><td>{t}</td><td>{u}</td><td>{j}</td></tr>" for t, u, j in QB_PASSAGE_MEASURE)
     title = e(meta.get("title", ""))
+    time_li = (f"<li><b>문항마다 적힌 ⏱ 권장 시간 안에 푸세요.</b><br>지문 단어 수와 유형(어법·조합형·순서·삽입 등)으로 계산한 시간이에요. "
+               f"이 시험지 전체 권장 시간은 <b>약 {total_min}분</b>이에요. 시간 안에 못 푼 문제는 번호에 표시해 두었다가 해설로 다시 확인하세요.</li>"
+               if total_min else "<li><b>실제 시험처럼 시간을 재고 푸세요.</b></li>")
     front = f"""
 <div class='vcover'><div class='bar'></div><div class='inner'>
   <div class='top'><span>PQRS YOUNG ENGLISH CURRICULUM SERIES</span><span>ANATOMY SERIES</span></div>
@@ -4688,7 +4693,7 @@ def render_vision_book(meta: Dict, stats: Dict, n_total: int, n_real: int) -> (s
     <div class='ko'>운양고·제일고 실제 기출을 해부해, 출제자의 눈으로 다시 만든 변형문제</div>
     <div class='rule'></div>
     <div class='ttl'>{title}</div>
-    <div class='meta'>총 {n_total}문항{f' · 실제 기출 {n_real}문항 포함' if n_real else ''}</div>
+    <div class='meta'>총 {n_total}문항{f' · 실제 기출 {n_real}문항 포함' if n_real else ''}{f' · 권장 풀이 시간 약 {total_min}분' if total_min else ''}</div>
     <div class='credit'>Created &amp; Designed by <b>PQRS Young</b> &times; {acad}</div>
   </div>
   <div class='bottom'>
@@ -4699,7 +4704,8 @@ def render_vision_book(meta: Dict, stats: Dict, n_total: int, n_real: int) -> (s
 <div class='vpage'>
   <div class='kicker'>HOW TO USE</div><h2>이 교재 사용법</h2>
   <ol class='howto'>
-    <li><b>실제 시험처럼 시간을 재고 푸세요.</b><br>문항 아래 작은 표시로 실제 기출인지, 어느 학교 스타일 변형인지, 난이도가 어떤지 알 수 있어요.</li>
+    {time_li}
+    <li><b>문항 아래 작은 표시를 보세요.</b><br>실제 기출인지 변형문제인지, 난이도가 어떤지 알 수 있어요.</li>
     <li><b>'기출 이력'을 꼭 보세요.</b><br>같은 지문이 운양고·제일고 어느 시험 몇 번에 나왔는지 적혀 있어요. 굵게 표시된 것은 같은 유형으로 나온 문제예요.</li>
     <li><b>틀린 문제는 해설의 '근거'를 지문에서 직접 찾아 밑줄 치세요.</b><br>재진술 문제는 해설 끝 '원문 표현 → 바꾼 표현'을 외우는 것이 핵심이에요.</li>
   </ol>
@@ -4753,6 +4759,24 @@ def render_vision_book(meta: Dict, stats: Dict, n_total: int, n_real: int) -> (s
 </div><div class='foot2'><span>장기동 {acad} · PQRS영T</span><span>031-991-1199</span></div></div>"""
     return front, back
 
+# 문항별 권장 풀이 시간 (AI 없이 계산): 읽을 영어 단어 수(지문·주어진 글·박스·선택지) ÷ 분당 약 130단어 + 유형별로 따져 보는 시간
+#   평균 지문이면 문항당 약 2분 → 24문항 약 50분(실제 내신 시험 시간과 비슷)
+QB_TIME_EXTRA = {"어법 (단일)": 20, "어법 (조합형)": 40, "낱말 (문맥상)": 20, "<보기> 일치 조합형": 40, "순서": 25, "삽입": 25,
+                 "무관한 문장": 15, "요약문 (A)(B)": 20, "빈칸": 20, "함축 의미": 15}
+QB_TIME_LEVEL = {"최상": 1.15, "상": 1.05, "중": 1.0, "하": 0.9}
+
+def qb_time_sec(r: Dict) -> int:
+    c = r.get("content") or {}
+    text = " ".join([str(c.get(k) or "") for k in ("given", "passage", "box")] + [str(x) for x in (c.get("choices") or [])])
+    words = len(re.findall(r"[A-Za-z][A-Za-z'’-]*", re.sub(r"<[^>]+>", " ", text)))
+    extra = 120 if r.get("q_type") in QB_ESSAY_TYPES else QB_TIME_EXTRA.get(r.get("q_type"), 10)
+    sec = (20 + words * 60 / 130 + extra) * QB_TIME_LEVEL.get(r.get("difficulty"), 1.0)
+    return int(min(300, max(60, round(sec / 10) * 10)))
+
+def qb_time_text(sec: int) -> str:
+    m, s_ = divmod(int(sec), 60)
+    return f"{m}분" + (f" {s_}초" if s_ else "")
+
 def render_qbank_exam(qs: List[Dict], meta: Dict, gidx: Dict[str, List[Dict]]) -> str:
     def tag_of(r):
         """1줄: 지문 · 유형 + [실제 기출]/[변형 · ○○고 스타일 · 난이도]  2줄: 기출 이력 (같은 시험은 번호를 묶고, 같은 유형은 굵게)"""
@@ -4762,7 +4786,8 @@ def render_qbank_exam(qs: List[Dict], meta: Dict, gidx: Dict[str, List[Dict]]) -
             badge = (f"<span class='bd real'>실제 기출</span> {html.escape(src.get('exam', ''))} {html.escape(src.get('no', ''))}번"
                      + (f" · {html.escape(re.sub(r'\s*점\s*$', '', str(src['points'])))}점" if src.get("points") else ""))
         else:
-            badge = f"<span class='bd var'>변형 · {html.escape(r.get('school') or '')} 스타일 · {html.escape(r['difficulty'])}</span>"
+            style = f"{html.escape(r.get('school') or '')} 스타일 · " if meta.get("show_style", True) else ""
+            badge = f"<span class='bd var'>변형 · {style}{html.escape(r['difficulty'])}</span>"
         t = f"▶ {html.escape(r['passage_label'])} · {html.escape(r['q_type'])} {badge}"
         if meta.get("show_gichul"):
             groups = {}
@@ -4785,10 +4810,14 @@ def render_qbank_exam(qs: List[Dict], meta: Dict, gidx: Dict[str, List[Dict]]) -
     def kind_short(r):
         if r["difficulty"] == QB_GICHUL_LEVEL:
             return "기출"
-        return f"변({(r.get('school') or '?')[:1]})"
+        return f"변({(r.get('school') or '?')[:1]})" if meta.get("show_style", True) else "변형"
 
+    total_min = round(sum(qb_time_sec(r) for r in qs) / 60)
+    if meta.get("show_time", True):
+        meta = {**meta, "sub": " · ".join(x for x in [meta.get("sub", ""), f"권장 풀이 시간 약 {total_min}분"] if x)}
     book = meta.get("book_stats")
-    front, back = render_vision_book(meta, book, len(qs), sum(1 for r in qs if r["difficulty"] == QB_GICHUL_LEVEL)) if book else ("", "")
+    front, back = render_vision_book(meta, book, len(qs), sum(1 for r in qs if r["difficulty"] == QB_GICHUL_LEVEL),
+                                     total_min if meta.get("show_time", True) else 0) if book else ("", "")
     blank_toggle = ("<label title='양면 인쇄 때 뒤표지가 맨 뒷면에 오게 하려면 전체 쪽수가 짝수여야 해요'>"
                     "<input type='checkbox' onchange=\"document.body.classList.toggle('addblank', this.checked)\"> "
                     "인쇄 미리보기 쪽수가 홀수면 체크 → 뒤표지 앞에 빈 쪽 넣기</label>") if book else ""
@@ -4798,7 +4827,8 @@ def render_qbank_exam(qs: List[Dict], meta: Dict, gidx: Dict[str, List[Dict]]) -
 <div class='info'><div>반 :</div><div>번호 :</div><div>이름 :</div><div>점수 :</div></div></div><div class='cols'>"""]
     for n, r in enumerate(qs, 1):
         c = r["content"]
-        o.append(f"<div class='q'><div class='stem'><span class='no'>{n}.</span> {qb_html(c.get('stem'))}</div>")
+        tm = f"<span class='tm'>⏱ {qb_time_text(qb_time_sec(r))}</span>" if meta.get("show_time", True) else ""
+        o.append(f"<div class='q'><div class='stem'>{tm}<span class='no'>{n}.</span> {qb_html(c.get('stem'))}</div>")
         if meta.get("show_tag"):
             o.append(f"<span class='tag'>{tag_of(r)}</span>")
         if c.get("given"):
@@ -4823,13 +4853,15 @@ def render_qbank_exam(qs: List[Dict], meta: Dict, gidx: Dict[str, List[Dict]]) -
             o.append("<table class='key'><tr><th>번호</th>" + "".join(f"<th>{i + k + 1}</th>" for k in range(len(part))) + pad.replace("td", "th") + "</tr><tr><th>정답</th>"
                      + "".join(f"<td><b>{'서술형' if r['q_type'] in QB_ESSAY_TYPES else html.escape(r['content'].get('answer', ''))}</b></td>" for r in part) + pad
                      + "</tr><tr><th>구분</th>" + "".join(f"<td>{html.escape(kind_short(r))}</td>" for r in part) + pad + "</tr></table>")
-        o.append("<div class='keynote'>구분: 기출 = 실제 기출문제 · 변(운) = 운양고 스타일 변형 · 변(제) = 제일고 스타일 변형 · 굵은 기출 이력 = 같은 유형으로 출제됨</div>")
+        o.append("<div class='keynote'>구분: 기출 = 실제 기출문제 · " + ("변(운) = 운양고 스타일 변형 · 변(제) = 제일고 스타일 변형" if meta.get("show_style", True) else "변형 = 변형문제")
+                 + " · 굵은 기출 이력 = 같은 유형으로 출제됨</div>")
         o.append("<div class='cols'>")
         for n, r in enumerate(qs, 1):
             c = r["content"]
             ans = qb_html(c.get("answer", ""))
             src = c.get("source") if r["difficulty"] == QB_GICHUL_LEVEL else None
-            kind = f"실제 기출 {src.get('short', '')} {src.get('no', '')}번" if src else f"{r.get('school') or ''} 스타일 변형 · {r['difficulty']}"
+            kind = (f"실제 기출 {src.get('short', '')} {src.get('no', '')}번" if src else
+                    (f"{r.get('school') or ''} 스타일 변형 · {r['difficulty']}" if meta.get("show_style", True) else f"변형 · {r['difficulty']}"))
             note = f"<li><b>⚠️ {qb_html(c['answer_note'])}</b></li>" if c.get("answer_note") else ""
             o.append(f"<div class='exp'><h3>{n}번 정답 {ans}<span>({html.escape(r['passage_label'])} · {html.escape(r['q_type'])} · {html.escape(kind)})</span></h3><ul>"
                      + note + "".join(f"<li>{qb_html(e)}</li>" for e in (c.get("explanation") or [])) + "</ul></div>")
@@ -4866,6 +4898,15 @@ QB_PICKER_CSS = """<style>
 [class*="st-key-qb_card_"] [data-testid="stBaseButton-segmented_controlActive"] { background: #0A84FF !important; border-color: #0A84FF !important; color: #fff !important; }
 [class*="st-key-qb_card_"] [data-testid="stBaseButton-pillsActive"] *,
 [class*="st-key-qb_card_"] [data-testid="stBaseButton-segmented_controlActive"] * { color: #fff !important; }
+/* Streamlit 1.60대 이후(클라우드): 칩 줄이 가로 스크롤 한 줄이 되고 버튼 표시가 aria-pressed(칩)·aria-checked(막대 버튼)로 바뀜 → 줄바꿈 + 같은 색 */
+[class*="st-key-qb_card_"] [data-testid="stButtonGroup"] > div { flex-wrap: wrap !important; overflow: visible !important; row-gap: 6px !important; }
+[class*="st-key-qb_card_"] [data-testid="stButtonGroup"] button[aria-pressed] { background: transparent !important; border: 1px solid rgba(128,128,128,.28) !important;
+  font-variant-numeric: tabular-nums; transition: background .15s ease, border-color .15s ease; }
+[class*="st-key-qb_card_"] [data-testid="stButtonGroup"] button[aria-pressed]:hover { border-color: #0A84FF !important; }
+[class*="st-key-qb_card_"] [data-testid="stButtonGroup"] button[aria-pressed="true"],
+[class*="st-key-qb_card_"] [data-testid="stButtonGroup"] button[role="radio"][aria-checked="true"] { background: #0A84FF !important; border-color: #0A84FF !important; color: #fff !important; }
+[class*="st-key-qb_card_"] [data-testid="stButtonGroup"] button[aria-pressed="true"] *,
+[class*="st-key-qb_card_"] [data-testid="stButtonGroup"] button[role="radio"][aria-checked="true"] * { color: #fff !important; }
 [class*="st-key-qb_card_"] [data-testid="stBaseButton-tertiary"] { color: #0A84FF !important; padding: 0 4px; min-height: 30px; white-space: nowrap; }
 [class*="st-key-qb_card_"] [data-testid="stBaseButton-tertiary"] p { font-size: 13px; white-space: nowrap; }
 [class*="st-key-qb_card_"] [data-testid="stBaseButton-tertiary"]:disabled { color: rgba(128,128,128,.6) !important; }
@@ -4960,8 +5001,7 @@ def _qb_passage_picker(key: str, mock_lib: List[Dict], counts: Dict[str, int]) -
                                         on_change=sync, args=(pkey, opts))
 
         here = [p["label"] for p in ps]
-        f1, f2 = st.columns([6, 3.2], vertical_alignment="center")
-        f2, f3, f4 = f2.columns(3)
+        f1 = st.container()
         if chosen:
             lines = {}
             for l in chosen:
@@ -4974,6 +5014,7 @@ def _qb_passage_picker(key: str, mock_lib: List[Dict], counts: Dict[str, int]) -
         else:
             f1.markdown("<div class='qb-basket'><span class='muted'>번호를 눌러 지문을 고르세요. 다른 시험으로 바꿔도 고른 번호는 그대로 남아요.</span></div>",
                         unsafe_allow_html=True)
+        f2, f3, f4, _ = st.columns([1, 1, 1, 4])
         f2.button("이 시험 전체", key=f"{key}_all", type="tertiary", on_click=lambda: set_chosen(st.session_state[key] + here))
         f3.button("이 시험 해제", key=f"{key}_none", type="tertiary",
                   on_click=lambda: set_chosen([l for l in st.session_state[key] if l not in here]))
@@ -5075,9 +5116,12 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
                                                 label_visibility="collapsed")
             kind = _qb_row("머리말 오른쪽").text_input("머리말 오른쪽", value=school_name, key="qb_exam_kind", label_visibility="collapsed")
             o1, o2, o3, o4 = _qb_row("표시").columns(4)
+            o5, o6, _ = _qb_row("").columns([1, 1, 2])
             show_tag = o1.checkbox("문항 아래 출처·구분", value=True, key="qb_exam_tag", help="실제 기출/변형, 학교 스타일, 난이도")
             show_gichul = o2.checkbox("같은 지문 기출 이력", value=True, key="qb_exam_gichul", help="운양고·제일고에서 이 지문이 나온 시험·번호 전부")
             with_answers = o3.checkbox("마지막에 정답·해설", value=True, key="qb_exam_ans")
+            show_style = o5.checkbox("변형문제에 학교 스타일 표시", value=True, key="qb_exam_style", help="끄면 '변형 · 상'처럼 난이도만 나와요")
+            show_time = o6.checkbox("문항별 권장 풀이 시간", value=True, key="qb_exam_time", help="지문 단어 수·유형으로 계산 (AI 비용 없음)")
             as_book = o4.checkbox("ANATOMY VISION 책으로", value=True, key="qb_exam_book",
                                   help="앞표지·사용법·제작 소개 2쪽을 앞에, 저작권·뒤표지를 뒤에 붙여 양면 인쇄하면 한 권의 책처럼 나와요")
         b1, b2 = st.columns([2, 1])
@@ -5100,7 +5144,7 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
                             f"실제 기출 {sum(1 for r in picked if r['difficulty'] == QB_GICHUL_LEVEL)}" if e_real != "빼기" else "",
                             f"변형 {sum(1 for r in picked if r['difficulty'] != QB_GICHUL_LEVEL)} ({', '.join(e_levels)})" if e_real != "기출만" else "",
                             f"총 {len(picked)}문항"] if x), "show_tag": show_tag, "show_gichul": show_gichul, "with_answers": with_answers,
-                        "academy": academy_name}
+                        "academy": academy_name, "show_style": show_style, "show_time": show_time}
                 gmap = load_gichul_map()
                 gidx = gichul_index(gmap, labels_all)
                 if as_book:
