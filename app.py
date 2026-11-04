@@ -3971,7 +3971,7 @@ QB_SCHOOL_STYLE = {
     "제일고": "24문항, 배점 3.6~4.8. 영어 선택지가 길고 지문 재진술 어휘가 고급. 어법 조합형, 빈칸, 제목/주제, 내용 일치, 밑줄 의미, 문맥상 낱말, 요약문, 도치 구문(So+형용사, Not only) 자주 활용.",
 }
 QB_LEVEL_RULES = {
-    "하": "단일 정답형 위주, 오답은 명백히 틀림, 원문 표현 그대로.",
+    "하": "단일 정답형 위주, 오답은 명백히 틀림, 지문 본문은 원문 그대로(선택지는 쉬운 말로 재진술).",
     "중": "오답 1~2개는 지문 키워드를 재사용한 매력적 오답.",
     "상": "조합형·<보기>형 포함, 숫자·more than/less than·원인/결과 뒤바꾸기 함정, 바로 뒤 단어가 미끼가 되는 낱말 문제, 지시어로 막히는 삽입 위치.",
     "최상": "상 + 선택지를 전부 재진술(paraphrase), <보기> 7~8개, 어법은 완료부정사·동격 that·분사구문 태·도치 등 고난도 포인트로만 구성.",
@@ -3997,13 +3997,13 @@ QB_TYPE_LEVEL = {
         "최상": "주어진 문장에는 연결어를 두지 않아 내용 논리로만 판단하게 하고, 두 자리가 모두 들어갈 듯해 보이지만 해석해야 앞뒤 흐름이 한 곳에서만 끊기는 것이 보이게 만든다. 지문 변형은 아래 학교별 기준의 최대치까지 쓴다.",
     },
     "빈칸": {
-        "하": "정답이 원문 표현 그대로.",
+        "하": "정답은 원문 핵심 표현을 쉬운 말로 바꾼 것.",
         "중": "정답은 재진술, 오답 일부는 지문 단어를 그대로 써서 함정.",
         "상": "주제문 핵심을 추상어로 재진술한 정답, 반대 의미 오답과 지문 단어 재사용 오답 포함.",
         "최상": "역접·이중부정 뒤처럼 논리를 따라야 풀리는 자리에 빈칸, 정답·오답 모두 고급 재진술, 부분적으로만 맞는 오답 2개 이상.",
     },
     "요약문 (A)(B)": {
-        "하": "(A)(B) 정답이 지문 단어 그대로.",
+        "하": "(A)(B) 정답이 지문 단어 그대로(요약문 문장 자체는 재진술).",
         "중": "(A)(B) 중 하나는 재진술.",
         "상": "(A)(B) 모두 재진술, 오답 쌍은 하나만 틀린 것이 섞임.",
         "최상": "(A)(B) 모두 지문에 없는 상위 개념어, 오답 쌍 대부분이 한쪽만 틀려 끝까지 따져야 함.",
@@ -4011,7 +4011,7 @@ QB_TYPE_LEVEL = {
     "주제": {"하": "정답에 지문 핵심어 포함.", "중": "정답은 재진술, 오답은 지문 단어를 쓴 함정.", "상": "너무 넓은/좁은 오답 포함, 정답은 상위 개념어.", "최상": "모든 선택지가 지문 소재를 다루며, 범위·초점만 다른 오답들 사이에서 정답을 골라야 함."},
     "제목": {"하": "정답에 지문 핵심어 포함.", "중": "비유적 제목 하나 포함.", "상": "비유·의문형 정답, 지문 단어를 쓴 함정 오답.", "최상": "비유적 정답을 글 전체 논지로 해석해야 하고, 오답은 지문 일부만 반영."},
     "요지·주장": {"하": "필자 주장이 직접 드러난 문장 기준.", "중": "예시 뒤에 숨은 주장.", "상": "통념 제시 후 반박 구조에서 진짜 주장을 고르게.", "최상": "통념·예시·반박이 섞여 있고, 오답이 통념이나 예시를 그대로 옮긴 것."},
-    "내용 일치·불일치": {"하": "원문 문장을 거의 그대로.", "중": "한두 단어만 바꾼 함정.", "상": "숫자·비교·원인/결과 뒤바꾸기 함정.", "최상": "모든 선택지를 재진술하고, 부분 부정·시간 순서·주체 바꾸기 함정을 섞음."},
+    "내용 일치·불일치": {"하": "원문 내용을 쉬운 말로 짧게 바꿔 씀.", "중": "한두 단어만 바꾼 함정.", "상": "숫자·비교·원인/결과 뒤바꾸기 함정.", "최상": "모든 선택지를 재진술하고, 부분 부정·시간 순서·주체 바꾸기 함정을 섞음."},
     "<보기> 일치 조합형": {"하": "<보기> 5개, 원문에 가까운 진술.", "중": "<보기> 6개, 일부 재진술.", "상": "<보기> 7개, 숫자·인과 함정.", "최상": "<보기> 8개 모두 재진술, 맞는 진술 개수를 짐작할 수 없게 조합."},
     "함축 의미": {"하": "비유가 바로 앞뒤에서 설명됨.", "중": "글 전체를 보면 알 수 있음.", "상": "비유 해석에 추론이 필요하고 문자 그대로 해석한 오답 포함.", "최상": "글의 결론과 연결해야 풀리는 비유, 오답은 부분적으로 맞는 해석."},
     "낱말 (문맥상)": {"하": "명백한 반의어 교체.", "중": "바로 앞뒤 문장과 모순.", "상": "단락 논리를 따라야 보이는 반의어, 혼동어 함정 포함.", "최상": "글 전체 논지와 비교해야 보이는 교체, 다른 밑줄 낱말도 처음 보면 어색해 보이게 고급 어휘 선택."},
@@ -4022,9 +4022,90 @@ QB_TYPE_LEVEL = {
 #   제일고: 삽입 62~94%·무관한 문장 65~85%·빈칸 55~75%로 본문도 상당 부분 재진술, 순서는 주어진 글을 새로 써서 도입부를 바꾸기도 함(12%)
 QB_SCHOOL_PASSAGE = {
     "운양고": "지문 본문은 원문 표현을 거의 그대로(약 90% 이상) 쓴다. 삽입 유형은 '주어진 문장'만 원문과 다른 표현으로 바꿔 쓴다(예: 'at three degrees of warming, or four' → 'when the temperature rises by three or four more degrees'). 순서 유형도 덩어리 문장은 원문 그대로 두고 나누는 위치와 연결어 단서로 난이도를 조절한다.",
-    "제일고": "지문 본문 일부를 재진술한다(원문 표현은 약 60~85%만 남기고 동의어·구조 변경·연결어 교체). 상·최상일수록 재진술 비율을 높이되 최상도 원문 표현을 60% 가까이는 남기고(실제 기출 최저치), 순서 유형은 주어진 글을 같은 논지의 다른 도입 문장으로 새로 써서 원문을 외운 학생이 도입부만 보고 순서를 떠올리지 못하게 할 수 있다. 어느 경우든 뜻·논리·정보는 원문과 같게 유지한다.",
+    "제일고": "지문 본문 일부를 재진술한다(원문 표현은 약 60~85%만 남기고 동의어·구조 변경·연결어 교체). 상·최상일수록 재진술 비율을 높이되 최상도 원문 표현을 60% 가까이는 남기고(실제 기출 최저치), 순서 유형은 주어진 글을 같은 논지의 다른 도입 문장으로 새로 써서 원문을 외운 학생이 도입부만 보고 순서를 떠올리지 못하게 할 수 있다. 시험에 따라 지문 전체를 같은 내용의 다른 문장으로 새로 쓰기도 한다(제일고 26년 1학기 기말 고1: 원문 표현 5~14%) — 이 경우는 [문항별 출제 계획]을 따른다. 어느 경우든 뜻·논리·정보는 원문과 같게 유지한다.",
 }
 QB_PASSAGE_TYPES = {"순서", "삽입", "무관한 문장", "빈칸", "낱말 (문맥상)"}
+
+# ---- 문항별 출제 계획 (파이썬이 문항마다 무작위로 정해 프롬프트 뒤쪽에 붙임 · AI 호출 추가 없음, 공통 앞부분 캐시 그대로) ----
+# 2026-11-04 실제 기출 54문항(올바르게 연결된 것) 재측정: 영어 선택지·<보기>·요약문 문장은 두 학교 모두 원문 4단어 묶음이 0~6%만 남음
+QB_CHOICE_TYPES = {"주제", "제목", "요지·주장", "내용 일치·불일치", "<보기> 일치 조합형", "빈칸", "요약문 (A)(B)", "함축 의미"}
+QB_CHOICE_PARA = ("영어 선택지·<보기> 진술·요약문 문장은 난이도와 상관없이 원문 문장을 그대로 옮기지 않고 모두 다른 말로 재진술한다"
+                  "(하·중은 쉬운 어휘로, 상·최상은 상위 개념어·구조 변경으로). 한국어 선택지는 직역이 아니라 의미 요약으로 쓴다.")
+QB_OPPOSITE_TRAP = ("오답 {n}개는 지문 핵심어를 그대로 쓰면서 글의 주장·결론을 뒤집은 재진술로 만든다"
+                    "(예: 'regardless of whether there is a reason' → 'only when you have something significant', 'Beyond Convenience' → 'Tech over Values', "
+                    "원인↔결과·주체↔대상 뒤바꾸기). 겉보기에는 정답보다도 지문과 비슷해 보이게 쓴다.")
+# 실제 기출 어법 선택지 개념 빈도 (QB_GRAMMAR_DNA와 같은 자료) — 문항마다 이 목록에서 무작위로 '꼭 묻는 개념'을 뽑음
+QB_GRAMMAR_FREQ = {
+    "운양고": {"수일치": 66, "분사·분사구문": 58, "관계대명사": 48, "능동/수동": 44, "5형식 목적격보어": 37, "동명사": 34, "명사절·동격 that": 30,
+              "병렬": 29, "시제·가정법·조동사": 26, "형용사/부사·2형식 보어": 23, "관계부사 vs 관계대명사": 21, "도치·강조": 17, "대명사 지칭": 16,
+              "가주어·가목적어": 13, "비교 구문": 10, "to부정사": 9, "한정사(each/every 등)": 9, "접속사 vs 전치사": 7, "복합관계사": 6},
+    "제일고": {"분사·분사구문": 82, "관계대명사": 46, "명사절·동격 that": 35, "능동/수동": 34, "동명사": 33, "시제·가정법·조동사": 30, "병렬": 27,
+              "수일치": 25, "형용사/부사·2형식 보어": 25, "대명사 지칭": 16, "접속사 vs 전치사": 16, "to부정사": 16, "5형식 목적격보어": 15,
+              "관계부사 vs 관계대명사": 14, "도치·강조": 14, "가주어·가목적어": 13, "동사 자리 vs 준동사": 11, "자동사/타동사": 9},
+}
+QB_GRAMMAR_RE = {"수일치": r"수\s*일치", "분사·분사구문": r"분사", "관계대명사": r"관계대명사|선행사", "능동/수동": r"수동|능동",
+                 "5형식 목적격보어": r"목적격\s*보어|5형식", "동명사": r"동명사", "명사절·동격 that": r"동격|명사절", "병렬": r"병렬",
+                 "시제·가정법·조동사": r"시제|가정법|조동사", "형용사/부사·2형식 보어": r"형용사|2형식", "관계부사 vs 관계대명사": r"관계부사",
+                 "도치·강조": r"도치|강조", "대명사 지칭": r"지칭|재귀", "가주어·가목적어": r"가주어|가목적어", "비교 구문": r"비교",
+                 "to부정사": r"부정사", "한정사(each/every 등)": r"한정사|each|every", "접속사 vs 전치사": r"전치사", "복합관계사": r"복합관계",
+                 "동사 자리 vs 준동사": r"준동사|동사 자리", "자동사/타동사": r"자동사|타동사"}
+# '섞기'일 때 문장 단위 밑줄로 낼 확률 (운양고: 단어·구 위주에 문장형도 · 제일고: 문장 단위 밑줄이 많음)
+QB_SENTENCE_RATE = {"운양고": {"어법 (단일)": 0.25, "어법 (조합형)": 0.3, "서술형 (어법 수정)": 0.2},
+                    "제일고": {"어법 (단일)": 0.5, "어법 (조합형)": 0.35, "서술형 (어법 수정)": 0.5}}
+QB_UNDERLINE_OPTS = {"mix": "섞기 (학교 기출 비율)", "word": "단어·구", "sentence": "문장 전체"}
+
+def qb_question_plans(q_type: str, level: str, school: str, count: int, existing: List[Dict], underline: str = "mix", rnd=None) -> List[List[str]]:
+    """문항마다 다르게 낼 출제 장치를 무작위로 정함 → [[계획 문장, ...], ...] (문항 수만큼)"""
+    rnd = rnd or random.Random()
+    plans = [[] for _ in range(count)]
+    hard = level in ("상", "최상")
+    if q_type in QB_GRAMMAR_TYPES - {"서술형 (조건 영작)"}:
+        freq = QB_GRAMMAR_FREQ.get(school, QB_GRAMMAR_FREQ["운양고"])
+        used = {c: 0 for c in freq}
+        for r in existing:  # 이 지문에서 이미 물은 개념은 덜 뽑히게
+            t = " ".join(str(x) for x in [(r.get("content") or {}).get("focus", ""), (r.get("content") or {}).get("explanation", "")])
+            for c in freq:
+                if re.search(QB_GRAMMAR_RE.get(c, re.escape(c)), t):
+                    used[c] += 1
+        k = 3 if q_type == "어법 (조합형)" else 2
+        for pl in plans:
+            pool = list(freq)
+            pick = []
+            for _ in range(k):
+                w = [math.sqrt(freq[c]) / (1 + used[c]) for c in pool]   # 빈도 제곱근: 상위 개념도 자주, 드문 개념도 꼭 나오게
+                c = rnd.choices(pool, weights=w)[0]
+                pick.append(c)
+                pool.remove(c)
+                used[c] += 1
+            pl.append("이 문항에 꼭 넣을 어법 개념(밑줄 포인트로, 틀린 곳이든 맞게 쓴 함정이든): " + ", ".join(pick) + " — 나머지 밑줄은 이 개념들과 겹치지 않는 다른 개념으로")
+            rate = {"word": 0.0, "sentence": 1.0}.get(underline, QB_SENTENCE_RATE.get(school, {}).get(q_type, 0.3))
+            if rnd.random() < rate:
+                if q_type == "서술형 (어법 수정)":
+                    pl.append("밑줄 단위: 문장 — 밑줄 친 문장 ⓐ~ⓔ 중 어법상 틀린 문장 2개를 찾아 바르게 고쳐 쓰게 한다(각 문장은 <u>문장 전체</u>, 틀린 문장은 그 안의 한 곳만 틀림).")
+                else:
+                    pl.append("밑줄 단위: 문장 — 각 밑줄은 한 문장(또는 긴 절) 전체를 <u>…</u>로 감싼다. 틀린 문장은 그 안의 한 곳만 틀리게 바꾸고, 맞는 문장에도 함정 포인트를 둔다. "
+                              "stem은 '밑줄 친 문장 중, 어법상 틀린(옳은) 것은?' 또는 조합형이면 '밑줄 친 ⓐ~ⓖ 중 어법상 옳은(틀린) 문장만을 있는 대로 고른 것은?'. 지문 문장 수보다 밑줄을 많이 긋지 않는다.")
+            else:
+                pl.append("밑줄 단위: 단어·구 — 각 밑줄은 판단할 단어나 짧은 구.")
+    if school == "제일고" and q_type == "순서" and hard:
+        for pl in plans:
+            if rnd.random() < 0.5:
+                pl.append("순서 재구성(제일고 실제 기출 방식): 주어진 글과 (A)(B)(C) 덩어리를 같은 뜻의 다른 문장으로 다시 쓰고, 필요하면 같은 논지의 덩어리 하나를 새로 써 넣거나 원문 내용의 배치를 바꿔 "
+                          "정답 순서가 원문 서술 순서와 달라지게 한다. 새로 쓴 내용은 확실한 일반 상식만 쓰고 앞뒤 덩어리와 지시어·논리로 이어지게 하며, 원문 정보는 빠짐없이 담는다. "
+                          "explanation 끝에 '재구성: 무엇을 새로 쓰고 옮겼는지'를 적는다.")
+    if school == "제일고" and hard and q_type != "순서":
+        for pl in plans:
+            if rnd.random() < 0.25:
+                pl.append("지문 전면 재진술: 지문의 모든 문장을 같은 뜻의 다른 문장으로 새로 쓴다(원문 4단어 표현이 10~30%만 남게, 내용·논리·정보 순서는 원문과 같게). 원문을 외운 학생도 다시 읽어야 풀리게 한다.")
+    if q_type in QB_CHOICE_TYPES:
+        for pl in plans:
+            if school == "제일고":
+                n = 0 if (level == "하" and rnd.random() < 0.5) else rnd.choice([1, 2] if hard else [1])
+            else:
+                n = 1 if (level != "하" and rnd.random() < 0.5) else 0
+            if n:
+                pl.append(QB_OPPOSITE_TRAP.format(n=n))
+    return plans
 
 # 어법 조합형은 난이도마다 밑줄 개수·틀린 개수·묻는 방향을 따로 정함 (최상은 실제 내신처럼 '있는 대로 고른 것')
 # 실제 운양고(29회)·제일고(25회) 기출 어법 선택지 전수 정리(PQRS영쌤 '어법·어휘 출제 총정리')에서 뽑은 개념별 빈도와 함정 패턴
@@ -4112,7 +4193,7 @@ def _qb_clean_dna(text: str) -> str:
     return re.sub(r"^\s*\{[\s\S]*?\n\}\s*\n", "", str(text or "")).strip()
 
 def qb_generate(gclient, model: str, label: str, text: str, q_type: str, level: str, school: str, count: int,
-                avoid: List[str], dna_rules: str, essay_rules: str, logs: List[str]) -> List[Dict]:
+                avoid: List[str], dna_rules: str, essay_rules: str, logs: List[str], existing: List[Dict] = None, underline: str = "mix") -> List[Dict]:
     """변형문제 count개 생성 (형식이 맞지 않는 문항은 버림)
     프롬프트 앞부분(출제 DNA + 공통 규칙)은 모든 호출에서 글자 하나까지 같게 두어 캐시로 읽히게 하고,
     학교·유형·난이도·지문처럼 호출마다 다른 내용은 뒤에 붙임"""
@@ -4124,6 +4205,12 @@ def qb_generate(gclient, model: str, label: str, text: str, q_type: str, level: 
         extra += f"\n[{school} 실제 기출 어법 출제 DNA — 이 빈도와 함정 패턴을 반영해 밑줄 포인트를 고른다]\n{QB_GRAMMAR_DNA.get(school, '')}\n{QB_GRAMMAR_TRAPS}\n"
     elif q_type == "낱말 (문맥상)":
         extra += f"\n[운양고·제일고 실제 기출 어휘 출제 패턴]\n{QB_VOCAB_TRAPS}\n"
+    if q_type in QB_CHOICE_TYPES:
+        extra += f"\n[선택지 재진술 — 실제 기출 측정]\n- {QB_CHOICE_PARA}\n"
+    plans = qb_question_plans(q_type, level, school, count, existing or [], underline)
+    if any(plans):
+        extra += "\n[문항별 출제 계획 — 문항마다 다르게, 반드시 따름]\n" + "\n".join(
+            f"- 문항 {i}: " + " / ".join(pl) for i, pl in enumerate(plans, 1) if pl) + "\n"
     shared = f"""너는 운양고·제일고 영어 내신 출제위원이다. 맨 아래 [이번 출제] 조건대로 변형문제를 만들어 JSON으로 반환하라.
 
 [운양고·제일고 실제 내신 출제 DNA]
@@ -4132,7 +4219,8 @@ def qb_generate(gclient, model: str, label: str, text: str, q_type: str, level: 
 [공통 규칙]
 - passage는 원문을 바탕으로 이 유형에 필요한 표시만 넣는다(밑줄 <u>…</u>, ⓐ~ⓖ, ①~⑤, 빈칸 __________, (A)(B)(C)). [이번 출제]의 학교별 지문 변형 기준에서 허용한 만큼만 재진술하고 나머지는 원문 그대로 둔다. 어느 경우든 요약·생략하지 않고 원문의 모든 문장(정보)을 담는다. 단락은 줄바꿈으로 구분한다.
 - 재진술한 지문이면 explanation 마지막 줄에 '지문 재진술: 원문 표현 → 바꾼 표현' 예시를 1~2개 적는다.
-- 원문에 없는 문장을 새로 지어 붙이지 않는다('무관한 문장' 유형의 한 문장만 예외). 지문이 짧아 밑줄 개수를 다 채우기 어려우면 밑줄 개수를 줄인다.
+- 원문에 없는 문장을 새로 지어 붙이지 않는다('무관한 문장' 유형의 한 문장과 [문항별 출제 계획]에서 허용한 순서 재구성만 예외). 지문이 짧아 밑줄 개수를 다 채우기 어려우면 밑줄 개수를 줄인다.
+- [문항별 출제 계획]이 있으면 문항마다 그 계획을 그대로 따르고, 계획이 이 규칙들과 다르면 계획을 따른다.
 - 어법·낱말 문제의 '틀린 곳'은 passage에 틀린 표현이 실제로 적혀 있어야 한다(원문 그대로 두고 틀렸다고 하지 않는다). 오류는 꼭 필요한 곳에만 넣고, explanation에 'ⓐ are → is (주어가 동명사구라 단수)'처럼 passage에 쓴 틀린 표현 → 올바른 표현을 밝힌다.
 - 객관식은 choices 5개(①② 같은 번호 기호는 쓰지 않음), answer는 ①~⑤ 중 하나. 여러 문항이면 정답 번호가 한쪽으로 몰리지 않게 하고, 문항마다 묻는 핵심(어법 개념·문장·논리)을 다르게 한다.
 - 서술형은 choices를 빈 배열로 두고 answer에 모범 답안을 쓴다.
@@ -4158,7 +4246,7 @@ def qb_generate(gclient, model: str, label: str, text: str, q_type: str, level: 
 지문: \"\"\"{text}\"\"\""""
     out = _qb_call(gclient, model, [shared, task], SCHEMA_QBANK, 0.7, logs, f"{label} {q_type} {level} 생성", cache_first=True)
     good = []
-    for q in (out or {}).get("questions", [])[:count]:
+    for qi, q in enumerate((out or {}).get("questions", [])[:count]):
         if find_degenerate_text(q):
             continue
         if q_type in QB_ESSAY_TYPES:
@@ -4170,6 +4258,8 @@ def qb_generate(gclient, model: str, label: str, text: str, q_type: str, level: 
             q["choices"] = [""] * 5 if q_type in QB_MARK_TYPES else [str(c).strip() for c in (q.get("choices") or [])][:5]
             if not q["answer"] or len(q["choices"]) != 5 or (q_type not in QB_MARK_TYPES and not all(q["choices"])):
                 continue
+        if qi < len(plans) and plans[qi]:
+            q["plan"] = plans[qi]   # 어떤 장치로 냈는지 남김 (나중에 골고루 나왔는지 확인용)
         good.append(q)
     return good
 
@@ -4185,6 +4275,7 @@ def qb_verify(gclient, model: str, text: str, questions: List[Dict], logs: List[
         blocks.append(f"### 문제 {k}\n{q['stem']}\n" + (f"[주어진 글]\n{q['given']}\n" if q.get("given") else "")
                       + f"[지문]\n{q['passage']}\n" + (f"[박스]\n{q['box']}\n" if q.get("box") else "") + f"[선택지]\n{ch}")
     prompt = ("아래 영어 객관식 문제들을 각 지문을 근거로 직접 풀어라. 원래 글(참고용 원문)과 비교해 판단해도 된다. "
+              "단, 문제의 지문·덩어리가 원문과 다르게 재진술·재구성되어 있으면 원문 순서·표현이 아니라 문제에 실린 글을 기준으로 푼다. "
               "각 문제 번호(index)와 정답(①~⑤ 중 하나)만 반환하라.\n\n[참고용 원문]\n" + text + "\n\n" + "\n\n".join(blocks))
     out = _qb_call(gclient, model, prompt, SCHEMA_QB_SOLVE, 0.0, logs, "정답 검증")
     if out is None:
@@ -4263,7 +4354,8 @@ def _generate_qbank_item(sb_factory, gclient, item: Dict, opts: Dict, dna_rules:
     questions = []
     for round_idx in range(len(GEN_RETRY_WAITS) + 1):
         time.sleep(opts.get("api_delay", 3))
-        questions = qb_generate(gclient, model, label, item["text"], q_type, level, school, count, avoid, dna_rules, essay_rules, logs)
+        questions = qb_generate(gclient, model, label, item["text"], q_type, level, school, count, avoid, dna_rules, essay_rules, logs,
+                                existing, item.get("underline", "mix"))
         if questions:
             break
         if round_idx < len(GEN_RETRY_WAITS):
@@ -4286,7 +4378,7 @@ def _generate_qbank_item(sb_factory, gclient, item: Dict, opts: Dict, dna_rules:
     return True, ""
 
 def enqueue_qbank(passages: List[Dict], q_types: List[str], levels: List[str], school: str, count: int, verify: bool,
-                  text_model: str, api_delay: int, academy_name: str, school_name: str, light_easy: bool = False) -> int:
+                  text_model: str, api_delay: int, academy_name: str, school_name: str, light_easy: bool = False, underline: str = "mix") -> int:
     """지문 × 유형 × 난이도 조합마다 작업 1건씩 추가 (light_easy: 하·중은 같은 제공사의 가벼운 모델로)"""
     sb = supabase if IS_CLOUD_DB else None
     added = {"n": 0}
@@ -4311,7 +4403,7 @@ def enqueue_qbank(passages: List[Dict], q_types: List[str], levels: List[str], s
                                      "passage_label": p["label"], "exam_key": p.get("exam_key", ""), "number": str(p.get("number", "")),
                                      "text": p.get("body_text", ""), "q_type": t, "difficulty": lv, "school": school,
                                      "count": count, "verify": verify, "state": "pending", "error": "",
-                                     "light": bool(light_easy and lv in ("하", "중"))})
+                                     "light": bool(light_easy and lv in ("하", "중")), "underline": underline})
                 added["n"] += 1
         _job_log(job, f"➕ 변형문제 {added['n']}건 추가 ({school} · {', '.join(levels)} · 건당 {count}문제)")
     _job_update(sb, add)
@@ -4389,7 +4481,31 @@ def gichul_short(ex: Dict) -> str:
     return f"{school} {name} {ex.get('grade', '')}".strip()
 
 def gichul_question_label(ex: Dict, q: Dict, labels: set) -> str:
+    if q.get("link_off"):
+        return ""
     return q.get("matched_label") if q.get("matched_label") in labels else gichul_label_from_hint(q.get("source_hint", ""), labels)
+
+# 기출 문항 ↔ 원문 지문 연결 확인: 원문의 내용 단어(4글자 이상) 중 시험지 지문에 나온 비율
+#   2026-11-04 측정: 바르게 연결된 문항 29~100%(제일고 전면 재진술도 29% 이상), 잘못 연결된 문항 4~13% → 20% 미만이면 연결하지 않음
+QB_LINK_MIN = 0.2
+_LINK_STOP = set("that this with from they their them have been were which what when there these those into also than more most such will would could should about other only some your".split())
+
+def qb_link_share(exam_text: str, orig_text: str) -> float:
+    def words(t):
+        return {w for w in re.findall(r"[a-z]{4,}", re.sub(r"<[^>]+>", " ", str(t)).lower()) if w not in _LINK_STOP}
+    wo = words(orig_text)
+    return len(words(exam_text) & wo) / len(wo) if wo else 1.0
+
+def gichul_check_links(res: Dict, mock_by_label: Dict[str, Dict]) -> int:
+    """AI가 짝지은 지문과 내용이 거의 안 겹치는 문항은 연결을 끊음 (link_off) → 끊은 개수"""
+    labels, n = set(mock_by_label), 0
+    for q in res.get("questions", []):
+        lbl = gichul_question_label({}, q, labels)
+        body = f"{q.get('given', '')} {q.get('passage', '')}"
+        if lbl and len(body.split()) > 40 and qb_link_share(body, mock_by_label[lbl].get("body_text", "")) < QB_LINK_MIN:
+            q["link_off"] = True
+            n += 1
+    return n
 
 def load_gichul_map() -> Dict:
     return _store_get(supabase if IS_CLOUD_DB else None, GICHUL_FILE, {}) or {}
@@ -4426,7 +4542,7 @@ def gichul_norm_meta(school: str, grade: str, exam_name: str, file_name: str = "
 
 def gichul_light(res: Dict, file_name: str) -> Dict:
     """gichul_map 문서에 남길 가벼운 목록 (문제 본문은 question_bank 표에)"""
-    keep = ("no", "points", "q_type", "source_hint", "matched_label")
+    keep = ("no", "points", "q_type", "source_hint", "matched_label", "link_off")
     school, grade, exam_name = gichul_norm_meta(res.get("school", ""), res.get("grade", ""), res.get("exam_name", ""), file_name)
     return {"school": school, "grade": grade, "exam_name": exam_name, "file": file_name,
             "display": f"{school} {exam_name} {grade}".strip(),
@@ -5066,6 +5182,11 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
             n1, n2 = _qb_row("조합당").columns([1.3, 6], vertical_alignment="center")
             count = n1.number_input("조합당 문제 수", 1, 5, 2, key="qb_gen_count", label_visibility="collapsed")
             verify = n2.checkbox("정답 검증 (AI가 한 번 더 풀어서 정답이 다르면 버림)", value=True, key="qb_gen_verify")
+            underline = "mix"
+            if set(q_types) & (QB_GRAMMAR_TYPES - {"서술형 (조건 영작)"}):
+                underline = _qb_row("어법 밑줄").segmented_control("어법 밑줄", list(QB_UNDERLINE_OPTS), format_func=QB_UNDERLINE_OPTS.get, default="mix",
+                                                              key="qb_gen_underline", label_visibility="collapsed",
+                                                              help="섞기: 학교 기출처럼 단어·구 밑줄과 문장 전체 밑줄을 문항마다 무작위로 섞어요") or "mix"
             light_easy = _qb_row("비용").checkbox(f"하·중은 가벼운 모델로 ({light_model_for(text_model).split(':')[-1]}) · 상·최상은 지금 모델({split_model_spec(text_model)[1]})",
                                                  value=True, key="qb_gen_light", disabled=light_model_for(text_model) == text_model)
         n_jobs = len(sel) * len({("어법 (조합형)" if (t == "어법 (단일)" and lv == "최상") else t, lv) for t in q_types for lv in levels})
@@ -5077,7 +5198,7 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
             cost = n_q * sum(qb_cost_per_q(m) for m in per_combo) / max(1, len(per_combo)) * (1.05 if verify else 1)
             st.caption(f"📦 작업 {n_jobs}건 · 문제 약 {n_q}개 · 예상 비용 약 {cost:,.0f}원 · 예상 시간 약 {max(1, n_jobs * 40 // 60)}분 (창을 닫아도 서버에서 계속)")
         if st.button("🚀 변형문제 생성 시작", type="primary", disabled=not n_jobs, key="qb_gen_btn"):
-            n = enqueue_qbank([by_label[l] for l in sel], q_types, levels, school, int(count), verify, text_model, api_delay, academy_name, school_name, light_easy)
+            n = enqueue_qbank([by_label[l] for l in sel], q_types, levels, school, int(count), verify, text_model, api_delay, academy_name, school_name, light_easy, underline)
             st.session_state.gen_flash = f"✅ 변형문제 {n}건을 생성 작업에 추가했습니다. 위 작업 칸에서 진행 상황을 볼 수 있어요."
             st.rerun()
 
@@ -5286,6 +5407,9 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
                     res = gichul_extract(client, text_model, pdf_to_part(f), f.name, cands)
                 if res:
                     res["_file"] = f.name
+                    n_off = gichul_check_links(res, by_label)
+                    if n_off:
+                        st.toast(f"⚠️ {f.name}: 원문과 내용이 맞지 않는 {n_off}문항은 연결하지 않았어요")
                     exams[key_md5] = gichul_light(res, f.name)
                     linked = list({gichul_question_label(exams[key_md5], q, set(by_label)) for q in res.get("questions", [])} - {""})
                     bank_rows = gichul_bank_rows(client, text_model, key_md5, res, by_label, qb_existing_gichul_keys(qb_fetch(sb, linked)), [])
@@ -6160,6 +6284,10 @@ APP_HELP = {
 - **정답 검증**: AI가 만든 문제를 한 번 더 풀어 보고, 정답이 다르면 버려요 (비용 약 10~20% 추가, 품질↑).
 - **하·중은 가벼운 모델로**: 쉬운 문제는 싼 모델로, 상·최상은 지금 모델로 만들어 비용을 줄여요.
 - 같은 지문을 다시 만들면 이미 쌓인 문제와 **다른 포인트**로 출제해요.
+- **어법 밑줄**: 섞기(학교 기출 비율로 단어·구 밑줄과 문장 전체 밑줄을 무작위로) / 단어·구 / 문장 전체.
+- **문항마다 출제 장치를 무작위로 정해요** (AI 비용 추가 없음): 어법은 실제 기출 개념 약 20가지 중 2~3개를 '꼭 묻기'로 뽑되 이 지문에서 이미 물은 개념은 덜 뽑혀요.
+  영어 선택지·<보기>·요약문은 두 학교 모두 늘 재진술하고, 주제를 뒤집은 오답(제일고 1~2개, 운양고 가끔)을 넣어요.
+  제일고 상·최상은 순서 문제의 덩어리를 새로 써서 원문과 다른 순서로 만들거나, 지문 전체를 다시 쓰기도 해요.
 
 **📄 시험지 만들기 — 무료**
 - 지문을 고르고 **학교·실제 기출 포함 여부·난이도·유형·순서·문제 수**를 정해요. 칩 아래에 '지금 뽑을 수 있는 문제 수'가 나와요.
@@ -6174,6 +6302,7 @@ APP_HELP = {
 
 **🏫 기출 표시 — 비용 발생 (시험지 1개 약 60원)**: 운양고·제일고 실제 시험지 PDF를 올리면 문항마다 **어느 모의고사 몇 번 지문인지** 찾아요.
 그 결과로 시험지에 '같은 지문 기출 이력'이 붙고, 원문 라이브러리 지문으로 낸 문항은 **실제 기출문제**로 문제 은행에 들어가요. 이미 올린 PDF는 다시 분석하지 않아요.
+AI가 짝지은 원문과 내용 단어가 20%도 안 겹치면 잘못 연결된 것으로 보고 연결하지 않아요.
 """,
 "library": """
 ##### 📚 교재 탭 (🏆 One-Shot · 🦅 Self-Note · 💎 Core · 📖 Voca) — 만든 교재를 골라 출력하는 곳
