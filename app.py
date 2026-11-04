@@ -295,7 +295,7 @@ def _gemini_cached_prefix(gc, model: str, text: str) -> str:
 def llm_json(model_spec: str, contents, schema: Dict, temperature: float = 0.3, gemini_client=None, cache_first: bool = False) -> Dict:
     """JSON 스키마에 맞춘 답을 받아 dict로 돌려줌. contents: 글(str)과 AiFile의 목록 (또는 글 하나)
     cache_first=True: 첫 글 조각이 여러 호출에서 똑같은 앞부분이라는 뜻
-      Claude: 캐시 표시를 붙여 다음 호출부터 약 1/20 값 · GPT: 앞부분이 같으면 자동 캐시(약 1/10) · Gemini: 명시 캐시를 만들어 약 1/10"""
+      Claude: 캐시 표시를 붙여 다음 호출부터 약 1/20 값 · GPT: 첫 조각을 instructions로 따로 보내 자동 캐시(약 1/20) · Gemini: 명시 캐시를 만들어 약 1/10"""
     provider, model = split_model_spec(model_spec)
     items = contents if isinstance(contents, list) else [contents]
     key = AI_KEYS.get(provider, "")
@@ -303,6 +303,10 @@ def llm_json(model_spec: str, contents, schema: Dict, temperature: float = 0.3, 
         raise RuntimeError(f"{AI_PROVIDERS.get(provider, provider)} API 키가 Secrets에 없습니다.")
 
     if provider == "openai":
+        # GPT-6.1은 바뀌는 글과 한 메시지에 섞으면 캐시가 전혀 안 됨 (2026-11-04 시험: 0토큰) → 같은 앞부분은 instructions로 따로
+        instructions = None
+        if cache_first and len(items) > 1 and isinstance(items[0], str):
+            instructions, items = items[0], items[1:]
         parts = []
         for it in items:
             if isinstance(it, AiFile):
@@ -314,7 +318,7 @@ def llm_json(model_spec: str, contents, schema: Dict, temperature: float = 0.3, 
             else:
                 parts.append({"type": "input_text", "text": str(it)})
         res = _openai_client(key).responses.create(
-            model=model, input=[{"role": "user", "content": parts}],
+            model=model, input=[{"role": "user", "content": parts}], **({"instructions": instructions} if instructions else {}),
             text={"format": {"type": "json_schema", "name": "result", "schema": schema, "strict": False}})
         u = getattr(res, "usage", None)
         if u:
@@ -2663,7 +2667,6 @@ def analyze_passage(label, text, model_name, target_type="victory", core_context
 아래의 [학교 실제 기출 출제 DNA]를 반영하여, 지문 속 내신 변형 1순위 어휘/숙어와 주제·요약문 패러프레이징 핵심 어휘를 총 15~22개 엄선해 JSON으로 반환하라.
 
 {dna_rules}
-{core_ref_str}
 
 [절대 준수 규칙]
 1. 초등 기초 단어 제외: be동사, 관사(a, an, the), 대명사, 단순 전치사, beautiful, happy, make, good 같은 기초 단어 제외.
@@ -2675,13 +2678,17 @@ def analyze_passage(label, text, model_name, target_type="victory", core_context
    - synonyms: 유의어/대체 표현 2~3개 (word, pronunciation, meaning 필수).
    - antonyms: 반의어 또는 철자 유사 혼동어 1~2개 (word, pronunciation, meaning 필수).
 
-지문 정보: {label}
+지문 정보: {label}{core_ref_str}
 지문: \"\"\"{text}\"\"\""""
         schema = SCHEMA_VOCA
 
+    # 지문 앞까지(규칙·출제 DNA·서술형 DNA)는 지문마다 똑같으므로 따로 보내 두 번째 지문부터 캐시로 읽게 함 (GPT·Claude·Gemini 모두)
+    #   Self-Note(anatomy)는 앞부분이 짧고 지문 이름이 앞에 있어 캐시 이득이 없음
+    cut = (prompt.find("지문 정보:") if "지문 정보:" in prompt else prompt.rfind('지문: """')) if target_type != "anatomy" else -1
+    contents = [prompt[:cut], prompt[cut:]] if cut > 0 else prompt
     for attempt in range(max_retries):
         try:
-            result = llm_json(model_name, prompt, schema, 0.3, gen_client)
+            result = llm_json(model_name, contents, schema, 0.3, gen_client, cache_first=cut > 0)
             bad_field = find_degenerate_text(result)
             if bad_field:
                 # 반복 오류 결과는 저장하지 않고 다시 생성
@@ -3913,17 +3920,17 @@ QB_FILE = os.path.join(BASE_DIR, "question_bank.json")   # Supabase가 없을 �
 GICHUL_FILE = os.path.join(BASE_DIR, "gichul_map.json")   # 실제 기출 시험지 문항 → 원문 라이브러리 지문 연결
 QB_LEVELS = ["최상", "상", "중", "하"]
 QB_SCHOOLS = ["운양고", "제일고"]
-# 문제 1개 생성 비용 대략 (원). 실측: Claude Opus 5.5 한 번 호출 = 입력 약 13,000토큰(그중 출제 DNA 등 12,000은 캐시) + 출력 약 2,000~2,500토큰
-#   Gemini 3.5 Flash 실측: 변형문제 376개에 출력 73만 토큰 → 문제당 약 27원
-#   2026-11-03 모델 비교 시험(아래 AI_MODEL_GUIDE)에서 잰 생성 비용 · 1달러 1,400원 · 정답 검증은 약 10~20% 더
-QB_COST_PER_Q = {"opus": 110, "fable": 250, "sonnet": 75, "haiku": 5,
-                 "gpt-6.1-sol": 42, "gpt-6.1-terra": 20, "gpt-6-luna": 3, "gpt-5-mini": 8, "gpt": 45,
-                 "3.8-flash": 17, "3.6-flash": 30, "3.5-flash-lite": 8, "3.1-flash-lite": 5, "2.5-flash-lite": 2, "2.5-flash": 8,
-                 "flash-lite": 8, "3.5-flash": 35, "flash": 35, "pro": 70}
+# 변형문제 비용 추정 (원, 1달러 1,400원): 작업 1건 = 고정(공통 규칙 약 6,800토큰은 캐시 + 지문·조건 약 1,400토큰) + 문제 수 × (출력 + 정답 검증)
+#   2026-11-04 GPT-6.1 Terra 165건(건당 2문제) 실제 $2.71과 맞춘 값 · 문제당 출력 토큰은 모델마다 실측 (Claude·Gemini는 생각 토큰 포함)
+QB_OUT_TOKENS = {"opus": 2300, "fable": 2300, "sonnet": 2200, "haiku": 900, "gpt": 750, "pro": 2500, "flash-lite": 1200, "flash": 1900}
 
-def qb_cost_per_q(model_spec: str) -> int:
+def qb_job_cost_krw(model_spec: str, n_q: int, verify: bool = True) -> float:
     name = split_model_spec(model_spec)[1].lower()
-    return next((v for k, v in QB_COST_PER_Q.items() if k in name), 30)
+    p_in, p_cache, p_out = ai_price(model_spec)
+    out = next((v for k, v in QB_OUT_TOKENS.items() if k in name), 1200)
+    fixed = 6800 * p_cache + 1400 * p_in + (400 * p_in if verify else 0)
+    per_q = out * p_out + ((600 * p_in + 50 * p_out) if verify else 0)
+    return (fixed + n_q * per_q) / 1_000_000 * 1400
 
 QB_SETUP_SQL = """create table if not exists public.question_bank (
   id uuid primary key default gen_random_uuid(),
@@ -5194,9 +5201,12 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
             st.caption("💡 어법 최상은 실제 내신처럼 '옳은/틀린 것만을 있는 대로 고른 것'(ⓐ~ⓗ 조합형)으로 만듭니다.")
         n_q = n_jobs * count
         if n_jobs:
-            per_combo = [light_model_for(text_model) if (light_easy and lv in ("하", "중")) else text_model for lv in levels]
-            cost = n_q * sum(qb_cost_per_q(m) for m in per_combo) / max(1, len(per_combo)) * (1.05 if verify else 1)
-            st.caption(f"📦 작업 {n_jobs}건 · 문제 약 {n_q}개 · 예상 비용 약 {cost:,.0f}원 · 예상 시간 약 {max(1, n_jobs * 40 // 60)}분 (창을 닫아도 서버에서 계속)")
+            combos = {("어법 (조합형)" if (t == "어법 (단일)" and lv == "최상") else t, lv) for t in q_types for lv in levels}
+            cost = len(sel) * sum(qb_job_cost_krw(light_model_for(text_model) if (light_easy and lv in ("하", "중")) else text_model, int(count), verify)
+                                  for _, lv in combos)
+            st.caption(f"📦 작업 {n_jobs}건 · 문제 약 {n_q}개 · 예상 비용 약 {cost:,.0f}원 (문제당 약 {cost / max(1, n_q):,.0f}원) · "
+                       f"예상 시간 약 {max(1, n_jobs * 40 // 60)}분 (창을 닫아도 서버에서 계속)")
+            st.caption("💡 조합당 문제 수를 늘리면 지문·규칙을 읽는 고정 비용을 함께 나눠 문제당 값이 내려가요 (1개 → 2개 → 3개로 갈수록 싸지고, 그 뒤로는 차이가 작아요).")
         if st.button("🚀 변형문제 생성 시작", type="primary", disabled=not n_jobs, key="qb_gen_btn"):
             n = enqueue_qbank([by_label[l] for l in sel], q_types, levels, school, int(count), verify, text_model, api_delay, academy_name, school_name, light_easy, underline)
             st.session_state.gen_flash = f"✅ 변형문제 {n}건을 생성 작업에 추가했습니다. 위 작업 칸에서 진행 상황을 볼 수 있어요."
