@@ -4346,6 +4346,10 @@ QB_UNDERLINE_OPTS = {"mix": "섞기 (학교 기출 비율)", "word": "단어·�
 QB_NOCOPY_TYPES = {"주제", "제목", "요지·주장", "내용 일치·불일치", "<보기> 일치 조합형", "요약문 (A)(B)", "함축 의미"}
 QB_NOCOPY_MARK = "지문 쓰기: passage에는 '원문' 두 글자만 쓴다"
 QB_POS_TYPES = {"어법 (단일)", "낱말 (문맥상)", "무관한 문장"}  # 지문 속 ①~⑤가 선택지인데 정답 자리를 고를 수 있는 유형
+# 함정형 문항 비율(난이도별)과 함정형 문항의 정답 번호 가중치 (③·④·⑤ = 45%·40%·15%) — 출제DNA 탭 현황판도 이 값을 그대로 보여 줌
+QB_TRAP_RATE = {"하": 0.0, "중": 0.4, "상": 0.65, "최상": 0.7}
+QB_TRAP_ANS_POS = [2, 3, 4]
+QB_TRAP_ANS_W = [0.45, 0.4, 0.15]
 
 def qb_question_plans(q_type: str, level: str, school: str, count: int, existing: List[Dict], underline: str = "mix", rnd=None) -> List[List[str]]:
     """문항마다 다르게 낼 출제 장치를 무작위로 정함 → [[계획 문장, ...], ...] (문항 수만큼)"""
@@ -4401,13 +4405,13 @@ def qb_question_plans(q_type: str, level: str, school: str, count: int, existing
     # 정답 번호와 함정 배치 (2026-11-04 측정: 실제 기출은 정답이 ①~⑤에 고르게, 원문 단어를 쓴 가장 그럴듯한 오답이 정답보다 앞 번호인 경우가 운양고 62%·제일고 50%.
     #   AI에 맡기면 정답이 ③에 몰리고(제일고 상 65%) ⑤는 거의 안 나와서 파이썬이 정해 줌)
     if q_type in QB_CHOICE_TYPES or q_type in QB_POS_TYPES:
-        trap_rate = {"하": 0.0, "중": 0.4, "상": 0.65, "최상": 0.7}.get(level, 0.5)
+        trap_rate = QB_TRAP_RATE.get(level, 0.5)
         used = []
         for i, pl in enumerate(plans):
             use_trap = q_type in QB_CHOICE_TYPES and rnd.random() < trap_rate
             if use_trap:
                 # 실제 내신 방식: 낚이는 선지를 앞(①·②)에, 정답은 뒤(③·④, 가끔 ⑤)에 완전히 다른 말로
-                pos = rnd.choices([2, 3, 4], weights=[0.45, 0.4, 0.15])[0]
+                pos = rnd.choices(QB_TRAP_ANS_POS, weights=QB_TRAP_ANS_W)[0]
             else:
                 # 함정 문항이 정답을 ③·④에 두므로, 나머지는 ①·②·⑤ 쪽으로 기울여 세트 전체 정답이 고르게
                 free = [p for p in range(5) if p not in used] or list(range(5))
@@ -5908,6 +5912,7 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
                 prog.progress(i / len(g_pdfs))
             gmap["exams"], gmap["updated_at"] = exams, time.strftime("%Y-%m-%d %H:%M")
             _store_put(supabase if IS_CLOUD_DB else None, GICHUL_FILE, gmap)
+            dna_board_exam_stats.clear()  # 출제DNA 탭 현황판 숫자 갱신 (보기용 캐시만 비움)
             st.success("✅ 기출 출처를 저장했습니다.")
             st.rerun()
         if gidx:
@@ -6808,6 +6813,8 @@ AI가 짝지은 원문과 내용 단어가 20%도 안 겹치면 잘못 연결된
 "dna": """
 ##### 🎯 출제DNA 학습기 — 학교 출제 스타일을 AI에게 가르치는 곳
 여기 저장된 **출제 DNA 규칙**은 교재·변형문제를 만들 때 AI에게 함께 전달돼요. 그래서 이 규칙이 좋을수록 '그 학교다운' 문제가 나와요.
+- 맨 위 **📊 현황판**: 학교별로 참고하는 기출 시험지 수, 실제 시험에 많이 나온 유형·어법 개념, 지문을 얼마나 바꾸는지, 그래서 문제를 어떻게 만드는지를 보여 줘요. 시험지를 더 올리면 바로 바뀌어요 (보기만 하는 화면이라 비용 없음).
+  - 시험지 수·유형 통계는 **🧩 변형문제 은행·시험지 → 🏫 기출 표시**에 올린 시험지에서, 학습 기록은 이 탭의 PDF 업로드에서 쌓여요.
 - **기출 PDF 업로드 → 🧠 출제DNA 추출 및 누적 적용** (비용 발생): AI가 주제·요약 패러프레이징 방식, 빈칸 어휘 수준, 어휘 함정 패턴을 분석해 규칙에 **덧붙여요**.
 - **규칙 글을 직접 고치고 💾 수동 저장**할 수도 있어요. 서술형 규칙은 따로 **💾 서술형 출제 DNA 저장**.
 - **🔄 운양고·제일고 기본값으로 초기화**: 지금까지 쌓은 규칙이 처음 상태로 돌아가요. **되돌릴 수 없어요.**
@@ -6820,6 +6827,150 @@ AI가 짝지은 원문과 내용 단어가 20%도 안 겹치면 잘못 연결된
 - 한 시험지 단어는 이어서 나오고, **다음 시험지부터 새 쪽**에서 시작해요.
 """,
 }
+
+# -----------------------------
+# 출제DNA 탭 현황판: 지금 참고하는 기출 시험지와 실제 출제 방식을 한눈에 (읽기 전용 · AI 호출 없음 · 프롬프트·캐시와 무관)
+#   숫자는 저장된 기출 시험지(gichul_map)·출제 DNA 기록과 출제 코드의 상수(QB_*)에서 그때그때 읽으므로 시험지를 더 올리면 바로 바뀜
+# -----------------------------
+DNA_BOARD_CSS = """<style>
+.dnab-card { border: 1px solid #cbd5e1; border-radius: 10px; padding: 14px 16px; background: #ffffff; color: #0f172a; margin-bottom: 10px; }
+.dnab-card h4 { margin: 0 0 8px; font-size: 16px; }
+.dnab-card h4.u { color: #0047AB; } .dnab-card h4.j { color: #b91c1c; }
+.dnab-sub { font-size: 12.5px; color: #475569; margin-bottom: 10px; line-height: 1.55; }
+.dnab-sec { font-size: 13px; font-weight: 800; margin: 12px 0 6px; color: #0f172a; }
+.dnab-bar { display: flex; align-items: center; gap: 8px; font-size: 12.5px; margin: 3px 0; }
+.dnab-bar .lb { width: 128px; flex-shrink: 0; color: #334155; }
+.dnab-bar .tr { flex: 1; background: #f1f5f9; border-radius: 4px; height: 12px; overflow: hidden; }
+.dnab-bar .fl { height: 100%; border-radius: 4px; }
+.dnab-bar .vl { width: 64px; text-align: right; color: #475569; flex-shrink: 0; }
+.dnab-li { font-size: 12.8px; line-height: 1.6; margin: 0; padding-left: 18px; color: #1e293b; }
+.dnab-li li { margin-bottom: 4px; }
+.dnab-tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; color: #0f172a; background: #ffffff; }
+.dnab-tbl th, .dnab-tbl td { border: 1px solid #cbd5e1; padding: 6px 8px; text-align: left; vertical-align: top; }
+.dnab-tbl th { background: #eef2ff; white-space: nowrap; }
+</style>"""
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def dna_board_exam_stats() -> Dict:
+    """저장된 실제 기출 시험지(변형문제 탭 '🏫 기출 표시'에 올린 것)를 학교별로 셈. 시험지를 더 올리면 그 자리에서 캐시를 비움"""
+    try:
+        exams = list((load_gichul_map().get("exams") or {}).values())
+    except Exception:
+        exams = []
+    out = {}
+    for sc in QB_SCHOOLS:
+        ex = [e for e in exams if e.get("school") == sc]
+        qs = [q for e in ex for q in e.get("questions", []) or []]
+        pts = [float(m.group()) for q in qs for m in [re.search(r"\d+(?:\.\d+)?", str(q.get("points", "")))] if m]
+        yrs = sorted({int(m.group(1)) for e in ex for m in [re.search(r"(\d{2})\s*년", str(e.get("exam_name", "")))] if m})
+        types = {}
+        for q in qs:
+            t = q.get("q_type") or "기타"
+            types[t] = types.get(t, 0) + 1
+        grades = {}
+        for e in ex:
+            grades[e.get("grade") or "?"] = grades.get(e.get("grade") or "?", 0) + 1
+        out[sc] = {"exams": len(ex), "questions": len(qs), "avg_pts": round(sum(pts) / len(pts), 2) if pts else 0,
+                   "years": (2000 + yrs[0], 2000 + yrs[-1]) if yrs else None, "types": sorted(types.items(), key=lambda x: -x[1]),
+                   "grades": dict(sorted(grades.items())),
+                   "list": sorted([(e.get("grade", ""), e.get("exam_name", ""), len(e.get("questions", []) or [])) for e in ex],
+                                  key=lambda x: (x[1], x[0]), reverse=True)}
+    return out
+
+
+def _dnab_bars(items, total, color, n=8):
+    rows = []
+    top = max([v for _, v in items[:n]] or [1])
+    for name, v in items[:n]:
+        pct = v / total * 100 if total else 0
+        rows.append(f"<div class='dnab-bar'><span class='lb'>{esc(name)}</span><span class='tr'><span class='fl' style='display:block;width:{v / top * 100:.0f}%;background:{color}'></span></span>"
+                    f"<span class='vl'>{pct:.0f}% ({v})</span></div>")
+    return "".join(rows)
+
+
+def render_dna_board():
+    stats = dna_board_exam_stats()
+    dna = st.session_state.get("exam_dna") or {}
+    hist = dna.get("history", []) or []
+    n_pdf = sum(str(h.get("title", "")).lower().count(".pdf") for h in hist)
+    n_base = 8 if any("기본 탑재" in str(h.get("title", "")) for h in hist) else 0
+    st.markdown(DNA_BOARD_CSS, unsafe_allow_html=True)
+    st.markdown("#### 📊 지금 참고하는 기출 시험지와 실제 출제 방식")
+    st.caption("저장된 기출 시험지와 출제 규칙을 그대로 읽어 보여 줍니다. 시험지를 더 올리면 이 숫자가 바로 바뀝니다. (보기만 하는 화면이라 AI 비용·토큰과 상관없어요)")
+
+    m = st.columns(4)
+    for col, sc in zip(m[:2], QB_SCHOOLS):
+        s_ = stats.get(sc, {})
+        yr = f"{s_['years'][0]}~{s_['years'][1]}년" if s_.get("years") else "-"
+        col.metric(f"🏫 {sc} 기출 시험지", f"{s_.get('exams', 0)}회분")
+        col.caption(f"{s_.get('questions', 0)}문항 · {yr}")
+    m[2].metric("🧠 출제 규칙 학습에 쓴 PDF", f"{n_base + n_pdf}개")
+    m[2].caption(f"기본 탑재 {n_base} + 업로드 {n_pdf}")
+    m[3].metric("🕒 출제 규칙 최근 업데이트", str(dna.get("updated_at", "-"))[:16])
+    m[3].caption(f"학습 기록 {len(hist)}건")
+
+    cols = st.columns(2)
+    for col, sc, cls, color in zip(cols, QB_SCHOOLS, ["u", "j"], ["#0047AB", "#b91c1c"]):
+        s_ = stats.get(sc, {})
+        grades = " · ".join(f"{g} {n}회" for g, n in (s_.get("grades") or {}).items())
+        gfreq = sorted(QB_GRAMMAR_FREQ.get(sc, {}).items(), key=lambda x: -x[1])
+        m_tot = re.search(r"(\d+)개 선택지", QB_GRAMMAR_DNA.get(sc, ""))  # 전수 정리한 선택지 수 (개념 목록 합보다 큼)
+        g_total = int(m_tot.group(1)) if m_tot else sum(v for _, v in gfreq)
+        rate = QB_SENTENCE_RATE.get(sc, {})
+        if sc == "운양고":
+            how = [
+                "지문 본문은 원문 표현을 약 90% 이상 그대로 둡니다. 삽입은 '주어진 문장'만, 선택지·<보기>는 전부 다른 말로 바꿔 씁니다.",
+                "주제·제목·요지·빈칸 같은 선택지 문제는 절반 정도에 '지문 핵심어를 그대로 쓰면서 결론을 뒤집은 오답' 1개를 넣습니다(하 난이도 제외).",
+                f"어법은 'ⓐ~ⓖ 중 있는 대로 고르기' 조합형 위주. 밑줄을 문장 단위로 긋는 비율 — 단일 {rate.get('어법 (단일)', 0):.0%} · 조합형 {rate.get('어법 (조합형)', 0):.0%}.",
+                "빈칸은 원문을 그대로 두고 비울 어구만 정해, 프로그램이 원문에 빈칸을 뚫습니다.",
+            ]
+        else:
+            how = [
+                "지문 본문도 원문 표현을 약 60~85%만 남기고 다시 씁니다. 상·최상은 문항의 약 25%를 지문 전체 재진술로 만듭니다.",
+                "순서(상·최상)는 절반 정도를 주어진 글·덩어리를 새로 써서 원문 순서와 달라지게 만듭니다.",
+                "선택지 문제는 '결론을 뒤집은 오답'을 상·최상에서 1~2개 넣고, 선택지는 길고 학술적인 상위 개념어로 씁니다.",
+                f"어법은 ①~⑤ 단일형과 문장 단위 밑줄이 많습니다. 문장 단위 비율 — 단일 {rate.get('어법 (단일)', 0):.0%} · 조합형 {rate.get('어법 (조합형)', 0):.0%}.",
+            ]
+        measure = "".join(f"<tr><td>{t}</td><td>{(u if sc == '운양고' else j)}</td></tr>" for t, u, j in QB_PASSAGE_MEASURE)
+        col.markdown(f"""<div class='dnab-card'>
+<h4 class='{cls}'>{sc}</h4>
+<div class='dnab-sub'>{esc(grades) or '아직 올린 시험지가 없어요'} · 평균 배점 {s_.get('avg_pts', 0)}점<br>{esc(QB_SCHOOL_STYLE.get(sc, ''))}</div>
+<div class='dnab-sec'>실제 시험에 많이 나온 유형 (전체 {s_.get('questions', 0)}문항 중)</div>
+{_dnab_bars([t for t in s_.get('types', []) if t[0] != '기타'], s_.get('questions', 0), color)}
+<div class='dnab-sec'>어법 선택지에서 많이 물은 개념 (선택지 {g_total}개 중)</div>
+{_dnab_bars(gfreq, g_total, color, 6)}
+<div class='dnab-sec'>지문을 원문에서 얼마나 바꾸나 (원문 표현이 남은 비율)</div>
+<table class='dnab-tbl'><tr><th>유형</th><th>원문 표현 유지</th></tr>{measure}</table>
+<div class='dnab-sec'>그래서 {sc} 스타일 문제는 이렇게 만듭니다</div>
+<ul class='dnab-li'>{''.join(f'<li>{esc(x)}</li>' for x in how)}</ul>
+</div>""", unsafe_allow_html=True)
+
+    lv_rows = "".join(
+        f"<tr><td><b>{lv}</b></td><td>{QB_TRAP_RATE.get(lv, 0):.0%}</td><td>{esc(QB_LEVEL_RULES.get(lv, ''))}</td></tr>" for lv in QB_LEVELS)
+    pos_txt = " · ".join(f"{CIRCLED[p]} {w:.0%}" for p, w in zip(QB_TRAP_ANS_POS, QB_TRAP_ANS_W))
+    st.markdown(f"""<div class='dnab-card'>
+<h4>두 학교 공통 — 난이도별로 이렇게 만듭니다</h4>
+<table class='dnab-tbl'><tr><th>난이도</th><th>함정형 문항 비율<br><span style='font-weight:400'>(선택지 유형)</span></th><th>난이도 기준</th></tr>{lv_rows}</table>
+<ul class='dnab-li' style='margin-top:10px'>
+<li><b>함정형 문항</b>: 지문 단어를 그대로 많이 쓴 '낚는 선지'를 앞 번호(①·②)에 두고, 정답은 지문 단어를 거의 쓰지 않은 다른 말로 뒤에 둡니다. 정답 번호 — {pos_txt}.</li>
+<li><b>나머지 문항</b>은 정답을 ①·②·⑤ 쪽으로 조금 더 보내서, 시험지 전체로 보면 정답 번호가 고르게 나오게 합니다.</li>
+<li><b>선택지·&lt;보기&gt;·요약문 문장</b>은 난이도와 상관없이 원문 문장을 그대로 옮기지 않고 모두 다른 말로 씁니다(실제 기출에서 원문 표현이 0~6%만 남음).</li>
+<li>문제를 만든 뒤 <b>정답을 한 번 더 따로 풀어 보고</b>, 맞지 않으면 버립니다.</li>
+</ul></div>""", unsafe_allow_html=True)
+
+    with st.expander(f"📚 누적된 기출 시험지 목록 (운양고 {stats.get('운양고', {}).get('exams', 0)} · 제일고 {stats.get('제일고', {}).get('exams', 0)}회분) · 출제 규칙 학습 기록 {len(hist)}건"):
+        lc = st.columns(2)
+        for col, sc in zip(lc, QB_SCHOOLS):
+            rows = "".join(f"<tr><td>{esc(g)}</td><td>{esc(nm)}</td><td>{n}문항</td></tr>" for g, nm, n in stats.get(sc, {}).get("list", []))
+            col.markdown(f"<div class='dnab-sec'>{sc}</div><table class='dnab-tbl'><tr><th>학년</th><th>시험</th><th>문항</th></tr>{rows}</table>", unsafe_allow_html=True)
+        st.markdown("<div class='dnab-sec'>출제 규칙 학습 기록 (최근 것 먼저)</div>", unsafe_allow_html=True)
+        for h_idx, h_item in enumerate(reversed(hist), start=1):
+            with st.container(border=True):
+                st.markdown(f"**{h_idx}. {h_item.get('title', '기출 분석')}**")
+                st.caption(h_item.get("summary", ""))
+        st.caption("시험지 목록·유형 통계는 '🧩 변형문제 은행·시험지' 탭 → '🏫 기출 표시'에 올린 시험지에서, 출제 규칙 학습 기록은 아래 '기출 PDF 업로드'에서 쌓입니다.")
+
 
 def render_help(key: str, title: str = "❓ 이 탭 사용법"):
     with st.expander(title, expanded=False):
@@ -7065,9 +7216,12 @@ with tab5:
 with tab6:
     render_help("dna")
     st.markdown("### 🎯 학교별 기출 시험지 PDF 출제DNA 분석 & 누적 학습기")
+    render_dna_board()
+    st.divider()
+    st.markdown("#### ➕ 기출 시험지 PDF로 출제 규칙 더 학습시키기")
     st.info(
-        "💡 **운양고(고1·2·3) 7개 시험지 및 제일고(고2) 1개 시험지의 출제 DNA가 기본 탑재**되어 있습니다. "
-        "앞으로 새로운 시험지 PDF를 이곳에 업로드하면 AI가 해당 시험지의 **주제·요약문 패러프레이징 방식, 빈칸 타겟 어휘 수준, 어휘 추론 함정 패턴**을 분석해 클라우드 DB에 영구 누적시킵니다."
+        "💡 새 시험지 PDF를 올리면 AI가 **주제·요약문 패러프레이징 방식, 빈칸 타겟 어휘 수준, 어휘 추론 함정 패턴**을 분석해 출제 규칙에 덧붙이고 클라우드 DB에 영구 누적합니다. "
+        "문항 유형·배점 통계와 '기출 이력'은 '🧩 변형문제 은행·시험지' 탭 → '🏫 기출 표시'에 시험지를 올려야 쌓여요."
     )
 
     col_dna1, col_dna2 = st.columns([1.2, 1.8])
@@ -7123,11 +7277,7 @@ with tab6:
                 except Exception as e:
                     st.error(f"❌ PDF 분석 중 오류 발생: {e}")
 
-        st.markdown("#### 📚 누적 학습된 기출 히스토리")
-        for h_idx, h_item in enumerate(reversed(st.session_state.exam_dna.get("history", [])), start=1):
-            with st.container(border=True):
-                st.markdown(f"**{h_idx}. {h_item.get('title', '기출 분석')}**")
-                st.caption(h_item.get("summary", ""))
+        st.caption("학습 기록은 위 '📚 누적된 기출 시험지 목록'을 펼치면 볼 수 있어요.")
 
     with col_dna2:
         st.markdown(f"#### 🧬 현재 활성화된 출제 DNA 프롬프트 규칙 (최근 업데이트: `{st.session_state.exam_dna.get('updated_at', '')}`)")
