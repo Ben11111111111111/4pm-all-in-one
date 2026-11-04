@@ -123,6 +123,11 @@ def _openai_client(api_key: str):
     return OpenAI(api_key=api_key)
 
 @functools.lru_cache(maxsize=4)
+def _gemini_batch_client(api_key: str):
+    """반값 모드용 Gemini 연결 (한 번 만든 것을 계속 씀 — 그때그때 만들면 요청 중에 닫혀 버림)"""
+    return genai.Client(api_key=api_key)
+
+@functools.lru_cache(maxsize=4)
 def _anthropic_client(api_key: str):
     import anthropic  # 쓸 때만 불러옴
     return anthropic.Anthropic(api_key=api_key)
@@ -192,11 +197,14 @@ def ai_price(model: str):
     m = str(model).lower()
     return next((t[1:] for t in AI_PRICES if t[0] in m), AI_PRICE_DEFAULT)
 
+BATCH_TAG = " (batch)"  # 반값 모드로 쓴 사용량은 모델 이름 뒤에 이 표시를 붙여 따로 기록 (금액 절반으로 계산)
+
 def ai_cost_usd(model: str, inp: int, cached: int, write: int, out: int) -> float:
-    """inp는 캐시 읽기·쓰기를 포함한 전체 입력. Claude 캐시 쓰기는 입력 단가의 1.25배"""
+    """inp는 캐시 읽기·쓰기를 포함한 전체 입력. Claude 캐시 쓰기는 입력 단가의 1.25배 · 반값 모드(Batch API)는 모두 절반"""
     p_in, p_cache, p_out = ai_price(model)
     plain = max(0, inp - cached - write)
-    return (plain * p_in + cached * p_cache + write * p_in * 1.25 + out * p_out) / 1_000_000
+    usd = (plain * p_in + cached * p_cache + write * p_in * 1.25 + out * p_out) / 1_000_000
+    return usd * 0.5 if BATCH_TAG in str(model) else usd
 
 @st.cache_resource
 def _usage_buffer() -> Dict:
@@ -369,6 +377,101 @@ def llm_json(model_spec: str, contents, schema: Dict, temperature: float = 0.3, 
     if u:
         _log_usage(provider, model, u.prompt_token_count, u.cached_content_token_count, (u.candidates_token_count or 0) + (u.thoughts_token_count or 0))
     return json.loads(res.text.strip())
+
+# ---- 반값 모드: 각 회사 Batch API (급하지 않은 요청을 모아 보내면 모든 토큰 50% 할인, 결과는 보통 몇 분~몇 시간 · 길면 24시간) ----
+#   요청은 모두 [같은 앞부분, 바뀌는 글] 두 조각의 글. 캐시 방식은 llm_json과 같게 (GPT instructions · Claude cache_control)
+def llm_batch_submit(model_spec: str, reqs: List, schema: Dict, temperature: float = 0.3) -> str:
+    """reqs: [(custom_id, (앞부분, 바뀌는 글)), ...] → 회사 쪽 batch id"""
+    provider, model = split_model_spec(model_spec)
+    key = AI_KEYS.get(provider, "")
+    if not key:
+        raise RuntimeError(f"{AI_PROVIDERS.get(provider, provider)} API 키가 Secrets에 없습니다.")
+    if provider == "openai":
+        lines = [json.dumps({"custom_id": cid, "method": "POST", "url": "/v1/responses", "body": {
+            "model": model, "instructions": first, "input": [{"role": "user", "content": [{"type": "input_text", "text": rest}]}],
+            "text": {"format": {"type": "json_schema", "name": "result", "schema": schema, "strict": False}}}}, ensure_ascii=False)
+            for cid, (first, rest) in reqs]
+        oc = _openai_client(key)
+        f = oc.files.create(file=("batch.jsonl", "\n".join(lines).encode("utf-8")), purpose="batch")
+        return oc.batches.create(input_file_id=f.id, endpoint="/v1/responses", completion_window="24h").id
+    if provider == "anthropic":
+        sch = _schema_closed(schema)
+        return _anthropic_client(key).messages.batches.create(requests=[{"custom_id": cid, "params": {
+            "model": model, "max_tokens": 64000,
+            "messages": [{"role": "user", "content": [{"type": "text", "text": first, "cache_control": {"type": "ephemeral"}}, {"type": "text", "text": rest}]}],
+            "output_config": {"format": {"type": "json_schema", "schema": sch}}}} for cid, (first, rest) in reqs]).id
+    # Gemini 반값 모드는 response_json_schema를 무시함 (2026-11-04 시험: 형식이 다른 목록으로 옴) → response_schema로 보냄
+    src = [{"contents": [{"role": "user", "parts": [{"text": first}, {"text": rest}]}], "metadata": {"key": cid},
+            "config": {"temperature": temperature, "response_mime_type": "application/json", "response_schema": schema}}
+           for cid, (first, rest) in reqs]
+    return _gemini_batch_client(key).batches.create(model=model, src=src, config={"display_name": "4pm-batch"}).name
+
+def _oai_body_text(body: Dict) -> str:
+    for o in body.get("output") or []:
+        if o.get("type") == "message":
+            for c in o.get("content") or []:
+                if c.get("type") == "output_text":
+                    return c.get("text", "")
+    return ""
+
+def _json_or_none(text):
+    try:
+        return json.loads(str(text or "").strip())
+    except Exception:
+        return None
+
+def llm_batch_collect(model_spec: str, batch_id: str, ids: List[str], log_usage: bool = True) -> (bool, Dict, str):
+    """→ (끝났는지, {custom_id: 답 dict 또는 None}, 상태 설명). 끝나지 않았으면 회사에 상태만 한 번 물어봄 (가벼움)"""
+    provider, model = split_model_spec(model_spec)
+    key = AI_KEYS.get(provider, "")
+    tag, out = model + BATCH_TAG, {}
+    if provider == "openai":
+        oc = _openai_client(key)
+        b = oc.batches.retrieve(batch_id)
+        if b.status in ("validating", "in_progress", "finalizing", "cancelling"):
+            return False, {}, b.status
+        if b.output_file_id:
+            for line in oc.files.content(b.output_file_id).text.splitlines():
+                r = _json_or_none(line)
+                if not r:
+                    continue
+                body = (r.get("response") or {}).get("body") or {}
+                u = body.get("usage") or {}
+                if u and log_usage:
+                    _log_usage(provider, tag, u.get("input_tokens"), (u.get("input_tokens_details") or {}).get("cached_tokens"), u.get("output_tokens"))
+                out[r.get("custom_id")] = _json_or_none(_oai_body_text(body))
+        return True, out, b.status
+    if provider == "anthropic":
+        ac = _anthropic_client(key)
+        b = ac.messages.batches.retrieve(batch_id)
+        if b.processing_status != "ended":
+            return False, {}, b.processing_status
+        for r in ac.messages.batches.results(batch_id):
+            if r.result.type != "succeeded":
+                out[r.custom_id] = None
+                continue
+            msg = r.result.message
+            u = msg.usage
+            if log_usage:
+                _log_usage(provider, tag, (u.input_tokens or 0) + (u.cache_read_input_tokens or 0) + (u.cache_creation_input_tokens or 0),
+                           u.cache_read_input_tokens, u.output_tokens, u.cache_creation_input_tokens)
+            out[r.custom_id] = _json_or_none(next((x.text for x in msg.content if x.type == "text"), "")) if msg.stop_reason != "max_tokens" else None
+        return True, out, "ended"
+    j = _gemini_batch_client(key).batches.get(name=batch_id)
+    state = getattr(j.state, "name", str(j.state))
+    if state not in ("JOB_STATE_SUCCEEDED", "JOB_STATE_FAILED", "JOB_STATE_CANCELLED", "JOB_STATE_EXPIRED", "JOB_STATE_PARTIALLY_SUCCEEDED"):
+        return False, {}, state
+    for i, r in enumerate((j.dest.inlined_responses if j.dest else None) or []):
+        cid = (r.metadata or {}).get("key") or (ids[i] if i < len(ids) else "")
+        res = r.response
+        u = getattr(res, "usage_metadata", None) if res else None
+        if u and log_usage:
+            _log_usage(provider, tag, u.prompt_token_count, u.cached_content_token_count, (u.candidates_token_count or 0) + (u.thoughts_token_count or 0))
+        try:
+            out[cid] = _json_or_none(res.text) if res else None
+        except Exception:
+            out[cid] = None
+    return True, out, state
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def list_ai_models(provider: str) -> List[str]:
@@ -3690,6 +3793,7 @@ def gen_worker_main(api_key: str, sb_url: str, sb_key: str):
     my_id = str(uuid.uuid4())
     def claim(j):
         j["worker"] = {"id": my_id, "ts": time.time()}
+    last_poll = 0.0
     while True:
         try:
             job = _store_get(sb, GEN_JOB_FILE) or {}
@@ -3703,7 +3807,24 @@ def gen_worker_main(api_key: str, sb_url: str, sb_key: str):
                 if lease.get("id") == my_id:
                     _job_update(sb, lambda j: j.update(worker=None))
                 return
-            pending = [it for it in job.get("items", []) if it.get("state") == "pending"]
+            all_items = job.get("items", [])
+            sb_factory = (lambda: create_client(sb_url, sb_key)) if sb is not None else (lambda: None)
+            # 반값 모드: 새로 들어온 건은 모아서 한 번에 제출 → 'waiting'. 결과는 몇 분마다 확인해서 들어온 것부터 검증·저장
+            fresh = [it for it in all_items if it.get("state") == "pending" and it.get("batch") and it.get("kind") == "qbank"]
+            if fresh:
+                qb_batch_submit(sb, fresh[:QB_BATCH_MAX], job.get("opts", {}), dna_rules, essay_rules, claim)
+                continue
+            pending = [it for it in all_items if it.get("state") == "pending"]
+            waiting = [it for it in all_items if it.get("state") == "waiting"]
+            if waiting and time.time() - last_poll > (QB_BATCH_POLL_SEC if not pending else QB_BATCH_POLL_BUSY_SEC):
+                last_poll = time.time()
+                qb_batch_poll(sb, gclient, job, claim)
+                flush_ai_usage()
+                continue
+            if not pending and waiting:
+                _job_update(sb, claim)  # 다른 서버가 넘겨받지 않게 담당 표시만 새로 고침
+                time.sleep(max(5, QB_BATCH_POLL_SEC - (time.time() - last_poll)))
+                continue
             if not pending:
                 _job_update(sb, lambda j: (j.update(status="done", current="", worker=None), _job_log(j, "🎉 모든 작업을 마쳤습니다.")))
                 return
@@ -3776,7 +3897,7 @@ def enqueue_generation(rows: List[Dict], types_list: List[str], text_model: str,
             # 끝났거나 멈춘 작업에 새로 추가하면 남은 지문과 함께 다시 시작
             job["status"] = "running"
             job.setdefault("items", [])
-            job["items"] = [it for it in job["items"] if it.get("state") in ("pending", "failed")]
+            job["items"] = [it for it in job["items"] if it.get("state") in ("pending", "failed", "waiting")]
             job["created_at"] = time.time()
             job["worker"] = None
         job["opts"] = {"model": text_model, "api_delay": api_delay, "academy_name": academy_name, "school_name": school_name}
@@ -3805,7 +3926,7 @@ def reload_libraries_from_db():
 
 def _gen_job_counts(job: Dict) -> Dict:
     items = job.get("items", [])
-    return {s: sum(1 for it in items if it.get("state") == s) for s in ("pending", "done", "failed")} | {"total": len(items)}
+    return {s: sum(1 for it in items if it.get("state") == s) for s in ("pending", "done", "failed", "waiting")} | {"total": len(items)}
 
 def _render_gen_job_body(job: Dict):
     c = _gen_job_counts(job)
@@ -3817,8 +3938,11 @@ def _render_gen_job_body(job: Dict):
         "done": "✅ 완료",
     }.get(status, status)
     finished = c["done"] + c["failed"]
+    if status == "running" and c["waiting"] and not c["pending"]:
+        status_text = "🟢 반값 모드 결과 기다리는 중 · 보통 몇 분~몇 시간, 길면 24시간 · 서버가 2분마다 확인해서 들어온 것부터 저장해요"
     st.markdown(f"**⚙️ 교재 생성 작업** — {status_text}")
-    st.progress(finished / max(1, c["total"]), text=f"{finished}/{c['total']} 지문 처리 · 실패 {c['failed']}개 · 남음 {c['pending']}개")
+    st.progress(finished / max(1, c["total"]), text=f"{finished}/{c['total']} 지문 처리 · 실패 {c['failed']}개 · 남음 {c['pending']}개"
+                + (f" · 💸 반값 결과 대기 {c['waiting']}개" if c["waiting"] else ""))
     if job.get("current"):
         st.caption(f"⏳ 지금 처리 중: {job['current']}" + (f" · 🤖 {ai_model_label(job['current_model'])}" if job.get("current_model") else ""))
     elif job.get("opts", {}).get("model") and status in ("running", "stopping"):
@@ -3846,7 +3970,7 @@ def _render_gen_job_body(job: Dict):
         if b1.button("⏸️ 생성 중단 (지금 지문 끝내고 멈춤)", use_container_width=True, key="gen_stop"):
             _job_update(supabase if IS_CLOUD_DB else None, lambda j: (j.update(status="stopping"), _job_log(j, "⏸️ 중단 요청 — 지금 지문을 끝낸 뒤 멈춥니다.")))
             st.rerun()
-    elif status in ("stopped", "stopping") and c["pending"]:
+    elif status in ("stopped", "stopping") and (c["pending"] or c["waiting"]):
         if b1.button("▶️ 다시 시작", type="primary", use_container_width=True, key="gen_resume"):
             _job_update(supabase if IS_CLOUD_DB else None,
                         lambda j: (use_model(j, cur_model) if cur_model and cur_model != job_model else None, j.update(status="running"), _job_log(j, "▶️ 다시 시작")))
@@ -3866,7 +3990,8 @@ def _render_gen_job_body(job: Dict):
     if b3.button("🔄 교재 목록 새로고침", use_container_width=True, key="gen_reload_libs"):
         reload_libraries_from_db()
         st.rerun()
-    if status in ("done", "stopped") and b4.button("🧹 작업 기록 지우기", use_container_width=True, key="gen_clear"):
+    if status in ("done", "stopped") and b4.button("🧹 작업 기록 지우기", use_container_width=True, key="gen_clear", disabled=bool(c["waiting"]),
+                                                   help="반값 결과를 기다리는 작업이 있으면 지울 수 없어요 (지우면 이미 낸 비용의 결과를 못 받아요)" if c["waiting"] else None):
         _store_put(supabase if IS_CLOUD_DB else None, GEN_JOB_FILE, {})
         st.rerun()
 
@@ -3876,9 +4001,7 @@ def _render_gen_job_body(job: Dict):
             st.caption(f"❌ {it['label']} — {it.get('error', '')}")
         st.code("\n".join(reversed(job.get("log", [])[-30:])) or "기록 없음", language=None)
 
-@st.fragment(run_every=5)
-def render_gen_job_live():
-    """작업이 진행 중일 때만 5초마다 상태를 새로 읽어 보여줌"""
+def _gen_job_live_body(slow: bool):
     job = load_gen_job()
     c = _gen_job_counts(job)
     # 지문이 완료될 때마다 화면의 교재 목록을 DB에서 다시 불러와, 화면이 오래된 목록으로 덮어쓰지 않게 함
@@ -3891,8 +4014,18 @@ def render_gen_job_live():
     if job.get("status") in ("running", "stopping") and not gen_thread_alive():
         start_gen_thread()  # 서버가 재시작된 경우 자동으로 이어서 진행
     _render_gen_job_body(job)
-    if job.get("status") not in ("running", "stopping"):
-        st.rerun()  # 끝나면 자동 새로고침을 멈추고 일반 화면으로
+    if job.get("status") not in ("running", "stopping") or slow != bool(c["waiting"] and not c["pending"]):
+        st.rerun()  # 끝나면 자동 새로고침을 멈추고 일반 화면으로 (반값 결과만 기다릴 때는 느린 새로고침으로 바꿈)
+
+@st.fragment(run_every=5)
+def render_gen_job_live():
+    """작업이 진행 중일 때만 5초마다 상태를 새로 읽어 보여줌"""
+    _gen_job_live_body(False)
+
+@st.fragment(run_every=60)
+def render_gen_job_slow():
+    """반값 결과만 기다릴 때는 1분마다만 읽음 (몇 시간 걸릴 수 있어서 DB 읽기를 줄임)"""
+    _gen_job_live_body(True)
 
 def render_gen_job_panel():
     flash = st.session_state.pop("gen_flash", None)
@@ -3902,8 +4035,9 @@ def render_gen_job_panel():
     if not job.get("items"):
         return
     with st.container(border=True):
+        c = _gen_job_counts(job)
         if job.get("status") in ("running", "stopping"):
-            render_gen_job_live()
+            (render_gen_job_slow if c["waiting"] and not c["pending"] else render_gen_job_live)()
         else:
             _render_gen_job_body(job)
 
@@ -3924,13 +4058,14 @@ QB_SCHOOLS = ["운양고", "제일고"]
 #   2026-11-04 GPT-6.1 Terra 165건(건당 2문제) 실제 $2.71과 맞춘 값 · 문제당 출력 토큰은 모델마다 실측 (Claude·Gemini는 생각 토큰 포함)
 QB_OUT_TOKENS = {"opus": 2300, "fable": 2300, "sonnet": 2200, "haiku": 900, "gpt": 750, "pro": 2500, "flash-lite": 1200, "flash": 1900}
 
-def qb_job_cost_krw(model_spec: str, n_q: int, verify: bool = True) -> float:
+def qb_job_cost_krw(model_spec: str, n_q: int, verify: bool = True, batch: bool = False) -> float:
+    """batch: 반값 모드 (생성만 절반, 정답 검증은 결과가 들어온 뒤 바로 하므로 그대로)"""
     name = split_model_spec(model_spec)[1].lower()
     p_in, p_cache, p_out = ai_price(model_spec)
     out = next((v for k, v in QB_OUT_TOKENS.items() if k in name), 1200)
-    fixed = 6800 * p_cache + 1400 * p_in + (400 * p_in if verify else 0)
-    per_q = out * p_out + ((600 * p_in + 50 * p_out) if verify else 0)
-    return (fixed + n_q * per_q) / 1_000_000 * 1400
+    gen = 6800 * p_cache + 1400 * p_in + n_q * out * p_out
+    ver = (400 * p_in + n_q * (600 * p_in + 50 * p_out)) if verify else 0
+    return (gen * (0.5 if batch else 1) + ver) / 1_000_000 * 1400
 
 QB_SETUP_SQL = """create table if not exists public.question_bank (
   id uuid primary key default gen_random_uuid(),
@@ -4060,6 +4195,11 @@ QB_GRAMMAR_RE = {"수일치": r"수\s*일치", "분사·분사구문": r"분사"
 QB_SENTENCE_RATE = {"운양고": {"어법 (단일)": 0.25, "어법 (조합형)": 0.3, "서술형 (어법 수정)": 0.2},
                     "제일고": {"어법 (단일)": 0.5, "어법 (조합형)": 0.35, "서술형 (어법 수정)": 0.5}}
 QB_UNDERLINE_OPTS = {"mix": "섞기 (학교 기출 비율)", "word": "단어·구", "sentence": "문장 전체"}
+# 지문을 바꾸지 않는 유형은 AI가 지문을 다시 베껴 쓰지 않게 하고 프로그램이 원문을 넣음 (2026-11-04 측정: 이 유형들은 지문의 90~98%가 원문 그대로,
+#   출력 토큰의 40~54%가 지문 베끼기였음). 함축은 밑줄 어구, 운양고 빈칸은 비울 어구만 받아 프로그램이 표시
+QB_NOCOPY_TYPES = {"주제", "제목", "요지·주장", "내용 일치·불일치", "<보기> 일치 조합형", "요약문 (A)(B)", "함축 의미"}
+QB_NOCOPY_MARK = "지문 쓰기: passage에는 '원문' 두 글자만 쓴다"
+QB_POS_TYPES = {"어법 (단일)", "낱말 (문맥상)", "무관한 문장"}  # 지문 속 ①~⑤가 선택지인데 정답 자리를 고를 수 있는 유형
 
 def qb_question_plans(q_type: str, level: str, school: str, count: int, existing: List[Dict], underline: str = "mix", rnd=None) -> List[List[str]]:
     """문항마다 다르게 낼 출제 장치를 무작위로 정함 → [[계획 문장, ...], ...] (문항 수만큼)"""
@@ -4112,7 +4252,71 @@ def qb_question_plans(q_type: str, level: str, school: str, count: int, existing
                 n = 1 if (level != "하" and rnd.random() < 0.5) else 0
             if n:
                 pl.append(QB_OPPOSITE_TRAP.format(n=n))
+    # 정답 번호와 함정 배치 (2026-11-04 측정: 실제 기출은 정답이 ①~⑤에 고르게, 원문 단어를 쓴 가장 그럴듯한 오답이 정답보다 앞 번호인 경우가 운양고 62%·제일고 50%.
+    #   AI에 맡기면 정답이 ③에 몰리고(제일고 상 65%) ⑤는 거의 안 나와서 파이썬이 정해 줌)
+    if q_type in QB_CHOICE_TYPES or q_type in QB_POS_TYPES:
+        trap_rate = {"하": 0.0, "중": 0.4, "상": 0.65, "최상": 0.7}.get(level, 0.5)
+        used = []
+        for i, pl in enumerate(plans):
+            use_trap = q_type in QB_CHOICE_TYPES and rnd.random() < trap_rate
+            if use_trap:
+                # 실제 내신 방식: 낚이는 선지를 앞(①·②)에, 정답은 뒤(③·④, 가끔 ⑤)에 완전히 다른 말로
+                pos = rnd.choices([2, 3, 4], weights=[0.45, 0.4, 0.15])[0]
+            else:
+                # 함정 문항이 정답을 ③·④에 두므로, 나머지는 ①·②·⑤ 쪽으로 기울여 세트 전체 정답이 고르게
+                free = [p for p in range(5) if p not in used] or list(range(5))
+                pos = rnd.choices(free, weights=[2 if p in (0, 1, 4) else 1 for p in free])[0]
+            used.append(pos)
+            if q_type in QB_CHOICE_TYPES:
+                line = f"정답 번호: {CIRCLED[pos]} (choices에서 정답을 {pos + 1}번째에 둔다)"
+                if use_trap:
+                    tp = rnd.choice([t for t in (0, 1) if t < pos])
+                    line += (f". 함정 배치(실제 내신 방식): {CIRCLED[tp]}에는 지문의 핵심 단어·표현을 그대로 여러 개 가져와 언뜻 정답처럼 보이지만 "
+                             f"범위·초점·논리(주장 뒤집기·부분만 맞음 등)가 어긋난 '낚는 선지'를 둔다. 정답 {CIRCLED[pos]}는 지문 단어를 거의 쓰지 않고 "
+                             f"완전히 다른 말(상위 개념어·동의어·구조 변경)로 재진술해서, 지문 단어가 보이는 {CIRCLED[tp]}보다 덜 정답처럼 보이게 한다. "
+                             f"앞에서부터 읽던 학생이 {CIRCLED[tp]}에서 멈추고 고르게 만드는 것이 목표다")
+            else:
+                line = f"정답 번호: {CIRCLED[pos]} (지문 속 ①~⑤ 중 {CIRCLED[pos]} 자리가 정답이 되게 만든다)"
+            pl.append(line)
+    if q_type in QB_NOCOPY_TYPES or (q_type == "빈칸" and school == "운양고"):
+        for pl in plans:
+            if any(x.startswith("지문 전면 재진술") for x in pl):
+                continue  # 지문을 새로 쓰는 문항은 지금처럼 전부 씀
+            if q_type == "함축 의미":
+                pl.append(QB_NOCOPY_MARK + "(프로그램이 원문 지문을 넣음). target에 밑줄 칠 비유적 어구를 원문에서 글자 하나 다르지 않게 그대로 옮겨 적는다(프로그램이 그 어구에 밑줄을 그음).")
+            elif q_type == "빈칸":
+                pl.append(QB_NOCOPY_MARK + "(프로그램이 원문 지문을 넣음). target에 빈칸으로 비울 원문 어구를 원문에서 글자 하나 다르지 않게 그대로 옮겨 적는다(프로그램이 그 자리를 __________로 바꿈).")
+            else:
+                pl.append(QB_NOCOPY_MARK + " — 프로그램이 원문 지문을 그대로 넣으므로 지문을 옮겨 쓰지 않는다. target은 빈 문자열.")
     return plans
+
+def _qb_find_span(body: str, target: str):
+    """원문에서 target 어구 위치 (띄어쓰기·대소문자 차이는 봐줌) → (시작, 끝) 또는 None"""
+    t = re.sub(r"<[^>]+>", "", str(target or "")).strip().strip("\"'“”‘’")
+    if len(t) < 2:
+        return None
+    i = body.find(t)
+    if i >= 0:
+        return i, i + len(t)
+    m = re.search(r"\s+".join(re.escape(w) for w in t.split()), body, re.I)
+    return m.span() if m else None
+
+def qb_fill_passage(q: Dict, q_type: str, text: str, plan: List[str]) -> bool:
+    """'원문'만 써 온 지문을 원문으로 채움 (함축은 밑줄, 빈칸은 빈칸 표시). 어구를 원문에서 못 찾으면 False(그 문항은 버림)"""
+    tgt = q.pop("target", "")
+    if not any(str(x).startswith(QB_NOCOPY_MARK) for x in plan or []):
+        return True
+    if len(re.sub(r"\s+", "", str(q.get("passage", "")))) > 60:
+        return True  # AI가 그래도 지문을 써 왔으면 그대로 씀
+    body = str(text or "").strip()
+    if q_type in ("함축 의미", "빈칸"):
+        span = _qb_find_span(body, tgt)
+        if not span:
+            return False
+        a, b = span
+        body = body[:a] + (f"<u>{body[a:b]}</u>" if q_type == "함축 의미" else "__________") + body[b:]
+    q["passage"] = body
+    return True
 
 # 어법 조합형은 난이도마다 밑줄 개수·틀린 개수·묻는 방향을 따로 정함 (최상은 실제 내신처럼 '있는 대로 고른 것')
 # 실제 운양고(29회)·제일고(25회) 기출 어법 선택지 전수 정리(PQRS영쌤 '어법·어휘 출제 총정리')에서 뽑은 개념별 빈도와 함정 패턴
@@ -4158,11 +4362,12 @@ SCHEMA_QBANK = {
         "stem": {"type": "string", "description": "발문"},
         "given": {"type": "string", "description": "주어진 글·문장 (순서·삽입 유형), 없으면 빈 문자열"},
         "passage": {"type": "string", "description": "문제용으로 표시한 지문. 단락은 줄바꿈"},
+        "target": {"type": "string", "description": "[문항별 출제 계획]에서 쓰라고 한 경우만: 밑줄·빈칸으로 바꿀 원문 어구(글자 그대로). 아니면 빈 문자열"},
         "box": {"type": "string", "description": "<보기>·요약문·<조건> 박스 내용, 없으면 빈 문자열"},
         "choices": {"type": "array", "items": {"type": "string"}, "description": "선택지 5개 (번호 기호 없이), 서술형은 빈 배열"},
         "answer": {"type": "string", "description": "객관식은 ①~⑤ 중 하나, 서술형은 모범 답안"},
         "explanation": {"type": "array", "items": {"type": "string"}, "description": "한국어 해설 2~4줄"},
-    }, "required": ["focus", "stem", "given", "passage", "box", "choices", "answer", "explanation"]}}},
+    }, "required": ["focus", "stem", "given", "passage", "target", "box", "choices", "answer", "explanation"]}}},
     "required": ["questions"],
 }
 SCHEMA_QB_SOLVE = {
@@ -4199,9 +4404,9 @@ def _qb_clean_dna(text: str) -> str:
     """출제 DNA 앞에 실수로 붙어 저장된 JSON 스키마 덩어리는 빼고 보냄 (토큰만 먹고 쓸모없음)"""
     return re.sub(r"^\s*\{[\s\S]*?\n\}\s*\n", "", str(text or "")).strip()
 
-def qb_generate(gclient, model: str, label: str, text: str, q_type: str, level: str, school: str, count: int,
-                avoid: List[str], dna_rules: str, essay_rules: str, logs: List[str], existing: List[Dict] = None, underline: str = "mix") -> List[Dict]:
-    """변형문제 count개 생성 (형식이 맞지 않는 문항은 버림)
+def qb_build_prompt(label: str, text: str, q_type: str, level: str, school: str, count: int,
+                    avoid: List[str], dna_rules: str, essay_rules: str, existing: List[Dict] = None, underline: str = "mix"):
+    """→ (공통 앞부분, 이번 출제 부분, 문항별 계획)
     프롬프트 앞부분(출제 DNA + 공통 규칙)은 모든 호출에서 글자 하나까지 같게 두어 캐시로 읽히게 하고,
     학교·유형·난이도·지문처럼 호출마다 다른 내용은 뒤에 붙임"""
     avoid_str = ""
@@ -4251,9 +4456,26 @@ def qb_generate(gclient, model: str, label: str, text: str, q_type: str, level: 
 
 지문 정보: {label}
 지문: \"\"\"{text}\"\"\""""
+    return shared, task, plans
+
+def qb_generate(gclient, model: str, label: str, text: str, q_type: str, level: str, school: str, count: int,
+                avoid: List[str], dna_rules: str, essay_rules: str, logs: List[str], existing: List[Dict] = None, underline: str = "mix") -> List[Dict]:
+    """변형문제 count개 생성 (형식이 맞지 않는 문항은 버림)"""
+    shared, task, plans = qb_build_prompt(label, text, q_type, level, school, count, avoid, dna_rules, essay_rules, existing, underline)
     out = _qb_call(gclient, model, [shared, task], SCHEMA_QBANK, 0.7, logs, f"{label} {q_type} {level} 생성", cache_first=True)
+    return qb_parse(out, q_type, count, plans, text)
+
+def qb_parse(out, q_type: str, count: int, plans: List[List[str]], text: str) -> List[Dict]:
+    """AI 답에서 형식이 맞는 문항만 골라 냄 ('원문'만 써 온 지문은 원문으로 채움)"""
     good = []
-    for qi, q in enumerate((out or {}).get("questions", [])[:count]):
+    if not isinstance(out, dict):
+        return good  # 형식이 다른 답 (예: 목록) → 이 건은 실패로
+    for qi, q in enumerate((out.get("questions") or [])[:count]):
+        if not isinstance(q, dict):
+            continue
+        plan = plans[qi] if qi < len(plans) else []
+        if not qb_fill_passage(q, q_type, text, plan):
+            continue
         if find_degenerate_text(q):
             continue
         if q_type in QB_ESSAY_TYPES:
@@ -4369,6 +4591,11 @@ def _generate_qbank_item(sb_factory, gclient, item: Dict, opts: Dict, dna_rules:
             time.sleep(GEN_RETRY_WAITS[round_idx])
     if not questions:
         return False, "변형문제 생성 실패"
+    return qb_save_questions(sb, gclient, model, item, questions, logs)
+
+def qb_save_questions(sb, gclient, model: str, item: Dict, questions: List[Dict], logs: List[str]) -> (bool, str):
+    """정답 검증 → 통과한 문제만 문제 표에 저장"""
+    label, q_type, level, school = item["passage_label"], item["q_type"], item["difficulty"], item.get("school", "운양고")
     checks = qb_verify(gclient, model, item["text"], questions, logs) if item.get("verify", True) else [True] * len(questions)
     rows = []
     for q, ok in zip(questions, checks):
@@ -4384,8 +4611,104 @@ def _generate_qbank_item(sb_factory, gclient, item: Dict, opts: Dict, dna_rules:
     logs.append(f"✅ 변형문제 {len(rows)}개 저장: {item['label']}" + (f" (정답 검증 탈락 {dropped}개)" if dropped else ""))
     return True, ""
 
+# ---- 반값 모드 작업 처리 (서버 스레드에서) ----
+QB_BATCH_MAX = 300           # 한 번에 묶어 내는 최대 건수
+QB_BATCH_POLL_SEC = 120      # 반값 결과만 기다릴 때 확인 간격
+QB_BATCH_POLL_BUSY_SEC = 600 # 일반 작업을 하는 중일 때 확인 간격
+QB_BATCH_GIVEUP_SEC = 30 * 3600  # 이만큼 지나도 안 끝나면 실패로 (회사 약속은 24시간)
+
+def qb_batch_submit(sb, items: List[Dict], opts: Dict, dna_rules: str, essay_rules: str, claim):
+    """반값 모드 건들의 프롬프트를 만들어 모델별로 한 번에 제출 → 'waiting'. 제출이 안 되면 그 건들은 일반 모드로 바로 생성"""
+    groups, upd, new_batches, notes = {}, {}, [], []
+    for it in items:
+        try:
+            existing = [r for r in qb_fetch(sb, [it["passage_label"]], "q_type,content") if r.get("q_type") == it["q_type"]]
+            avoid = [str((r.get("content") or {}).get("focus", "")) for r in existing if (r.get("content") or {}).get("focus")]
+            shared, task, plans = qb_build_prompt(it["passage_label"], it["text"], it["q_type"], it["difficulty"], it.get("school", "운양고"),
+                                                  int(it.get("count", 2)), avoid, dna_rules, essay_rules, existing, it.get("underline", "mix"))
+            groups.setdefault(job_item_model(it, opts), []).append((it, shared, task, plans))
+        except Exception as e:
+            upd[it["id"]] = {"batch": False}
+            notes.append(f"⚠️ 반값 모드 준비 실패 → 일반 모드로: {it['label']} ({str(e)[:80]})")
+    for m, lst in groups.items():
+        try:
+            bid = llm_batch_submit(m, [(it["id"], (shared, task)) for it, shared, task, _ in lst], SCHEMA_QBANK, 0.7)
+            new_batches.append({"id": bid, "model": m, "ts": time.time(), "n": len(lst)})
+            for it, _, _, plans in lst:
+                upd[it["id"]] = {"state": "waiting", "batch_id": bid, "batch_model": m, "plans": plans}
+            notes.append(f"💸 반값 모드로 {len(lst)}건 제출 · {ai_model_label(m)} (보통 몇 분~몇 시간, 길면 24시간)")
+        except Exception as e:
+            for it, *_ in lst:
+                upd[it["id"]] = {"batch": False}
+            notes.append(f"⚠️ 반값 모드 제출 실패 → {len(lst)}건 일반 모드로 바로 생성 ({str(e)[:120]})")
+
+    def apply(j):
+        for it in j.get("items", []):
+            if it.get("id") in upd and it.get("state") == "pending":
+                it.update(upd[it["id"]])
+        j.setdefault("batches", []).extend(new_batches)
+        for n in notes:
+            _job_log(j, n)
+        claim(j)
+    _job_update(sb, apply)
+
+def qb_batch_poll(sb, gclient, job: Dict, claim):
+    """기다리는 반값 묶음마다 끝났는지 확인 → 끝난 묶음은 결과를 받아 건마다 정답 검증·저장"""
+    waiting = [it for it in job.get("items", []) if it.get("state") == "waiting"]
+    by_batch = {}
+    for it in waiting:
+        by_batch.setdefault(it.get("batch_id", ""), []).append(it)
+    recs = {b.get("id"): b for b in job.get("batches", [])}
+    for bid, its in by_batch.items():
+        rec = recs.get(bid, {})
+        model = its[0].get("batch_model") or rec.get("model", "")
+        try:
+            finished, res, note = llm_batch_collect(model, bid, [it["id"] for it in its], log_usage=not rec.get("logged"))
+        except Exception as e:
+            _job_update(sb, lambda j, e=e: (_job_log(j, f"⚠️ 반값 결과 확인 실패 (다음에 다시): {str(e)[:120]}"), claim(j)))
+            continue
+        if not finished:
+            if time.time() - float(rec.get("ts", time.time())) < QB_BATCH_GIVEUP_SEC:
+                continue
+            res, note = {}, "30시간이 지나도 끝나지 않음"
+
+        def mark_logged(j, bid=bid):
+            for b in j.get("batches", []):
+                if b.get("id") == bid:
+                    b["logged"] = True
+            claim(j)
+        _job_update(sb, mark_logged)
+        for it in its:
+            logs = []
+            out = res.get(it["id"])
+            try:
+                qs = qb_parse(out, it["q_type"], int(it.get("count", 2)), it.get("plans") or [], it["text"]) if out else []
+                ok, err = qb_save_questions(sb, gclient, it.get("batch_model") or model, it, qs, logs) if qs else \
+                    (False, f"반값 모드 결과가 없거나 형식이 맞지 않음 ({note})")
+            except Exception as e:
+                ok, err = False, f"반값 결과 처리 중 오류: {str(e)[:150]}"
+
+            def finish(j, it=it, ok=ok, err=err, logs=logs):
+                for x in j.get("items", []):
+                    if x.get("id") == it["id"] and x.get("state") == "waiting":
+                        x["state"], x["error"] = ("done" if ok else "failed"), err
+                        for k in ("batch_id", "plans"):
+                            x.pop(k, None)
+                for m in logs[-4:]:
+                    _job_log(j, f"{m} · 💸 반값" if m.startswith("✅") else m)
+                if not ok:
+                    _job_log(j, f"❌ {it['label']}: {err} (나중에 '실패한 지문 다시 시도'로 재시도할 수 있어요)")
+                claim(j)
+            _job_update(sb, finish)
+
+        def drop(j, bid=bid):
+            if not any(x.get("state") == "waiting" and x.get("batch_id") == bid for x in j.get("items", [])):
+                j["batches"] = [b for b in j.get("batches", []) if b.get("id") != bid]
+        _job_update(sb, drop)
+
 def enqueue_qbank(passages: List[Dict], q_types: List[str], levels: List[str], school: str, count: int, verify: bool,
-                  text_model: str, api_delay: int, academy_name: str, school_name: str, light_easy: bool = False, underline: str = "mix") -> int:
+                  text_model: str, api_delay: int, academy_name: str, school_name: str, light_easy: bool = False, underline: str = "mix",
+                  batch: bool = False) -> int:
     """지문 × 유형 × 난이도 조합마다 작업 1건씩 추가 (light_easy: 하·중은 같은 제공사의 가벼운 모델로)"""
     sb = supabase if IS_CLOUD_DB else None
     added = {"n": 0}
@@ -4393,7 +4716,7 @@ def enqueue_qbank(passages: List[Dict], q_types: List[str], levels: List[str], s
     def add(job):
         if job.get("status") not in ("running", "stopping"):
             job["status"] = "running"
-            job["items"] = [it for it in job.get("items", []) if it.get("state") in ("pending", "failed")]
+            job["items"] = [it for it in job.get("items", []) if it.get("state") in ("pending", "failed", "waiting")]
             job["created_at"] = time.time()
             job["worker"] = None
         old_model = (job.get("opts") or {}).get("model", "")
@@ -4410,9 +4733,9 @@ def enqueue_qbank(passages: List[Dict], q_types: List[str], levels: List[str], s
                                      "passage_label": p["label"], "exam_key": p.get("exam_key", ""), "number": str(p.get("number", "")),
                                      "text": p.get("body_text", ""), "q_type": t, "difficulty": lv, "school": school,
                                      "count": count, "verify": verify, "state": "pending", "error": "",
-                                     "light": bool(light_easy and lv in ("하", "중")), "underline": underline})
+                                     "light": bool(light_easy and lv in ("하", "중")), "underline": underline, "batch": bool(batch)})
                 added["n"] += 1
-        _job_log(job, f"➕ 변형문제 {added['n']}건 추가 ({school} · {', '.join(levels)} · 건당 {count}문제)")
+        _job_log(job, f"➕ 변형문제 {added['n']}건 추가 ({school} · {', '.join(levels)} · 건당 {count}문제{' · 💸 반값 모드' if batch else ''})")
     _job_update(sb, add)
     start_gen_thread()
     return added["n"]
@@ -5196,19 +5519,24 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
                                                               help="섞기: 학교 기출처럼 단어·구 밑줄과 문장 전체 밑줄을 문항마다 무작위로 섞어요") or "mix"
             light_easy = _qb_row("비용").checkbox(f"하·중은 가벼운 모델로 ({light_model_for(text_model).split(':')[-1]}) · 상·최상은 지금 모델({split_model_spec(text_model)[1]})",
                                                  value=True, key="qb_gen_light", disabled=light_model_for(text_model) == text_model)
+            batch = _qb_row("반값 모드").toggle("💸 반값 모드 — 생성 비용 절반, 대신 결과가 보통 몇 분~몇 시간, 길면 24시간 뒤에 들어와요 (급할 때는 끄세요)",
+                                              value=False, key="qb_gen_batch",
+                                              help="각 AI 회사의 Batch API를 써요. 요청을 모아 보내 두면 회사가 한가할 때 처리하고 값을 50% 깎아 줘요. "
+                                                   "정답 검증은 결과가 들어온 뒤 바로 해요(검증 값은 그대로). 창을 닫아도 서버가 2분마다 확인해서 들어온 것부터 저장해요.")
         n_jobs = len(sel) * len({("어법 (조합형)" if (t == "어법 (단일)" and lv == "최상") else t, lv) for t in q_types for lv in levels})
         if "어법 (단일)" in q_types and "최상" in levels:
             st.caption("💡 어법 최상은 실제 내신처럼 '옳은/틀린 것만을 있는 대로 고른 것'(ⓐ~ⓗ 조합형)으로 만듭니다.")
         n_q = n_jobs * count
         if n_jobs:
             combos = {("어법 (조합형)" if (t == "어법 (단일)" and lv == "최상") else t, lv) for t in q_types for lv in levels}
-            cost = len(sel) * sum(qb_job_cost_krw(light_model_for(text_model) if (light_easy and lv in ("하", "중")) else text_model, int(count), verify)
+            cost = len(sel) * sum(qb_job_cost_krw(light_model_for(text_model) if (light_easy and lv in ("하", "중")) else text_model, int(count), verify, batch)
                                   for _, lv in combos)
-            st.caption(f"📦 작업 {n_jobs}건 · 문제 약 {n_q}개 · 예상 비용 약 {cost:,.0f}원 (문제당 약 {cost / max(1, n_q):,.0f}원) · "
-                       f"예상 시간 약 {max(1, n_jobs * 40 // 60)}분 (창을 닫아도 서버에서 계속)")
+            when = "결과는 보통 몇 분~몇 시간, 길면 24시간 뒤" if batch else f"예상 시간 약 {max(1, n_jobs * 40 // 60)}분"
+            st.caption(f"📦 작업 {n_jobs}건 · 문제 약 {n_q}개 · 예상 비용 약 {cost:,.0f}원 (문제당 약 {cost / max(1, n_q):,.0f}원){' · 💸 반값' if batch else ''} · "
+                       f"{when} (창을 닫아도 서버에서 계속)")
             st.caption("💡 조합당 문제 수를 늘리면 지문·규칙을 읽는 고정 비용을 함께 나눠 문제당 값이 내려가요 (1개 → 2개 → 3개로 갈수록 싸지고, 그 뒤로는 차이가 작아요).")
         if st.button("🚀 변형문제 생성 시작", type="primary", disabled=not n_jobs, key="qb_gen_btn"):
-            n = enqueue_qbank([by_label[l] for l in sel], q_types, levels, school, int(count), verify, text_model, api_delay, academy_name, school_name, light_easy, underline)
+            n = enqueue_qbank([by_label[l] for l in sel], q_types, levels, school, int(count), verify, text_model, api_delay, academy_name, school_name, light_easy, underline, batch)
             st.session_state.gen_flash = f"✅ 변형문제 {n}건을 생성 작업에 추가했습니다. 위 작업 칸에서 진행 상황을 볼 수 있어요."
             st.rerun()
 
@@ -6293,10 +6621,12 @@ APP_HELP = {
 - **학교 스타일**: 운양고 / 제일고 중 어느 학교 출제 방식으로 만들지 정해요 (🎯 출제DNA가 반영돼요).
 - **정답 검증**: AI가 만든 문제를 한 번 더 풀어 보고, 정답이 다르면 버려요 (비용 약 10~20% 추가, 품질↑).
 - **하·중은 가벼운 모델로**: 쉬운 문제는 싼 모델로, 상·최상은 지금 모델로 만들어 비용을 줄여요.
+- **💸 반값 모드**: 켜면 생성 비용이 절반이에요. 대신 결과가 바로 안 나오고 보통 몇 분~몇 시간, 길면 24시간 뒤에 들어와요. 급할 때는 끄고, 시간이 있을 때(예: 밤에 넣어 두고 다음 날) 켜세요. 창을 닫아도 서버가 2분마다 확인해서 들어온 것부터 저장해요.
 - 같은 지문을 다시 만들면 이미 쌓인 문제와 **다른 포인트**로 출제해요.
 - **어법 밑줄**: 섞기(학교 기출 비율로 단어·구 밑줄과 문장 전체 밑줄을 무작위로) / 단어·구 / 문장 전체.
 - **문항마다 출제 장치를 무작위로 정해요** (AI 비용 추가 없음): 어법은 실제 기출 개념 약 20가지 중 2~3개를 '꼭 묻기'로 뽑되 이 지문에서 이미 물은 개념은 덜 뽑혀요.
   영어 선택지·<보기>·요약문은 두 학교 모두 늘 재진술하고, 주제를 뒤집은 오답(제일고 1~2개, 운양고 가끔)을 넣어요.
+  정답 번호도 프로그램이 ①~⑤에 고르게 정해요. 상·최상은 실제 내신처럼 지문 단어를 그대로 쓴 '낚는 선지'를 ①·②에, 완전히 다른 말로 바꾼 정답을 ③·④(가끔 ⑤)에 둬요.
   제일고 상·최상은 순서 문제의 덩어리를 새로 써서 원문과 다른 순서로 만들거나, 지문 전체를 다시 쓰기도 해요.
 
 **📄 시험지 만들기 — 무료**
