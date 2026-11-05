@@ -3936,6 +3936,7 @@ def gen_worker_main(api_key: str, sb_url: str, sb_key: str):
     dna = _store_get(sb, DNA_FILE, {}) or {}
     dna_rules = dna.get("rules_text") or DEFAULT_EXAM_DNA["rules_text"]
     essay_rules = dna.get("essay_rules_text", "")
+    yt_points = qb_yt_points(dna)
     # PC 앱과 배포된 앱이 동시에 열려 있어도 한 곳에서만 처리하도록 '작업 담당자'를 기록 (20분 동안 소식 없으면 넘겨받음)
     my_id = str(uuid.uuid4())
     def claim(j):
@@ -3959,7 +3960,7 @@ def gen_worker_main(api_key: str, sb_url: str, sb_key: str):
             # 반값 모드: 새로 들어온 건은 모아서 한 번에 제출 → 'waiting'. 결과는 몇 분마다 확인해서 들어온 것부터 검증·저장
             fresh = [it for it in all_items if it.get("state") == "pending" and it.get("batch") and it.get("kind") == "qbank"]
             if fresh:
-                qb_batch_submit(sb, fresh[:QB_BATCH_MAX], job.get("opts", {}), dna_rules, essay_rules, claim)
+                qb_batch_submit(sb, fresh[:QB_BATCH_MAX], job.get("opts", {}), dna_rules, essay_rules, claim, yt_points)
                 continue
             pending = [it for it in all_items if it.get("state") == "pending"]
             waiting = [it for it in all_items if it.get("state") == "waiting"]
@@ -3982,7 +3983,7 @@ def gen_worker_main(api_key: str, sb_url: str, sb_key: str):
             try:
                 sb_factory = (lambda: create_client(sb_url, sb_key)) if sb is not None else (lambda: None)
                 if item.get("kind") == "qbank":
-                    ok, err = _generate_qbank_item(sb_factory, gclient, item, job.get("opts", {}), dna_rules, essay_rules, logs)
+                    ok, err = _generate_qbank_item(sb_factory, gclient, item, job.get("opts", {}), dna_rules, essay_rules, logs, yt_points)
                 else:
                     ok, err = _generate_item(sb_factory, gclient, item, {**job.get("opts", {}), "essay_rules": essay_rules}, dna_rules, logs,
                                              heartbeat=lambda: _job_update(sb, claim))
@@ -4756,8 +4757,93 @@ def _qb_clean_dna(text: str) -> str:
     """출제 DNA 앞에 실수로 붙어 저장된 JSON 스키마 덩어리는 빼고 보냄 (토큰만 먹고 쓸모없음)"""
     return re.sub(r"^\s*\{[\s\S]*?\n\}\s*\n", "", str(text or "")).strip()
 
+# ---- 영쌤 출제 포인트: 선생님이 계속 덧붙이는 '낚시' 출제 방식 (학교와 관계없이 적용) ----
+#   출제 DNA 문서(exam_dna_rules)의 'yt_points' 목록에 저장. 이번 출제 부분(문항별 계획)에만 넣어서 공통 앞부분 캐시는 그대로.
+QB_YT_SCOPES = {
+    "전체 유형": None,
+    "선택지형 (주제·제목·요지·일치·빈칸·요약·추론)": QB_CHOICE_TYPES,
+    "일치·추론 (내용 일치·<보기>·추론)": {"내용 일치·불일치", "<보기> 일치 조합형", "추론 (추론 가능·불가)"},
+    "주제·제목·요지": {"주제", "제목", "요지·주장"},
+    "빈칸·요약문": {"빈칸", "요약문 (A)(B)"},
+    "순서": {"순서"},
+    "삽입": {"삽입"},
+    "어법·낱말": QB_GRAMMAR_TYPES | {"낱말 (문맥상)"},
+}
+QB_YT_RATE = 0.5          # 평소: 문항마다 이 확률로 영쌤 포인트 하나 적용 ('영쌤 포인트 위주'를 켜면 모든 문항)
+QB_YT_UNIT_MAX = 3000     # 교과서 같은 단원 다른 단락을 붙일 때 최대 글자 수
+DEFAULT_YT_POINTS = [
+    {"on": True, "scope": "선택지형 (주제·제목·요지·일치·빈칸·요약·추론)", "tb": False,
+     "text": "①·② 선지는 본문에 나온 단어·구문을 그대로 많이 써서 정답처럼 보이게 만든 오답(비슷하게 생긴 단어로 살짝 바꾸거나 범위·논리를 어긋나게). "
+             "정답은 ③·④·⑤ 중에 두고 본문 단어를 거의 안 쓴 완전한 패러프레이즈로 써서, 본문 문장을 외운 학생이 앞 번호의 익숙한 구문을 고르고 정답을 놓치게 한다. "
+             "(예: 정답 we're influenced by sheer convenience → 낚는 선지 we are influenced by sheer coincidence)"},
+    {"on": True, "scope": "선택지형 (주제·제목·요지·일치·빈칸·요약·추론)", "tb": False,
+     "text": "선지 문장은 거의 다 본문 내용과 일치하고 단어도 본문 단어를 쓰되, 문장 후반부의 어려운 패러프레이즈 단어 하나만 뜻이 틀리게 바꿔 놓는다. "
+             "앞부분만 보고 맞다고 판단한 학생이 일치·불일치나 주제·요지에서 헷갈리게 한다."},
+    {"on": True, "scope": "순서", "tb": False,
+     "text": "학생은 본문을 외워서 글의 마지막 부분(숫자, 마지막 문장이 끝나는 방식)을 기억하고, 그 내용이 있는 덩어리를 맨 끝으로 보내는 식으로 푼다. "
+             "이를 역이용해 본문 내용을 논리적으로 약간 고치거나 내용을 덧붙여서, 기억 속 마지막 덩어리가 정답 순서에서는 끝이 아니게 만든다(정답은 지시어·논리로만 확정)."},
+    {"on": True, "scope": "일치·추론 (내용 일치·<보기>·추론)", "tb": True,
+     "text": "교과서 지문: 같은 단원의 다른 단락에는 있지만 이번 문제 지문(단락)에는 없는 내용으로 선지를 하나 만든다. "
+             "교과서 전체를 공부한 학생이 '본 내용'이라 맞다고 고르게 하는 오답(지문에 없으므로 일치하지 않음/추론 불가)."},
+    {"on": True, "scope": "어법·낱말", "tb": False,
+     "text": "'있는 대로 고른 것' 조합형이면: 선지 하나는 정답 조합에 하나를 더 얹은 것으로 둔다(예: 정답 ⓐ, ⓓ, ⓔ / 오답 선지 ⓐ, ⓒ, ⓓ, ⓔ). "
+             "아는 것 몇 개만으로는 못 풀고 밑줄 하나하나를 모두 정확히 판단해야 풀리게 한다."},
+    {"on": True, "scope": "어법·낱말", "tb": False,
+     "text": "어법 함정 장치(이 중 지문에 맞는 것을 골라 씀): 전치사+관계대명사에서 전치사를 절 뒤로 보내기(the house in which he lives → the house which he lives in, "
+             "또는 전치사를 빼서 틀리게), enough 어순(old enough to ↔ enough old to), 후치수식해야 할 형용사(구)를 명사 앞에 두기(something important → important something, "
+             "a box full of toys → a full of toys box), supply A with B의 A·B 자리 바꾸기(supply them with food ↔ supply food with them, provide·present·furnish도 같음)."},
+]
+
+def qb_yt_points(dna: Dict = None) -> List[Dict]:
+    """저장된 영쌤 출제 포인트 (처음이면 기본 4개)"""
+    dna = dna if dna is not None else (st.session_state.get("exam_dna") or {})
+    pts = dna.get("yt_points")
+    return [dict(p) for p in (DEFAULT_YT_POINTS if pts is None else pts) if str(p.get("text", "")).strip()]
+
+def qb_yt_applicable(points: List[Dict], q_type: str, textbook: bool) -> List[Dict]:
+    out = []
+    for p in points or []:
+        scope = QB_YT_SCOPES.get(p.get("scope"), None) if p.get("scope") in QB_YT_SCOPES else None
+        if p.get("on", True) and (scope is None or q_type in scope) and (textbook or not p.get("tb")):
+            out.append(p)
+    return out
+
+def qb_unit_other(p: Dict, lib: List[Dict]) -> str:
+    """교과서 지문이면 같은 단원 다른 단락 원문 (영쌤 포인트 '교과서만' 용)"""
+    parts = set(qb_link_parts(p.get("label", ""))[1]) | {p.get("label", "")}
+    ek = p.get("exam_key", "")
+    out, n = [], 0
+    for x in lib:
+        if x.get("source_type") == "textbook" and ek and x.get("exam_key") == ek and x.get("label") not in parts and x.get("body_text"):
+            s = f"[{x['label']}] {str(x['body_text']).strip()}"
+            if n + len(s) > QB_YT_UNIT_MAX:
+                s = s[:max(0, QB_YT_UNIT_MAX - n)]
+            out.append(s)
+            n += len(s)
+            if n >= QB_YT_UNIT_MAX:
+                break
+    return "\n".join(out)
+
+def qb_yt_plans(plans: List[List[str]], points: List[Dict], focus: bool, rnd=None) -> bool:
+    """문항별 계획에 영쌤 포인트를 하나씩 넣음 (문항마다 다른 포인트부터) → 하나라도 넣었으면 True"""
+    if not points:
+        return False
+    rnd = rnd or random.Random()
+    order = list(range(len(points)))
+    rnd.shuffle(order)
+    used = False
+    k = 0
+    for pl in plans:
+        if focus or rnd.random() < QB_YT_RATE:
+            p = points[order[k % len(order)]]
+            k += 1
+            pl.append("영쌤 출제 포인트(선생님 지시 · 최우선 — 위 계획의 정답 번호 등과 부딪히면 이 포인트를 따름): " + str(p["text"]).strip())
+            used = True
+    return used
+
 def qb_build_prompt(label: str, text: str, q_type: str, level: str, school: str, count: int,
-                    avoid: List[str], dna_rules: str, essay_rules: str, existing: List[Dict] = None, underline: str = "mix"):
+                    avoid: List[str], dna_rules: str, essay_rules: str, existing: List[Dict] = None, underline: str = "mix",
+                    yt_points: List[Dict] = None, yt_focus: bool = False, unit_other: str = ""):
     """→ (공통 앞부분, 이번 출제 부분, 문항별 계획)
     프롬프트 앞부분(출제 DNA + 공통 규칙)은 모든 호출에서 글자 하나까지 같게 두어 캐시로 읽히게 하고,
     학교·유형·난이도·지문처럼 호출마다 다른 내용은 뒤에 붙임"""
@@ -4773,6 +4859,11 @@ def qb_build_prompt(label: str, text: str, q_type: str, level: str, school: str,
         extra += f"\n[선택지 재진술 — 실제 기출 측정]\n- {QB_CHOICE_PARA}\n"
     extra += qb_link_note(label, text)
     plans = qb_question_plans(q_type, level, school, count, existing or [], underline)
+    yt = qb_yt_applicable(yt_points, q_type, bool(unit_other)) if level != "하" else []
+    if qb_yt_plans(plans, yt, yt_focus) and unit_other and any("영쌤 출제 포인트" in x and p.get("tb") and str(p["text"]).strip() in x
+                                                             for pl in plans for x in pl for p in yt):
+        extra += ("\n[같은 단원의 다른 단락 — 문제 지문이 아님. 영쌤 포인트(교과서)의 '이번 지문에는 없는 내용' 선지를 만들 때만 참고]\n"
+                  + unit_other + "\n")
     if any(plans):
         extra += "\n[문항별 출제 계획 — 문항마다 다르게, 반드시 따름]\n" + "\n".join(
             f"- 문항 {i}: " + " / ".join(pl) for i, pl in enumerate(plans, 1) if pl) + "\n"
@@ -4812,9 +4903,11 @@ def qb_build_prompt(label: str, text: str, q_type: str, level: str, school: str,
     return shared, task, plans
 
 def qb_generate(gclient, model: str, label: str, text: str, q_type: str, level: str, school: str, count: int,
-                avoid: List[str], dna_rules: str, essay_rules: str, logs: List[str], existing: List[Dict] = None, underline: str = "mix") -> List[Dict]:
+                avoid: List[str], dna_rules: str, essay_rules: str, logs: List[str], existing: List[Dict] = None, underline: str = "mix",
+                yt_points: List[Dict] = None, yt_focus: bool = False, unit_other: str = "") -> List[Dict]:
     """변형문제 count개 생성 (형식이 맞지 않는 문항은 버림)"""
-    shared, task, plans = qb_build_prompt(label, text, q_type, level, school, count, avoid, dna_rules, essay_rules, existing, underline)
+    shared, task, plans = qb_build_prompt(label, text, q_type, level, school, count, avoid, dna_rules, essay_rules, existing, underline,
+                                          yt_points, yt_focus, unit_other)
     out = _qb_call(gclient, model, [shared, task], SCHEMA_QBANK, 0.7, logs, f"{label} {q_type} {level} 생성", cache_first=True)
     return qb_parse(out, q_type, count, plans, text)
 
@@ -4940,7 +5033,8 @@ def qb_delete(sb, ids: List[str]):
     with open(QB_FILE, "w", encoding="utf-8") as f:
         json.dump([r for r in _qb_local_load() if r.get("id") not in drop], f, ensure_ascii=False)
 
-def _generate_qbank_item(sb_factory, gclient, item: Dict, opts: Dict, dna_rules: str, essay_rules: str, logs: List[str]) -> (bool, str):
+def _generate_qbank_item(sb_factory, gclient, item: Dict, opts: Dict, dna_rules: str, essay_rules: str, logs: List[str],
+                         yt_points: List[Dict] = None) -> (bool, str):
     """작업 목록의 변형문제 1건(지문·유형·난이도) 생성 → 정답 검증 → 문제 표에 저장"""
     sb = sb_factory()
     label, q_type, level, school = item["passage_label"], item["q_type"], item["difficulty"], item.get("school", "운양고")
@@ -4952,7 +5046,7 @@ def _generate_qbank_item(sb_factory, gclient, item: Dict, opts: Dict, dna_rules:
     for round_idx in range(len(GEN_RETRY_WAITS) + 1):
         time.sleep(opts.get("api_delay", 3))
         questions = qb_generate(gclient, model, label, item["text"], q_type, level, school, count, avoid, dna_rules, essay_rules, logs,
-                                existing, item.get("underline", "mix"))
+                                existing, item.get("underline", "mix"), yt_points, bool(item.get("yt_focus")), item.get("unit_other", ""))
         if questions:
             break
         if round_idx < len(GEN_RETRY_WAITS):
@@ -4993,7 +5087,7 @@ QB_BATCH_POLL_SEC = 120      # 반값 결과만 기다릴 때 확인 간격
 QB_BATCH_POLL_BUSY_SEC = 600 # 일반 작업을 하는 중일 때 확인 간격
 QB_BATCH_GIVEUP_SEC = 30 * 3600  # 이만큼 지나도 안 끝나면 실패로 (회사 약속은 24시간)
 
-def qb_batch_submit(sb, items: List[Dict], opts: Dict, dna_rules: str, essay_rules: str, claim):
+def qb_batch_submit(sb, items: List[Dict], opts: Dict, dna_rules: str, essay_rules: str, claim, yt_points: List[Dict] = None):
     """반값 모드 건들의 프롬프트를 만들어 모델별로 한 번에 제출 → 'waiting'. 제출이 안 되면 그 건들은 일반 모드로 바로 생성"""
     groups, upd, new_batches, notes = {}, {}, [], []
     for it in items:
@@ -5001,7 +5095,8 @@ def qb_batch_submit(sb, items: List[Dict], opts: Dict, dna_rules: str, essay_rul
             existing = [r for r in qb_fetch(sb, [it["passage_label"]], "q_type,content") if r.get("q_type") == it["q_type"]]
             avoid = [str((r.get("content") or {}).get("focus", "")) for r in existing if (r.get("content") or {}).get("focus")]
             shared, task, plans = qb_build_prompt(it["passage_label"], it["text"], it["q_type"], it["difficulty"], it.get("school", "운양고"),
-                                                  int(it.get("count", 2)), avoid, dna_rules, essay_rules, existing, it.get("underline", "mix"))
+                                                  int(it.get("count", 2)), avoid, dna_rules, essay_rules, existing, it.get("underline", "mix"),
+                                                  yt_points, bool(it.get("yt_focus")), it.get("unit_other", ""))
             groups.setdefault(job_item_model(it, opts), []).append((it, shared, task, plans))
         except Exception as e:
             upd[it["id"]] = {"batch": False}
@@ -5147,10 +5242,22 @@ def qb_link_labels(_sb) -> List[str]:
 
 def enqueue_qbank(passages: List[Dict], q_types: List[str], levels: List[str], school: str, count: int, verify: bool,
                   text_model: str, api_delay: int, academy_name: str, school_name: str, light_easy: bool = False, underline: str = "mix",
-                  batch: bool = False) -> int:
+                  batch: bool = False, yt_focus: bool = False, plan: List[tuple] = None, note: str = "") -> int:
     """지문 × 유형 × 난이도 조합마다 작업 1건씩 추가 (light_easy: 하·중은 같은 제공사의 가벼운 모델로)"""
     sb = supabase if IS_CLOUD_DB else None
     added = {"n": 0}
+    # 영쌤 포인트 중 '교과서만'이 켜져 있으면, 교과서 지문에는 같은 단원 다른 단락을 함께 넘김 (그 포인트가 쓰이는 유형만)
+    tb_pts = [p for p in qb_yt_points() if p.get("on", True) and p.get("tb")]
+    lib = st.session_state.get("saved_mock") or []
+    lib_by = {x.get("label"): x for x in lib}
+
+    def unit_for(p, t):
+        if not tb_pts or not qb_yt_applicable(tb_pts, t, True):
+            return ""
+        parts = qb_link_parts(p["label"])[1]
+        if not all((lib_by.get(x) or {}).get("source_type") == "textbook" for x in parts):
+            return ""
+        return qb_unit_other({**p, "exam_key": p.get("exam_key") or (lib_by.get(parts[0]) or {}).get("exam_key", "")}, lib)
 
     def add(job):
         if job.get("status") not in ("running", "stopping"):
@@ -5166,15 +5273,19 @@ def enqueue_qbank(passages: List[Dict], q_types: List[str], levels: List[str], s
         job["opts"] = {"model": text_model, "api_delay": api_delay, "academy_name": academy_name, "school_name": school_name}
         # 어법은 최상이면 단일 정답형 대신 '있는 대로 고른 것' 조합형으로 (같은 조합은 한 번만)
         combos = list(dict.fromkeys(("어법 (조합형)" if (t == "어법 (단일)" and lv == "최상") else t, lv) for t in q_types for lv in levels))
-        for p in passages:
-            for t, lv in combos:
-                job["items"].append({"id": str(uuid.uuid4()), "kind": "qbank", "label": f"{p['label']} · {t} · {lv}",
-                                     "passage_label": p["label"], "exam_key": p.get("exam_key", ""), "number": str(p.get("number", "")),
-                                     "text": p.get("body_text", ""), "q_type": t, "difficulty": lv, "school": school,
-                                     "count": count, "verify": verify, "state": "pending", "error": "",
-                                     "light": bool(light_easy and lv in ("하", "중")), "underline": underline, "batch": bool(batch)})
-                added["n"] += 1
-        _job_log(job, f"➕ 변형문제 {added['n']}건 추가 ({school} · {', '.join(levels)} · 건당 {count}문제{' · 💸 반값 모드' if batch else ''})")
+        # plan이 있으면 (지문, 유형, 난이도, 문제 수)만 정확히 추가 (주간 클리닉의 '모자란 문제 만들기')
+        todo = ([(p, ("어법 (조합형)" if (t == "어법 (단일)" and lv == "최상") else t), lv, n) for p, t, lv, n in plan] if plan is not None
+                else [(p, t, lv, count) for p in passages for t, lv in combos])
+        for p, t, lv, cnt in todo:
+            job["items"].append({"id": str(uuid.uuid4()), "kind": "qbank", "label": f"{p['label']} · {t} · {lv}",
+                                 "passage_label": p["label"], "exam_key": p.get("exam_key", ""), "number": str(p.get("number", "")),
+                                 "text": p.get("body_text", ""), "q_type": t, "difficulty": lv, "school": school,
+                                 "count": cnt, "verify": verify, "state": "pending", "error": "",
+                                 "light": bool(light_easy and lv in ("하", "중")), "underline": underline, "batch": bool(batch),
+                                 "yt_focus": bool(yt_focus), "unit_other": unit_for(p, t)})
+            added["n"] += 1
+        _job_log(job, f"➕ 변형문제 {added['n']}건 추가 ({note or (school + ' · ' + ', '.join(levels) + f' · 건당 {count}문제')}{' · 💸 반값 모드' if batch else ''}"
+                      f"{' · 🎣 영쌤 포인트 위주' if yt_focus else ''})")
     _job_update(sb, add)
     start_gen_thread()
     return added["n"]
@@ -5748,6 +5859,39 @@ def qb_time_text(sec: int) -> str:
     m, s_ = divmod(int(sec), 60)
     return f"{m}분" + (f" {s_}초" if s_ else "")
 
+QB_VOCAB_CSS = """
+.vocab-cols { display: flex; gap: 14px; align-items: flex-start; }
+.vocab-page .vocab { width: 50%; border-collapse: collapse; font-size: 8.8pt; }
+.vocab th, .vocab td { border-bottom: 1px solid #ccc; padding: 2.5px 5px; text-align: left; vertical-align: top; }
+.vocab th { border-bottom: 2px solid #111; font-family: 'Noto Sans KR'; }
+.vocab td.vw { font-weight: 700; width: 38%; }
+.vocab td.vn { color: #666; white-space: nowrap; width: 12%; font-size: 8.5pt; }
+.vocab tr { break-inside: avoid; }
+"""
+SCHEMA_QB_VOCAB = {"type": "object", "properties": {"words": {"type": "array", "items": {"type": "object", "properties": {
+    "word": {"type": "string"}, "meaning": {"type": "string"}, "nos": {"type": "array", "items": {"type": "integer"}}},
+    "required": ["word", "meaning", "nos"]}}}, "required": ["words"]}
+
+def qb_choice_vocab(qs: List[Dict], model: str, logs: List[str]) -> List[Dict]:
+    """시험지 문항의 선택지·<보기>에 나온 어휘를 뽑아 뜻과 나온 문항 번호로 정리 (가벼운 모델 1번 호출)"""
+    blocks = []
+    for n, r in enumerate(qs, 1):
+        c = r.get("content") or {}
+        parts = [str(x) for x in (c.get("choices") or []) if str(x).strip()] + ([str(c["box"])] if c.get("box") else [])
+        if parts:
+            blocks.append(f"[{n}번] " + " / ".join(re.sub(r"<[^>]+>", "", x) for x in parts))
+    if not blocks:
+        return []
+    k = max(20, min(50, round(len(qs) * 2.5)))
+    prompt = (f"아래는 고등학교 영어 시험지의 문항별 선택지와 <보기>다. 학생이 꼭 알아야 할 어휘를 {k}개 안팎으로 뽑아라.\n"
+              "- 고1 수준 이상(쉬운 기초 단어 제외). 패러프레이즈에 쓰인 상위 개념어, 헷갈리게 만든 비슷한 철자 단어, 숙어·구동사·연어를 우선한다.\n"
+              "- word는 사전형(동사 원형, 명사 단수)으로, 숙어는 'supply A with B'처럼. meaning은 그 문항에 쓰인 뜻의 짧은 한국어(필요하면 뜻 2개까지).\n"
+              "- nos는 그 어휘가 나온 문항 번호들. 같은 어휘는 한 번만. 처음 나온 문항 번호 순서로 정렬.\n\n" + "\n".join(blocks))
+    out = _qb_call(None, model, prompt, SCHEMA_QB_VOCAB, 0.2, logs, "선지 어휘 정리")
+    words = [w for w in ((out or {}).get("words") or []) if isinstance(w, dict) and str(w.get("word", "")).strip()]
+    words.sort(key=lambda w: min([int(x) for x in (w.get("nos") or []) if str(x).lstrip("-").isdigit()] or [999]))
+    return words
+
 def render_qbank_exam(qs: List[Dict], meta: Dict, gidx: Dict[str, List[Dict]]) -> str:
     def tag_of(r):
         """1줄: 지문 · 유형 + [실제 기출]/[변형 · ○○고 스타일 · 난이도]  2줄: 기출 이력 (같은 시험은 번호를 묶고, 같은 유형은 굵게)"""
@@ -5849,9 +5993,19 @@ def render_qbank_exam(qs: List[Dict], meta: Dict, gidx: Dict[str, List[Dict]]) -
             o.append(f"<div class='exp'><h3>{n}번 정답 {ans}<span>({html.escape(r['passage_label'])} · {html.escape(r['q_type'])} · {html.escape(kind)})</span></h3><ul>"
                      + note + "".join(f"<li>{qb_html(e)}</li>" for e in (c.get("explanation") or [])) + "</ul></div>")
         o.append("</div></div>")
+    if meta.get("vocab"):
+        # 선지 어휘 정리 (주간 클리닉): 문항 순서대로, 2단 표
+        vs = meta["vocab"]
+        half = (len(vs) + 1) // 2
+        tbl = lambda part: ("<table class='vocab'><tr><th>어휘</th><th>뜻</th><th>문항</th></tr>" + "".join(
+            f"<tr><td class='vw'>{html.escape(str(v.get('word', '')))}</td><td>{html.escape(str(v.get('meaning', '')))}</td>"
+            f"<td class='vn'>{html.escape(', '.join(str(x) for x in (v.get('nos') or [])))}</td></tr>" for v in part) + "</table>")
+        o.append("<div class='ans-page vocab-page'><div class='anshead'>선지 어휘 정리</div>"
+                 "<div class='keynote'>문제 선택지·&lt;보기&gt;에 나온 어휘 · 오른쪽 숫자 = 나온 문항 번호</div>"
+                 f"<div class='vocab-cols'>{tbl(vs[:half])}{tbl(vs[half:])}</div></div>")
     o.append("<div class='foot'>PQRS 영T 자체제작 · 장기동 포피엠입시영어 031-991-1199</div></div>")
     o.append(back)
-    css = QB_EXAM_CSS + (QB_BOOK_CSS if book else "")
+    css = QB_EXAM_CSS + (QB_BOOK_CSS if book else "") + (QB_VOCAB_CSS if meta.get("vocab") else "")
     return f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>{html.escape(meta.get('title', '변형문제'))}</title><style>{css}</style></head><body>{''.join(o)}</body></html>"
 
 # ---- 화면 ----
@@ -5944,6 +6098,194 @@ def _qb_count_line(holder, counts: Dict[str, int], names: List[str]):
     holder.markdown(f"<div class='qb-note'>{'고른 지문에 있는 문제 &nbsp;' + ' · '.join(have) if have else '고른 지문에 해당하는 문제가 아직 없어요.'}</div>",
                     unsafe_allow_html=True)
 
+# ---- 주간 클리닉: 그 주에 배운 지문만으로 클리닉 미니모의고사 (기본 20문항 · 한 학교 스타일 · 변형문제만) ----
+#   app_storage 문서 weekly_clinic = {"weeks": [{id, name, school, labels, used: [문항 id], updated}]}
+QB_CLINIC_FILE = os.path.join(BASE_DIR, "weekly_clinic.json")
+QB_CLINIC_MIX = {"중": 4, "상": 8, "최상": 8}       # 20문항 기준 난이도 배분 (문항 수를 바꾸면 비율대로)
+QB_CLINIC_TYPES = [t for t in QB_TYPE_NAMES if t not in QB_ESSAY_TYPES]
+QB_CLINIC_EXTRA = 1.3                                 # 모자란 문제를 만들 때 정답 검증 탈락·난이도 낮춤을 생각해 더 만드는 비율
+
+@st.cache_data(ttl=60, show_spinner=False)
+def qb_clinic_weeks(_sb) -> List[Dict]:
+    return (_store_get(_sb, QB_CLINIC_FILE, {}) or {}).get("weeks", [])
+
+def qb_clinic_update(sb, change):
+    """저장 직전에 최신 목록을 다시 읽어 바꿈"""
+    weeks = (_store_get(sb, QB_CLINIC_FILE, {}) or {}).get("weeks", [])
+    _store_put(sb, QB_CLINIC_FILE, {"weeks": change(weeks)})
+    qb_clinic_weeks.clear()
+
+def qb_clinic_mix(total: int, levels: List[str]) -> Dict[str, int]:
+    """총 문항 수 → 난이도별 문항 수 (중4·상8·최상8 비율, 고른 난이도만)"""
+    base = {lv: QB_CLINIC_MIX.get(lv, 4) for lv in levels} or {"상": 1}
+    s = sum(base.values())
+    mix = {lv: int(total * w / s) for lv, w in base.items()}
+    for lv in sorted(base, key=lambda x: -(total * base[x] / s - mix[x])):
+        if sum(mix.values()) >= total:
+            break
+        mix[lv] += 1
+    return mix
+
+def qb_clinic_pick(rows: List[Dict], labels: List[str], mix: Dict[str, int], seed: int) -> (List[Dict], Dict[str, int]):
+    """난이도별로 지문 골고루 뽑아 합침 → (지문 순서대로 문항, 난이도별 모자란 수)"""
+    picked, short = [], {}
+    for lv, n in mix.items():
+        if n <= 0:
+            continue
+        got, _ = qb_pick([r for r in rows if r["difficulty"] == lv], labels, n, seed)
+        got = [r for r in got if r["difficulty"] == lv][:n]
+        picked += got
+        if len(got) < n:
+            short[lv] = n - len(got)
+    pos = {l: i for i, l in enumerate(labels)}
+    picked.sort(key=lambda r: pos.get(r["passage_label"], 0))
+    return picked, short
+
+def qb_clinic_plan(summary: List[Dict], passages: List[Dict], short: Dict[str, int], school: str, types: List[str], seed: int) -> List[tuple]:
+    """모자란 난이도만큼 새로 만들 (지문, 유형, 난이도, 문제 수): 그 난이도 문제가 적은 지문부터, 지문 안에서는 적게 쌓인 유형부터"""
+    rnd = random.Random(seed)
+    mine = [r for r in summary if r.get("school") == school and r["difficulty"] != QB_GICHUL_LEVEL]
+    plan = {}
+    for lv, k in short.items():
+        have = {p["label"]: sum(1 for r in mine if r["passage_label"] == p["label"] and r["difficulty"] == lv) for p in passages}
+        for _ in range(math.ceil(k * QB_CLINIC_EXTRA)):
+            p = min(passages, key=lambda x: (have[x["label"]], rnd.random()))
+            have[p["label"]] += 1
+            # 이번에 만들 문제 전체에서 유형이 골고루 → 그다음 이 지문·난이도에 적게 쌓인 유형
+            in_plan = {t: sum(n for (_, t2, _), n in plan.items() if t2 == t) for t in types}
+            here = {t: sum(1 for r in mine if r["passage_label"] == p["label"] and r["q_type"] == t and r["difficulty"] == lv)
+                       + sum(n for (l, t2, _), n in plan.items() if l == p["label"] and t2 == t) for t in types}
+            t = min(types, key=lambda x: (in_plan[x], here[x], rnd.random()))
+            key = (p["label"], t, lv)
+            plan[key] = plan.get(key, 0) + 1
+    by = {p["label"]: p for p in passages}
+    return [(by[l], t, lv, n) for (l, t, lv), n in plan.items()]
+
+def render_weekly_clinic(sb, mock_lib: List[Dict], by_label: Dict, summary: List[Dict], label_counts: Dict,
+                         text_model: str, api_delay: int, academy_name: str, school_name: str):
+    st.caption("그 주에 배운 지문을 주차로 저장해 두고, 그 지문으로 만든 변형문제만 모아 클리닉 미니모의고사를 만들어요 "
+               "(실제 기출은 넣지 않고, 한 학교 스타일만). 문제가 모자라면 모자란 만큼만 골라서 새로 만들 수 있어요.")
+    weeks = qb_clinic_weeks(sb)
+    wmap = {w["id"]: w for w in weeks}
+    ids = ["__new__"] + [w["id"] for w in weeks]
+    if "qb_clinic_week_next" in st.session_state:  # 저장·삭제 뒤 고를 주차 (위젯을 만든 뒤에는 값을 바꿀 수 없어서 다음 실행 때 넣음)
+        st.session_state["qb_clinic_week"] = st.session_state.pop("qb_clinic_week_next")
+    if st.session_state.get("qb_clinic_week") not in ids:
+        st.session_state["qb_clinic_week"] = "__new__"
+    wid = st.selectbox("📅 주차", ids, format_func=lambda i: "➕ 새 주차 만들기" if i == "__new__" else
+                       f"{wmap[i]['name']} · {wmap[i].get('school', '')} · 지문 {len(wmap[i].get('labels', []))}개", key="qb_clinic_week")
+    w = wmap.get(wid, {})
+    if st.session_state.get("qb_clinic_loaded") != wid:  # 주차를 바꾸면 그 주차 지문으로 채움
+        st.session_state["qb_clinic_loaded"] = wid
+        st.session_state["qb_clinic_labels"] = list(w.get("labels", []))
+        st.session_state["qb_clinic_name"] = w.get("name", "")
+        st.session_state["qb_clinic_school"] = w.get("school", QB_SCHOOLS[0])
+        st.session_state.pop("qb_clinic_html", None)
+    sel = _qb_passage_picker("qb_clinic_labels", mock_lib, label_counts)
+    with st.container(key="qb_card_clinic_opts"):
+        st.markdown("<div class='qb-title'>주차 정보</div>", unsafe_allow_html=True)
+        name = _qb_row("주차 이름").text_input("주차 이름", key="qb_clinic_name", placeholder="예: 11월 2주차 운양고1 A반", label_visibility="collapsed")
+        school = _qb_row("학교 스타일").segmented_control("학교 스타일", QB_SCHOOLS, key="qb_clinic_school", label_visibility="collapsed") or QB_SCHOOLS[0]
+        c1, c2, _ = st.columns([1.3, 1, 3])
+        if c1.button("💾 주차 저장" if wid == "__new__" else "💾 주차 고친 내용 저장", type="primary", use_container_width=True,
+                     disabled=not sel or not name.strip(), key="qb_clinic_save"):
+            from datetime import datetime, timedelta, timezone
+            rec = {**w, "id": w.get("id") or uuid.uuid4().hex[:10], "name": name.strip(), "school": school, "labels": list(sel),
+                   "used": w.get("used", []), "updated": datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d")}
+            qb_clinic_update(sb, lambda ws: [rec] + [x for x in ws if x.get("id") != rec["id"]])
+            st.session_state["qb_clinic_week_next"] = rec["id"]
+            st.session_state["qb_clinic_loaded"] = rec["id"]
+            st.rerun()
+        if wid != "__new__":
+            with c2.popover("주차 삭제", use_container_width=True):
+                st.caption("주차 기록만 지워요. 문제은행의 문제는 그대로 남아요.")
+                if st.button("삭제 확정", key="qb_clinic_del"):
+                    qb_clinic_update(sb, lambda ws: [x for x in ws if x.get("id") != wid])
+                    st.session_state["qb_clinic_week_next"] = "__new__"
+                    st.rerun()
+    if wid == "__new__":
+        st.caption("지문을 고르고 이름을 붙여 저장하면 아래에서 클리닉을 만들 수 있어요.")
+        return
+    labels = sorted(w.get("labels", []), key=lambda l: natural_sort_key({"label": l}))
+    labels = [l for l in labels if l in by_label]
+    passages = [by_label[l] for l in labels]
+    if set(sel) != set(w.get("labels", [])) or name.strip() != w.get("name") or school != w.get("school"):
+        st.info("고친 내용이 아직 저장되지 않았어요. 아래 클리닉은 저장된 주차 기준으로 만들어요.")
+    school = w.get("school", QB_SCHOOLS[0])
+
+    with st.container(key="qb_card_clinic_make"):
+        st.markdown("<div class='qb-title'>클리닉 구성</div>", unsafe_allow_html=True)
+        n1, n2 = _qb_row("문항 수").columns([1.3, 6], vertical_alignment="center")
+        total = int(n1.number_input("문항 수", 5, 60, 20, key="qb_clinic_total", label_visibility="collapsed"))
+        lvs = _qb_row("난이도").pills("난이도", ["최상", "상", "중"], selection_mode="multi", default=["최상", "상", "중"], key="qb_clinic_levels",
+                                    label_visibility="collapsed") or ["상"]
+        mix = qb_clinic_mix(total, [lv for lv in ["중", "상", "최상"] if lv in lvs])
+        types = _qb_row("유형").pills("유형", QB_CLINIC_TYPES, selection_mode="multi", default=QB_CLINIC_TYPES, key="qb_clinic_types",
+                                    label_visibility="collapsed") or QB_CLINIC_TYPES
+        want_vocab = _qb_row("선지 어휘").checkbox(f"맨 뒤에 문제 선지·<보기>에 쓰인 어휘 정리 쪽 넣기 (가벼운 모델 {light_model_for(text_model).split(':')[-1]} · 약 10~30원)",
+                                                 value=True, key="qb_clinic_vocab")
+        skip_used = _qb_row("이미 낸 문항").checkbox(f"이 주차 클리닉에 이미 넣은 문항은 빼기 ({len(w.get('used', []))}개)", value=True, key="qb_clinic_skip")
+        mine = [r for r in summary if r["passage_label"] in set(labels) and r.get("school") == school and r["difficulty"] != QB_GICHUL_LEVEL
+                and r["q_type"] in types and not (skip_used and r["id"] in set(w.get("used", [])))]
+        have = {lv: sum(1 for r in mine if r["difficulty"] == lv) for lv in mix}
+        n2.markdown("<div class='qb-note' style='margin-top:0'>" + " · ".join(f"{lv} <b>{n}</b>문항 (쌓인 문제 {have[lv]}개)" for lv, n in mix.items())
+                    + f" · {school} 스타일 · 지문 {len(labels)}개</div>", unsafe_allow_html=True)
+        short = {lv: n - have[lv] for lv, n in mix.items() if have[lv] < n}
+        if short:
+            plan = qb_clinic_plan(summary, passages, short, school, types, sum(map(ord, wid)))
+            n_q = sum(n for *_, n in plan)
+            cost = sum(qb_job_cost_krw(text_model, n) for *_, n in plan)
+            st.warning("문제가 모자라요: " + " · ".join(f"{lv} {k}문항" for lv, k in short.items())
+                       + f" → 지문·유형을 골고루 나눠 {n_q}문제(검증 탈락 대비 조금 더)를 새로 만들 수 있어요. 예상 비용 약 {cost:,.0f}원")
+            g1, g2 = st.columns([1.3, 3], vertical_alignment="center")
+            yt = g2.toggle("🎣 영쌤 출제 포인트 위주로", value=True, key="qb_clinic_yt")
+            if g1.button(f"🛠️ 모자란 {n_q}문제 만들기", use_container_width=True, key="qb_clinic_gen"):
+                n = enqueue_qbank(passages, [], [], school, 1, True, text_model, api_delay, academy_name, school_name,
+                                  plan=plan, yt_focus=yt, note=f"주간 클리닉 '{w['name']}' 모자란 문제 · {school}")
+                st.session_state.gen_flash = f"✅ 주간 클리닉용 변형문제 {n}건을 생성 작업에 추가했습니다. 다 만들어지면 여기서 '클리닉 만들기'를 누르세요."
+                st.rerun()
+        title = _qb_row("제목").text_input("제목", value="", placeholder=f"{w['name']} 클리닉", key="qb_clinic_title", label_visibility="collapsed")
+    b1, b2 = st.columns([2, 1])
+    make = b1.button("📄 클리닉 만들기", type="primary", use_container_width=True, key="qb_clinic_btn", disabled=not labels)
+    again = b2.button("🔀 다른 조합으로", use_container_width=True, key="qb_clinic_again", disabled="qb_clinic_html" not in st.session_state)
+    if make or again:
+        rows = [r for r in qb_fetch(sb, labels) if r.get("school") == school and r["difficulty"] in mix and r["q_type"] in types
+                and not (skip_used and r["id"] in set(w.get("used", [])))]
+        picked, short2 = qb_clinic_pick(rows, labels, mix, random.randint(1, 10**9))
+        if not picked:
+            st.session_state.pop("qb_clinic_html", None)
+            st.warning("이 주차 지문으로 만든 문제가 없어요. 위에서 '모자란 문제 만들기'를 먼저 눌러 주세요.")
+        else:
+            meta = {"brand": "클리닉 미니모의고사", "kind": school_name, "title": title or f"{w['name']} 클리닉",
+                    "sub": f"{school} 스타일 · " + " · ".join(f"{lv} {sum(1 for r in picked if r['difficulty'] == lv)}" for lv in mix) + f" · 총 {len(picked)}문항",
+                    "show_tag": True, "show_gichul": False, "with_answers": True, "academy": academy_name, "show_style": False, "show_time": True}
+            if want_vocab:
+                v_logs = []
+                with st.spinner("문제 선지에 쓰인 어휘를 정리하는 중..."):
+                    meta["vocab"] = qb_choice_vocab(picked, light_model_for(text_model), v_logs)
+                flush_ai_usage()
+                if not meta["vocab"]:
+                    st.warning("선지 어휘 정리를 만들지 못했어요 (문제지는 그대로 만들었어요). " + " ".join(v_logs)[:200])
+            st.session_state.qb_clinic_html = render_qbank_exam(picked, meta, gichul_index(load_gichul_map(), set(by_label)))
+            st.session_state.qb_clinic_info = (len(picked), short2, meta["title"], [r["id"] for r in picked])
+            st.session_state.qb_clinic_marked = False
+    if st.session_state.get("qb_clinic_html"):
+        n, short2, fname, qids = st.session_state.qb_clinic_info
+        if short2:
+            st.warning("문제가 모자라 " + " · ".join(f"{lv} {k}문항" for lv, k in short2.items()) + " 빠진 채로 만들었어요.")
+        safe = re.sub(r'[\\/:*?"<>|]', "", fname).strip() or "클리닉"
+        d1, d2 = st.columns([3, 1.3])
+        d1.download_button(f"📥 클리닉 HTML 다운로드 ({n}문항) — 열어서 '인쇄 / PDF로 저장'", st.session_state.qb_clinic_html, f"{safe}.html", "text/html",
+                           use_container_width=True, key="qb_clinic_dl")
+        if st.session_state.get("qb_clinic_marked"):
+            d2.button("✅ 낸 문항으로 표시함", disabled=True, use_container_width=True, key="qb_clinic_mark_done")
+        elif d2.button("✔️ 이 문항들 낸 것으로 표시", use_container_width=True, key="qb_clinic_mark",
+                       help="표시해 두면 이 주차로 다음 클리닉을 만들 때 이 문항은 빼요"):
+            qb_clinic_update(sb, lambda ws: [{**x, "used": list(dict.fromkeys(x.get("used", []) + qids))} if x.get("id") == wid else x for x in ws])
+            st.session_state.qb_clinic_marked = True
+            st.rerun()
+        components.html(st.session_state.qb_clinic_html, height=850, scrolling=True)
+
 def _qb_passage_picker(key: str, mock_lib: List[Dict], counts: Dict[str, int]) -> List[str]:
     """출처·학년·시험을 고른 뒤 번호 칩을 눌러 지문을 고름 (여러 시험에 걸쳐 모아 담김)"""
     lib = sorted(mock_lib, key=natural_sort_key)
@@ -6034,7 +6376,7 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
     links = [l for l in qb_link_labels(sb) if all(x in by_label for x in qb_link_parts(l)[1])]
     summary = qb_bank_summary(sb, tuple(sorted(by_label) + links))
     label_counts = _qb_chip_counts(summary, "passage_label")
-    t_gen, t_exam, t_manage, t_gichul = st.tabs(["🛠️ 문제 만들기 (누적)", "📄 시험지 만들기", "🗂️ 문제 보기·삭제", "🏫 기출 표시"])
+    t_gen, t_exam, t_clinic, t_manage, t_gichul = st.tabs(["🛠️ 문제 만들기 (누적)", "📄 시험지 만들기", "📅 주간 클리닉", "🗂️ 문제 보기·삭제", "🏫 기출 표시"])
 
     with t_gen:
         st.caption("고른 지문 × 유형 × 난이도마다 문제를 만들어 계속 쌓습니다. 같은 지문을 다시 만들면 이미 만든 문제와 다른 포인트로 출제합니다.")
@@ -6060,6 +6402,11 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
                                               value=False, key="qb_gen_batch",
                                               help="각 AI 회사의 Batch API를 써요. 요청을 모아 보내 두면 회사가 한가할 때 처리하고 값을 50% 깎아 줘요. "
                                                    "정답 검증은 결과가 들어온 뒤 바로 해요(검증 값은 그대로). 창을 닫아도 서버가 2분마다 확인해서 들어온 것부터 저장해요.")
+            n_yt = sum(1 for p in qb_yt_points() if p.get("on", True))
+            yt_focus = _qb_row("영쌤 포인트").toggle(f"🎣 영쌤 출제 포인트 위주로 — 모든 문항에 포인트 하나씩 (켜 둔 포인트 {n_yt}개)",
+                                                  value=False, key="qb_gen_yt", disabled=not n_yt,
+                                                  help="끄면 문항 절반쯤에만 포인트를 넣어요. 포인트는 왼쪽 메뉴 출제 DNA 화면의 '🎣 영쌤 출제 포인트'에서 "
+                                                       "추가·수정해요. 학교(운양고·제일고)와 관계없이 적용되고, 난이도 '하'에는 넣지 않아요.")
             # 지문 연결: 고른 지문 여러 개를 한 지문으로 묶어 출제 (실제 내신처럼)
             link = "따로"
             if len(sel) >= 2:
@@ -6098,7 +6445,8 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
                        f"{when} (창을 닫아도 서버에서 계속)")
             st.caption("💡 조합당 문제 수를 늘리면 지문·규칙을 읽는 고정 비용을 함께 나눠 문제당 값이 내려가요 (1개 → 2개 → 3개로 갈수록 싸지고, 그 뒤로는 차이가 작아요).")
         if st.button("🚀 변형문제 생성 시작", type="primary", disabled=not n_jobs, key="qb_gen_btn"):
-            n = enqueue_qbank(gen_ps, q_types, levels, school, int(count), verify, text_model, api_delay, academy_name, school_name, light_easy, underline, batch)
+            n = enqueue_qbank(gen_ps, q_types, levels, school, int(count), verify, text_model, api_delay, academy_name, school_name, light_easy, underline, batch,
+                              yt_focus)
             st.session_state.gen_flash = f"✅ 변형문제 {n}건을 생성 작업에 추가했습니다. 위 작업 칸에서 진행 상황을 볼 수 있어요."
             st.rerun()
 
@@ -6263,6 +6611,9 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
                 st.session_state.qb_exam_logged = True
                 st.rerun()
             components.html(st.session_state.qb_exam_html, height=850, scrolling=True)
+
+    with t_clinic:
+        render_weekly_clinic(sb, mock_lib, by_label, summary, label_counts, text_model, api_delay, academy_name, school_name)
 
     with t_manage:
         m_label = st.selectbox("📌 지문", sorted([p["label"] for p in mock_lib] + links, key=lambda l: natural_sort_key({"label": l})), key="qb_manage_label")
@@ -7191,6 +7542,8 @@ APP_HELP = {
 - **💸 반값 모드**: 켜면 생성 비용이 절반이에요. 대신 결과가 바로 안 나오고 보통 몇 분~몇 시간, 길면 24시간 뒤에 들어와요. 급할 때는 끄고, 시간이 있을 때(예: 밤에 넣어 두고 다음 날) 켜세요. 창을 닫아도 서버가 2분마다 확인해서 들어온 것부터 저장해요.
 - 같은 지문을 다시 만들면 이미 쌓인 문제와 **다른 포인트**로 출제해요.
 - **🔗 지문 연결**(지문을 2개 이상 고르면 나와요): **이어 붙이기**는 교과서의 짧은 단락 2~4개를 실제 시험처럼 한 지문으로 묶어 출제해요 (예: 4-1 + 4-2). **(A)(B) 두 지문 함께**는 같은 범위의 비슷한 내용 두 지문을 (A)(B)로 싣고 '(A)와 (B)를 읽고 추론할 수 없는 것'처럼 두 글을 함께 묻는 문제를 만들어요 (추론·내용 일치·<보기>·주제·요지·제목 유형만). 묶은 지문 문제는 '4-1 + 4-2'처럼 따로 쌓이고, 시험지를 만들 때 묶인 지문을 모두 고르면 함께 뽑혀요.
+- **🎣 영쌤 출제 포인트**: 왼쪽 메뉴 출제 DNA 화면 맨 아래 목록에 선생님의 '낚시' 출제 방식을 한 줄씩 적어 두면, 학교(운양고·제일고)와 관계없이 맞는 유형 문항에 하나씩 넣어요 (평소 문항 절반쯤, '🎣 영쌤 출제 포인트 위주로'를 켜면 모든 문항 · 난이도 '하'는 빼요). 새 포인트는 맨 아래 빈 줄에 계속 추가하면 돼요. '교과서만'을 켠 포인트는 교과서 지문에만 쓰고 같은 단원 다른 단락 원문을 함께 넘겨요.
+- **📅 주간 클리닉**: 그 주에 배운 지문을 주차로 저장해 두면, 그 지문으로 만든 변형문제만 모아 클리닉 미니모의고사(기본 20문항 · 중4/상8/최상8 · 한 학교 스타일 · 실제 기출 제외)를 만들어요. 모자라면 '모자란 문제 만들기'가 지문·유형을 골고루 나눠 필요한 만큼만 생성하고, '낸 것으로 표시'하면 다음 클리닉에서 그 문항은 빠져요.
 - **순서 유형 선택지**는 수능처럼 ① (A)-(C)-(B) ② (B)-(A)-(C) ③ (B)-(C)-(A) ④ (C)-(A)-(B) ⑤ (C)-(B)-(A)로 고정돼요 ((A)로 시작하는 선지는 ① 하나). 예전에 만든 순서 문제도 시험지에서는 이렇게 바뀌어 나와요.
 - **어법 밑줄**: 섞기(학교 기출 비율로 단어·구 밑줄과 문장 전체 밑줄을 무작위로) / 단어·구 / 문장 전체.
 - **문항마다 출제 장치를 무작위로 정해요** (AI 비용 추가 없음): 어법은 실제 기출 개념 약 20가지 중 2~3개를 '꼭 묻기'로 뽑아요. 학교마다 지금까지 만든 문제를 세서 덜 나온 개념부터 채우기 때문에, 분사처럼 많이 나온 개념만 반복되지 않고 실제 출제된 개념(5형식·관계부사·대명사 지칭·복합관계사 등)이 모두 고르게 나와요. 시험지를 뽑을 때도 어법 문제는 이미 나온 개념과 덜 겹치는 것을 골라요.
@@ -7662,6 +8015,47 @@ def page_dna():
             st.session_state.exam_dna["essay_rules_text"] = edited_essay.strip()
             save_exam_dna(st.session_state.exam_dna)
             st.success("✅ 서술형 출제 DNA가 저장되었습니다!")
+
+    render_yt_points_editor()
+
+
+def render_yt_points_editor():
+    """🎣 영쌤 출제 포인트 목록 편집 (출제 DNA 문서의 yt_points에 저장)"""
+    st.markdown("#### 🎣 영쌤 출제 포인트 (학교와 관계없이 변형문제 만들 때 반영)")
+    st.caption("선생님이 쓰는 '낚시' 출제 방식을 한 줄에 하나씩 적어 두면, 변형문제를 만들 때 맞는 유형의 문항에 하나씩 넣어요 "
+               "(평소엔 문항 절반쯤, '문제 만들기'에서 '🎣 영쌤 출제 포인트 위주로'를 켜면 모든 문항). 맨 아래 빈 줄에 새 포인트를 계속 추가할 수 있어요. "
+               "'교과서만'을 켜면 교과서 지문에만 쓰고, 같은 단원 다른 단락 원문을 함께 넘겨요.")
+    pts = qb_yt_points()
+    df = pd.DataFrame([{"사용": bool(p.get("on", True)), "출제 포인트": str(p.get("text", "")),
+                        "적용 유형": p.get("scope") if p.get("scope") in QB_YT_SCOPES else "전체 유형", "교과서만": bool(p.get("tb"))} for p in pts],
+                      columns=["사용", "출제 포인트", "적용 유형", "교과서만"])
+    edited = st.data_editor(
+        df, num_rows="dynamic", use_container_width=True, hide_index=True, key="yt_points_editor",
+        column_config={
+            "사용": st.column_config.CheckboxColumn("사용", default=True, width="small"),
+            "출제 포인트": st.column_config.TextColumn("출제 포인트", width="large", required=True),
+            "적용 유형": st.column_config.SelectboxColumn("적용 유형", options=list(QB_YT_SCOPES), default="전체 유형", required=True),
+            "교과서만": st.column_config.CheckboxColumn("교과서만", default=False, width="small"),
+        })
+    y1, y2 = st.columns(2)
+    if y1.button("💾 영쌤 출제 포인트 저장", type="primary", use_container_width=True, key="yt_points_save"):
+        new = []
+        for _, r in edited.iterrows():
+            t = str(r.get("출제 포인트") or "").strip()
+            if t and t.lower() != "nan":
+                new.append({"on": bool(r.get("사용")) if pd.notna(r.get("사용")) else True, "text": t,
+                            "scope": r.get("적용 유형") if r.get("적용 유형") in QB_YT_SCOPES else "전체 유형",
+                            "tb": bool(r.get("교과서만")) if pd.notna(r.get("교과서만")) else False})
+        st.session_state.exam_dna["yt_points"] = new
+        save_exam_dna(st.session_state.exam_dna)
+        st.success(f"✅ 영쌤 출제 포인트 {len(new)}개를 저장했어요. 다음에 시작하는 변형문제 작업부터 반영돼요.")
+    if y2.button("↩️ 기본 포인트 다시 넣기", use_container_width=True, key="yt_points_reset",
+                 help="지금 목록 뒤에 처음 넣어 둔 기본 포인트 중 빠진 것만 다시 붙여요 (직접 쓴 포인트는 그대로)"):
+        have = {str(p.get("text", "")).strip() for p in pts}
+        st.session_state.exam_dna["yt_points"] = pts + [dict(p) for p in DEFAULT_YT_POINTS if p["text"].strip() not in have]
+        save_exam_dna(st.session_state.exam_dna)
+        st.session_state.pop("yt_points_editor", None)
+        st.rerun()
 
 
 def page_past_voca():
