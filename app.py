@@ -4540,7 +4540,39 @@ def qb_question_plans(q_type: str, level: str, school: str, count: int, existing
                 pl.append(QB_NOCOPY_MARK + "(프로그램이 원문 지문을 넣음). target에 빈칸으로 비울 원문 어구를 원문에서 글자 하나 다르지 않게 그대로 옮겨 적는다(프로그램이 그 자리를 __________로 바꿈).")
             else:
                 pl.append(QB_NOCOPY_MARK + " — 프로그램이 원문 지문을 그대로 넣으므로 지문을 옮겨 쓰지 않는다. target은 빈 문자열.")
+    if q_type in QB_ONE_CHOICE_TYPES:
+        # 2026-11-05: 운양고 내용 일치 최상이 <보기> 조합형과 섞여 나와서 (발문 두 개, 조합 + 문장 선지) 형식을 못 박음
+        for pl in plans:
+            pl.append(QB_ONE_CHOICE_RULE)
     return plans
+
+# <보기>·ⓐ~ⓗ 조합형이 아닌 객관식 유형 (선택지 5개가 각각 한 문장)
+QB_ONE_CHOICE_TYPES = {"주제", "제목", "요지·주장", "내용 일치·불일치", "빈칸", "함축 의미", "추론 (추론 가능·불가)"}
+QB_ONE_CHOICE_RULE = "형식: 선택지 5개가 각각 완결된 한 문장(또는 어구)인 일반 객관식. box는 비우고 <보기>·ⓐ~ⓗ 진술이나 'ⓐ, ⓒ' 같은 조합 선택지는 쓰지 않는다(조합형은 '<보기> 일치 조합형' 유형에서만)."
+_QB_COMBO_RE = re.compile(r"^\s*([ⓐ-ⓩ](?:(?:\s*(?:,|and|및|와|과)\s*)+[ⓐ-ⓩ])*)(.*)$", re.S)
+
+def qb_fix_combo(q: Dict, q_type: str):
+    """일반 객관식 유형인데 <보기> 조합형으로 나온 문항을 '<보기> 일치 조합형'으로 정리 (AI 호출 없음).
+    → None: 조합형 아님(그대로) / '<보기> 일치 조합형': 정리함 / False: 정답이 하나로 안 정해져 못 씀"""
+    if q_type not in QB_ONE_CHOICE_TYPES:
+        return None
+    ch = [re.sub(r"^\s*[①②③④⑤]\s*", "", str(c)) for c in (q.get("choices") or [])]
+    ms = [_QB_COMBO_RE.match(c) for c in ch]
+    if len(ch) != 5 or sum(bool(m) for m in ms) < 4:
+        return None
+    if not all(ms) or len(set(re.findall(r"[ⓐ-ⓩ]", str(q.get("box", ""))))) < 3:
+        return False
+    combos = [", ".join(re.findall(r"[ⓐ-ⓩ]", m.group(1))) for m in ms]
+    if len(set(combos)) != 5:
+        return False  # 조합이 겹치면 뒤에 붙은 문장으로만 갈리던 문항 → 정답이 하나로 안 정해짐
+    stem = str(q.get("stem", ""))
+    if not (re.search(r"있는 대로|모두 고른", stem) and "<보기>" in stem and stem.count("?") == 1 and stem.rstrip().endswith("?")):
+        neg = bool(re.search(r"일치하지 않|않은 것|않는 것", re.sub(r"<[^>]+>", "", stem)))
+        who = "(A)와 (B)의 내용과" if "(A)와 (B)" in stem else "윗글의 내용과"
+        stem = f"{who} {'일치하지 않는' if neg else '일치하는'} 것만을 <보기>에서 있는 대로 고른 것은?"
+    q["stem"], q["choices"] = stem, combos
+    q["format_fix"] = "보기 조합형으로 정리"
+    return "<보기> 일치 조합형"
 
 def _qb_find_span(body: str, target: str):
     """원문에서 target 어구 위치 (띄어쓰기·대소문자 차이는 봐줌) → (시작, 끝) 또는 None"""
@@ -4808,6 +4840,11 @@ def qb_parse(out, q_type: str, count: int, plans: List[List[str]], text: str) ->
             q["choices"] = [""] * 5 if q_type in QB_MARK_TYPES else [str(c).strip() for c in (q.get("choices") or [])][:5]
             if not q["answer"] or len(q["choices"]) != 5 or (q_type not in QB_MARK_TYPES and not all(q["choices"])):
                 continue
+            fx = qb_fix_combo(q, q_type)  # <보기> 조합형으로 섞여 나온 문항 정리 (정답이 애매하면 버림)
+            if fx is False:
+                continue
+            if fx:
+                q["_q_type"] = fx
             if q_type == "순서":
                 qb_fix_order(q)  # 수능식 고정 선택지 + 정답 번호 고르게 (정답 검증 전에 바꿔서 검증도 바뀐 문항으로)
         if qi < len(plans) and plans[qi]:
@@ -4933,6 +4970,7 @@ def qb_save_questions(sb, gclient, model: str, item: Dict, questions: List[Dict]
         if not ok:
             continue
         q["verified"] = bool(item.get("verify", True))
+        qt = q.pop("_q_type", q_type)
         lv = level
         jl, why = q.pop("_judged", (None, ""))
         if jl and QB_LEVEL_ORDER.get(jl, 9) < QB_LEVEL_ORDER.get(level, 0):
@@ -4940,7 +4978,7 @@ def qb_save_questions(sb, gclient, model: str, item: Dict, questions: List[Dict]
             lv, lowered = jl, lowered + 1
             q["level_req"], q["level_note"] = level, why
         rows.append({"id": str(uuid.uuid4()), "passage_label": label, "exam_key": item.get("exam_key", ""), "number": item.get("number", ""),
-                     "q_type": q_type, "difficulty": lv, "school": school, "content": q})
+                     "q_type": qt, "difficulty": lv, "school": school, "content": q})
     dropped = len(questions) - len(rows)
     if not rows:
         return False, f"정답 검증을 통과한 문제가 없음 ({len(questions)}개 모두 탈락)"
@@ -5430,6 +5468,12 @@ def qb_pick(rows: List[Dict], labels: List[str], total: int, seed: int) -> (List
             c = copy.deepcopy(q["content"])
             if qb_fix_order(c, random.Random(str(q.get("id", ""))), only_if_needed=True):
                 picked[i] = {**q, "content": c}
+        # 예전에 <보기> 조합형과 섞여 나온 변형문제도 시험지에는 정리해서 (저장된 문제는 그대로)
+        elif q.get("q_type") in QB_ONE_CHOICE_TYPES and q.get("difficulty") != QB_GICHUL_LEVEL and isinstance(q.get("content"), dict):
+            c = copy.deepcopy(q["content"])
+            fx = qb_fix_combo(c, q["q_type"])
+            if fx:
+                picked[i] = {**q, "q_type": fx, "content": c}
     return picked, notes
 
 def qb_html(s) -> str:
@@ -5463,6 +5507,8 @@ body { font-family: 'Noto Serif KR', serif; font-size: 10.3pt; line-height: 1.62
 .q .stem, .q .tag, .q .given { break-after: avoid; }
 .passage p { orphans: 3; widows: 3; }
 .choices, .box, .write { break-inside: avoid; }
+.box.long { break-inside: auto; }
+.box.long p { orphans: 2; widows: 2; }
 .q .stem { font-family: 'Noto Sans KR'; font-size: 10pt; margin-bottom: 3px; }
 .q .stem .no { font-weight: 900; font-size: 11pt; margin-right: 2px; }
 .q.setq { margin-bottom: 8px; }
@@ -5771,7 +5817,8 @@ def render_qbank_exam(qs: List[Dict], meta: Dict, gidx: Dict[str, List[Dict]]) -
         if not in_set:
             o.append(f"<div class='passage'>{qb_paras(c.get('passage'))}</div>")
         if c.get("box"):
-            o.append(f"<div class='box'>{qb_paras(c['box'])}</div>")
+            # 긴 <보기>(진술 7~8개)는 통째로 다음 단으로 밀리면 앞 단이 비어서, 단을 넘어 이어지게
+            o.append(f"<div class='box{' long' if len(str(c['box'])) > 500 else ''}'>{qb_paras(c['box'])}</div>")
         choices = c.get("choices") or []
         if r["q_type"] in QB_ESSAY_TYPES:
             o.append("<div class='write'></div><div class='write'></div>")
