@@ -4954,6 +4954,22 @@ def qb_generate(gclient, model: str, label: str, text: str, q_type: str, level: 
     out = _qb_call(gclient, model, [shared, task], SCHEMA_QBANK, 0.7, logs, f"{label} {q_type} {level} 생성", cache_first=True)
     return qb_parse(out, q_type, count, plans, text)
 
+def qb_shape_ok(q: Dict, q_type: str) -> bool:
+    """풀 수 없는 모양의 문항 거르기 (AI 호출 없음): 지문 속 ①~⑤ 빠짐, 같은 선지 두 번, 조합 선지에 없는 기호, 유형과 다른 발문"""
+    p, stem = str(q.get("passage") or ""), str(q.get("stem") or "")
+    if q_type in QB_MARK_TYPES and any(m not in p for m in CIRCLED[:5]):
+        return False
+    ch = [str(c).strip() for c in q.get("choices") or []]
+    if q_type not in QB_MARK_TYPES and len(set(ch)) < len(ch):
+        return False
+    if q_type in ("<보기> 일치 조합형", "어법 (조합형)"):
+        where = str(q.get("box") or "") if q_type.startswith("<보기>") else p
+        if set(re.findall("[ⓐ-ⓗ]", " ".join(ch))) - set(re.findall("[ⓐ-ⓗ]", where)):
+            return False
+    if (q_type == "낱말 (문맥상)" and "어법" in stem) or (q_type.startswith("어법") and "문맥" in stem):
+        return False
+    return True
+
 def qb_parse(out, q_type: str, count: int, plans: List[List[str]], text: str) -> List[Dict]:
     """AI 답에서 형식이 맞는 문항만 골라 냄 ('원문'만 써 온 지문은 원문으로 채움)"""
     good = []
@@ -4983,6 +4999,8 @@ def qb_parse(out, q_type: str, count: int, plans: List[List[str]], text: str) ->
                 q["_q_type"] = fx
             if q_type == "순서":
                 qb_fix_order(q)  # 수능식 고정 선택지 + 정답 번호 고르게 (정답 검증 전에 바꿔서 검증도 바뀐 문항으로)
+            if not qb_shape_ok(q, q.get("_q_type") or q_type):
+                continue
         if qi < len(plans) and plans[qi]:
             q["plan"] = plans[qi]   # 어떤 장치로 냈는지 남김 (나중에 골고루 나왔는지 확인용)
             yt = [x.split("): ", 1)[-1] for x in plans[qi] if x.startswith("영쌤 출제 포인트")]
