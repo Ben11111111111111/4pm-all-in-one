@@ -4767,6 +4767,7 @@ QB_YT_SCOPES = {
     "빈칸·요약문": {"빈칸", "요약문 (A)(B)"},
     "순서": {"순서"},
     "삽입": {"삽입"},
+    "어법": QB_GRAMMAR_TYPES,
     "어법·낱말": QB_GRAMMAR_TYPES | {"낱말 (문맥상)"},
 }
 QB_YT_RATE = 0.5          # 평소: 문항마다 이 확률로 영쌤 포인트 하나 적용 ('영쌤 포인트 위주'를 켜면 모든 문항)
@@ -4785,40 +4786,40 @@ DEFAULT_YT_POINTS = [
     {"on": True, "scope": "일치·추론 (내용 일치·<보기>·추론)", "tb": True,
      "text": "교과서 지문: 같은 단원의 다른 단락에는 있지만 이번 문제 지문(단락)에는 없는 내용으로 선지를 하나 만든다. "
              "교과서 전체를 공부한 학생이 '본 내용'이라 맞다고 고르게 하는 오답(지문에 없으므로 일치하지 않음/추론 불가)."},
-    {"on": True, "scope": "어법·낱말", "tb": False,
+    {"on": True, "scope": "어법", "tb": False,
      "text": "'있는 대로 고른 것' 조합형이면: 선지 하나는 정답 조합에 하나를 더 얹은 것으로 둔다(예: 정답 ⓐ, ⓓ, ⓔ / 오답 선지 ⓐ, ⓒ, ⓓ, ⓔ). "
              "아는 것 몇 개만으로는 못 풀고 밑줄 하나하나를 모두 정확히 판단해야 풀리게 한다."},
-    {"on": True, "scope": "어법·낱말", "tb": False,
+    {"on": True, "scope": "어법", "tb": False,
      "text": "어법 함정 장치(이 중 지문에 맞는 것을 골라 씀): 전치사+관계대명사에서 전치사를 절 뒤로 보내기(the house in which he lives → the house which he lives in, "
              "또는 전치사를 빼서 틀리게), enough 어순(old enough to ↔ enough old to), 후치수식해야 할 형용사(구)를 명사 앞에 두기(something important → important something, "
              "a box full of toys → a full of toys box), supply A with B의 A·B 자리 바꾸기(supply them with food ↔ supply food with them, provide·present·furnish도 같음)."},
-    {"on": True, "scope": "어법·낱말", "tb": False,
+    {"on": True, "scope": "어법", "tb": False,
      "text": "어법 함정 — 사소한 수일치 실수 유도(이 중 지문에 맞는 것 1~2개): one of 뒤 복수명사 자리에 단수명사(one of the reasons → one of the reason), "
              "every·each 뒤 단수명사 자리에 복수명사(every student → every students), 소유격·대명사의 수일치(가리키는 명사가 복수인데 their → its, them → it, "
              "또는 그 반대). 긴 수식어 때문에 가리키는 명사가 멀리 떨어진 자리를 고른다."},
-    {"on": True, "scope": "어법·낱말", "tb": False,
+    {"on": True, "scope": "어법", "tb": False,
      "text": "어법 함정 — 태·분사(이 중 지문에 맞는 것 1~2개): 현재완료 수동 ↔ 능동 바꾸기(has been reduced ↔ has reduced — 주어가 행위자인지 대상인지로 판단), "
              "대표 자동사를 수동으로(emerge·happen·occur·appear·disappear·arise·exist·consist of·result in → was emerged, is occurred 등), "
              "관용 분사 형태 바꾸기(compared to → comparing to, given that·provided that·considering 등도 같은 방식)."},
-    {"on": True, "scope": "어법·낱말", "tb": False,
+    {"on": True, "scope": "어법", "tb": False,
      "text": "어법 함정 — 비교급 강조·수량 형용사(이 중 지문에 맞는 것 1~2개): 비교급 강조는 much·still·far·even·a lot인데 very·more 등으로 바꾸기"
              "(much better → very better), 셀 수 없는 명사에 쓰는 much·little ↔ 셀 수 있는 복수명사에 쓰는 many·few 바꾸기(little information → few information, many people → much people)."},
-    {"on": True, "scope": "어법·낱말", "tb": False,
+    {"on": True, "scope": "어법", "tb": False,
      "text": "어법 함정 — 동사의 목적어·목적격보어(이 중 지문에 맞는 것 1~2개): 동명사만 목적어로 취하는 동사(enjoy·avoid·mind·finish·consider·deny·suggest·give up) / "
              "to부정사만 취하는 동사(want·decide·hope·plan·refuse·agree·expect·manage) / 둘 다 되는 동사(begin·start·like, remember·forget·stop은 뜻이 달라짐)의 목적어 형태 바꾸기, "
              "5형식 목적격보어 바꾸기(want·ask·allow·encourage·enable·force + O + to V ↔ 원형·-ing, 사역 make·let·have + O + 원형 ↔ to V, 지각동사 + O + 원형·분사, "
              "keep·find·leave + O + 형용사·분사)."},
-    {"on": True, "scope": "어법·낱말", "tb": False,
+    {"on": True, "scope": "어법", "tb": False,
      "text": "어법 함정 — 품사·가목적어·대동사(이 중 지문에 맞는 것 1~2개): 준동사(to V·동명사·분사)를 꾸미는 부사를 형용사로(to respond quick, by carefully reading → careful), "
              "형용사 보어 자리(seem·remain·become·stay·sound, 5형식 find·keep·make O 형용사)를 부사로(remain silently, found it easily), "
              "5형식 가목적어 it을 빼거나 다른 대명사로(make it possible to → make possible to / make this possible to), "
              "대동사를 앞 동사 종류·시제와 다르게(앞이 일반동사인데 is, 과거인데 does)."},
-    {"on": True, "scope": "어법·낱말", "tb": False,
+    {"on": True, "scope": "어법", "tb": False,
      "text": "어법 함정 — 문장 구조(이 중 지문에 맞는 것 1~2개): 병렬 구조에서 and·or·but 뒤 동사를 앞 동사 시제와 맞추지 않고 동명사·분사로(collected and analyzing), "
              "명령문이나 주절의 본동사를 동명사·분사로 바꿔 본동사를 없애기(Imagine → Imagining ~, 문장에 동사가 없게), "
              "가정법 if 생략 도치 바꾸기(Had I known → I had known / If had I known, Were it not for, Should you need), "
              "간접의문문 어순을 의문문 어순으로(I wonder what he wants → what does he want, how much it costs → how much does it cost)."},
-    {"on": True, "scope": "어법·낱말", "tb": False,
+    {"on": True, "scope": "어법", "tb": False,
      "text": "어법 함정 — 관계사(이 중 지문에 맞는 것 1~2개): 관계대명사 ↔ 관계부사(뒤가 불완전한데 where·when / 완전한데 which), "
              "전치사+관계대명사 ↔ 관계대명사만(in which → which, 또는 전치사를 다른 것으로), 접속사 that ↔ 선행사를 포함한 what(선행사 유무·뒤 절의 완전성으로 판단), "
              "사람 선행사의 who를 which로(또는 사물 선행사에 who), 콤마 뒤 that."},
@@ -4844,6 +4845,8 @@ def qb_yt_applicable(points: List[Dict], q_type: str, textbook: bool) -> List[Di
     out = []
     for p in points or []:
         scope = QB_YT_SCOPES.get(p.get("scope"), None) if p.get("scope") in QB_YT_SCOPES else None
+        if scope and str(p.get("text", "")).lstrip().startswith(("어법 함정", "'있는 대로")):
+            scope = scope & QB_GRAMMAR_TYPES  # 어법 함정은 낱말(문맥상) 문제에 붙이지 않음 (붙이면 어법 문제로 나옴)
         if p.get("on", True) and (scope is None or q_type in scope) and (textbook or not p.get("tb")):
             out.append(p)
     return out
