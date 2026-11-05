@@ -7,6 +7,7 @@ import base64
 import html
 import uuid
 import random
+import copy
 import hashlib
 import functools
 import math
@@ -4655,6 +4656,57 @@ def qb_norm_answer(a: str) -> str:
     m = re.search(r"\b([1-5])\b", s)
     return CIRCLED[int(m.group(1)) - 1] if m else ""
 
+# 순서 유형 선택지는 수능과 같은 고정 배열 ((A)로 시작하는 선지는 ① 하나, (A)-(B)-(C)는 없음)
+QB_ORDER_CANON = ["ACB", "BAC", "BCA", "CAB", "CBA"]
+
+def qb_fix_order(q: Dict, rnd=None, only_if_needed: bool = False) -> bool:
+    """순서 문항의 덩어리 이름 (A)(B)(C)를 바꿔 달아 선택지를 수능식 고정 배열로 맞춤 (AI 호출 없음).
+    정답 번호는 rnd로 고르게 정함. 해설에 번호·순서로 언급된 오답이 사라지지 않게 고름.
+    only_if_needed=True면 이미 고정 배열인 문항은 그대로 둠. 형식을 못 읽으면 바꾸지 않고 False."""
+    seqs = ["".join(re.findall(r"\(([ABC])\)", str(c))) for c in (q.get("choices") or [])]
+    ans = str(q.get("answer", ""))
+    if len(seqs) != 5 or len(set(seqs)) != 5 or any(sorted(s) != ["A", "B", "C"] for s in seqs) or ans not in CIRCLED:
+        return False
+    if only_if_needed and seqs == QB_ORDER_CANON:
+        return True
+    passage = str(q.get("passage", ""))
+    parts = re.split(r"\(([ABC])\)[ \t]*", passage)
+    labels = parts[1::2]
+    if sorted(labels) != ["A", "B", "C"]:
+        return False
+    prefix, blocks = parts[0], {labels[i]: parts[2 + 2 * i].strip() for i in range(3)}
+    expl = q.get("explanation")
+    exp_text = " ".join(expl) if isinstance(expl, list) else str(expl or "")
+    correct = seqs[CIRCLED.index(ans)]
+    rnd = rnd or random.Random()
+    cands = list(range(5))
+    rnd.shuffle(cands)
+    for p in cands:
+        m = dict(zip(correct, QB_ORDER_CANON[p]))
+        mapped = ["".join(m[ch] for ch in s) for s in seqs]
+        lost = [j for j, s in enumerate(mapped) if s == "ABC"]
+        if lost and (CIRCLED[lost[0]] in exp_text
+                     or re.search(r"\(" + r"\)\s*[-–→]\s*\(".join(seqs[lost[0]]) + r"\)", exp_text)):
+            continue  # 해설이 가리키는 오답이 없어지는 자리는 피함 (원래 빠졌던 순서가 (A)-(B)-(C)가 되는 자리는 항상 가능)
+        break
+    num = {CIRCLED[j]: CIRCLED[QB_ORDER_CANON.index(s)] for j, s in enumerate(mapped) if s in QB_ORDER_CANON}
+
+    def relabel(s: str) -> str:
+        s = re.sub(r"\(([ABC])\)", lambda x: f"({m[x.group(1)]})", str(s))
+        return re.sub("[①②③④⑤]", lambda x: num.get(x.group(0), x.group(0)), s)
+
+    new_blocks = {m[k]: v for k, v in blocks.items()}
+    q["passage"] = (prefix.rstrip() + "\n" if prefix.strip() else "") + "\n".join(f"({k}) {new_blocks[k]}" for k in "ABC")
+    q["choices"] = [f"({s[0]}) - ({s[1]}) - ({s[2]})" for s in QB_ORDER_CANON]
+    q["answer"] = CIRCLED[p]
+    if isinstance(expl, list):
+        q["explanation"] = [relabel(e) for e in expl]
+    elif expl:
+        q["explanation"] = relabel(expl)
+    if q.get("given"):
+        q["given"] = re.sub(r"\(([ABC])\)", lambda x: f"({m[x.group(1)]})", str(q["given"]))
+    return True
+
 def _qb_call(gclient, model: str, prompt, schema: Dict, temperature: float, logs: List[str], what: str, cache_first: bool = False):
     for attempt in range(4):
         try:
@@ -4687,6 +4739,7 @@ def qb_build_prompt(label: str, text: str, q_type: str, level: str, school: str,
         extra += f"\n[운양고·제일고 실제 기출 어휘 출제 패턴]\n{QB_VOCAB_TRAPS}\n"
     if q_type in QB_CHOICE_TYPES:
         extra += f"\n[선택지 재진술 — 실제 기출 측정]\n- {QB_CHOICE_PARA}\n"
+    extra += qb_link_note(label, text)
     plans = qb_question_plans(q_type, level, school, count, existing or [], underline)
     if any(plans):
         extra += "\n[문항별 출제 계획 — 문항마다 다르게, 반드시 따름]\n" + "\n".join(
@@ -4755,6 +4808,8 @@ def qb_parse(out, q_type: str, count: int, plans: List[List[str]], text: str) ->
             q["choices"] = [""] * 5 if q_type in QB_MARK_TYPES else [str(c).strip() for c in (q.get("choices") or [])][:5]
             if not q["answer"] or len(q["choices"]) != 5 or (q_type not in QB_MARK_TYPES and not all(q["choices"])):
                 continue
+            if q_type == "순서":
+                qb_fix_order(q)  # 수능식 고정 선택지 + 정답 번호 고르게 (정답 검증 전에 바꿔서 검증도 바뀐 문항으로)
         if qi < len(plans) and plans[qi]:
             q["plan"] = plans[qi]   # 어떤 장치로 냈는지 남김 (나중에 골고루 나왔는지 확인용)
         good.append(q)
@@ -4989,6 +5044,69 @@ def qb_batch_poll(sb, gclient, job: Dict, claim):
                 j["batches"] = [b for b in j.get("batches", []) if b.get("id") != bid]
         _job_update(sb, drop)
 
+# ---- 연결 지문: 실제 내신처럼 지문 여러 개를 묶어 한 문제로 ----
+#   이어 붙이기: 교과서의 짧은 단락 2~4개를 한 지문으로 (예: 운양 25-2 기말 5·6번 = 4-1+4-2, 8·10번 = 4-3~4-5)
+#   (A)(B) 함께: 같은 시험 범위의 비슷한 내용 두 지문을 (A)(B)로 싣고 두 글을 함께 묻기 (제일고·운양고 추론형)
+#   문제는 'passage_label'에 묶은 이름(예: "[교재 4과] 4-1 + 4-2", "[교재 4과] 4-1 & 4-3")으로 저장
+QB_LINK_JOIN = " + "
+QB_LINK_PAIR = " & "
+QB_PAIR_TYPES = ["추론 (추론 가능·불가)", "내용 일치·불일치", "<보기> 일치 조합형", "주제", "요지·주장", "제목"]
+QB_LINK_MODES = {"따로": "지문마다 따로", "join": "🔗 이어 붙이기 (교과서 짧은 단락)", "pair": "🔗 (A)(B) 두 지문 함께"}
+
+def qb_link_label(labels: List[str], mode: str) -> str:
+    sep = QB_LINK_PAIR if mode == "pair" else QB_LINK_JOIN
+    ms = [re.match(r"^(\[[^\]]+\]\s*)(.+)$", l) for l in labels]
+    if all(ms) and len({m.group(1) for m in ms}) == 1:
+        return ms[0].group(1) + sep.join(m.group(2) for m in ms)
+    return sep.join(labels)
+
+def qb_link_parts(label: str) -> (str, List[str]):
+    """묶은 이름 → (방식 'join'/'pair', 원래 지문 이름들). 묶은 이름이 아니면 ('', [label])"""
+    for sep, mode in ((QB_LINK_PAIR, "pair"), (QB_LINK_JOIN, "join")):
+        if sep in str(label):
+            parts = str(label).split(sep)
+            m = re.match(r"^(\[[^\]]+\]\s*)", parts[0])
+            pre = m.group(1) if m else ""
+            return mode, [parts[0]] + [p if p.startswith("[") else pre + p for p in parts[1:]]
+    return "", [label]
+
+def qb_link_passage(ps: List[Dict], mode: str) -> Dict:
+    """고른 지문들 → 문제 만들기에 쓸 가상 지문 하나"""
+    bodies = [str(p.get("body_text", "")).strip() for p in ps]
+    text = "\n".join(f"({'AB'[i]}) {b}" for i, b in enumerate(bodies)) if mode == "pair" else "\n".join(bodies)
+    return {"label": qb_link_label([p["label"] for p in ps], mode), "body_text": text, "exam_key": ps[0].get("exam_key", ""), "number": ""}
+
+def qb_link_note(label: str, text: str) -> str:
+    """연결 지문이면 이번 출제 부분에 붙일 안내 (공통 앞부분은 그대로라 캐시에 영향 없음)"""
+    mode, parts = qb_link_parts(label)
+    if mode == "pair" and str(text).lstrip().startswith("(A)"):
+        return ("\n[연결 지문 — (A)(B) 두 글]\n- 이 지문은 같은 시험 범위에서 내용이 비슷한 두 글 (A)(B)다. 실제 내신처럼 두 글을 함께 읽어야 풀리게 낸다.\n"
+                "- stem은 두 글을 가리킨다(예: '(A)와 (B)를 읽고 추론할 수 없는 것은?', '(A) 필자의 관점에서 (B)의 내용을 설명한 것으로 가장 적절한 것은?', "
+                "'(A)와 (B)의 공통 주제로 가장 적절한 것은?', '(A)와 (B)에 대한 설명으로 일치하지 않는 것은?').\n"
+                "- passage에는 (A) 글과 (B) 글을 줄바꿈으로 나눠 앞에 (A)·(B)를 붙여 싣는다.\n"
+                "- 선택지 5개 중 3개 이상은 두 글을 모두 따져야 판단되게 한다(한 글에만 맞는 내용, 두 글의 관계·공통점을 거꾸로 한 내용, 한 글의 주장을 다른 글의 사례에 잘못 적용한 내용 등).\n")
+    if mode == "join" and len(parts) >= 2:
+        return (f"\n[연결 지문 — 교과서 단락 {len(parts)}개]\n- 이 지문은 교과서에서 이어지는 단락 {len(parts)}개를 실제 내신처럼 한 지문으로 이어 붙인 것이다. "
+                "단락 경계를 넘는 내용(앞 단락의 문제 제기 → 뒤 단락의 해결·사례 등)을 묻는 문항을 우선하고, 밑줄·표시는 지문 전체에 고르게 둔다.\n")
+    return ""
+
+@st.cache_data(ttl=60, show_spinner=False)
+def qb_link_labels(_sb) -> List[str]:
+    """문제 은행에 있는 연결 지문 이름 (가벼운 열 하나만 읽음)"""
+    if _sb is None:
+        found = {r.get("passage_label", "") for r in _qb_local_load()}
+    else:
+        found = set()
+        for pat in (f"%{QB_LINK_JOIN}%", f"%{QB_LINK_PAIR}%"):
+            start = 0
+            while True:
+                res = _sb.table(QB_TABLE).select("passage_label").like("passage_label", pat).range(start, start + 999).execute()
+                found |= {r["passage_label"] for r in (res.data or [])}
+                if len(res.data or []) < 1000:
+                    break
+                start += 1000
+    return sorted(l for l in found if qb_link_parts(l)[0])
+
 def enqueue_qbank(passages: List[Dict], q_types: List[str], levels: List[str], school: str, count: int, verify: bool,
                   text_model: str, api_delay: int, academy_name: str, school_name: str, light_easy: bool = False, underline: str = "mix",
                   batch: bool = False) -> int:
@@ -5199,6 +5317,55 @@ def qb_existing_gichul_keys(rows: List[Dict]) -> set:
             if r.get("difficulty") == QB_GICHUL_LEVEL and (r.get("content") or {}).get("source")}
 
 # ---- 시험지 구성 ----
+def qb_set_key(r: Dict):
+    """실제 기출 중 같은 시험·같은 지문에 딸린 문제 묶음 표시 (변형문제는 None)"""
+    if r.get("difficulty") != QB_GICHUL_LEVEL:
+        return None
+    c = r.get("content") or {}
+    eid = (c.get("source") or {}).get("exam_id")
+    p = re.sub(r"\s+", " ", str(c.get("passage", ""))).strip()
+    return (eid, p) if eid and p else None
+
+def _qb_src_no(r: Dict) -> int:
+    m = re.match(r"\d+", str(((r.get("content") or {}).get("source") or {}).get("no", "")))
+    return int(m.group(0)) if m else 999
+
+def qb_keep_sets(picked: List[Dict], rows: List[Dict]) -> (List[Dict], List[str]):
+    """실제 기출에서 한 지문에 여러 문제가 나온 경우, 하나가 뽑히면 같은 묶음 문제도 함께(시험 번호순으로 연달아) 넣음.
+    rows는 이미 유형·난이도 조건으로 거른 것이라 유형을 골라 뽑을 때는 조건에 맞는 문제만 따라옴.
+    늘어난 만큼 변형문제를 빼서 총 문항 수를 유지 (변형문제가 가장 많은 지문에서 뒤에서부터)"""
+    sets = {}
+    for r in rows:
+        k = qb_set_key(r)
+        if k:
+            sets.setdefault(k, []).append(r)
+    if not any(len(v) > 1 for v in sets.values()):
+        return picked, []
+    out, seen = [], set()
+    for q in picked:
+        if id(q) in seen:
+            continue
+        k = qb_set_key(q)
+        for g in (sorted(sets[k], key=_qb_src_no) if k else [q]):
+            if id(g) not in seen:
+                out.append(g)
+                seen.add(id(g))
+    extra, removed = len(out) - len(picked), 0
+    while removed < extra:
+        var = [i for i, r in enumerate(out) if r.get("difficulty") != QB_GICHUL_LEVEL]
+        if not var:
+            break
+        cnt = {}
+        for i in var:
+            cnt[out[i]["passage_label"]] = cnt.get(out[i]["passage_label"], 0) + 1
+        top = max(cnt, key=cnt.get)
+        out.pop(max(i for i in var if out[i]["passage_label"] == top))
+        removed += 1
+    if not extra:
+        return out, []
+    return out, [f"실제 기출에서 한 지문에 함께 나온 문제 {extra}개를 묶어서 넣었습니다"
+                 + (f" (대신 변형문제 {removed}개를 빼서 문항 수 유지)." if removed == extra else f" (총 {len(out)}문항).")]
+
 def qb_pick(rows: List[Dict], labels: List[str], total: int, seed: int) -> (List[Dict], List[str]):
     """고른 지문에서 골고루(같은 개수씩) 뽑고, 지문 안에서는 유형을 돌아가며 뽑음. 부족한 지문 몫은 남는 지문이 채움."""
     rnd = random.Random(seed)
@@ -5255,6 +5422,14 @@ def qb_pick(rows: List[Dict], labels: List[str], total: int, seed: int) -> (List
             ids.discard(id(q)); ids.add(id(best)); picked[i] = best
         for c in qb_grammar_concepts(best):
             seen[c] = seen.get(c, 0) + 1
+    picked, set_note = qb_keep_sets(picked, rows)
+    notes += set_note
+    # 예전에 쌓인 순서 변형문제도(실제 기출 문항은 그대로) 시험지에는 수능식 고정 선택지로 (저장된 문제는 그대로, 문항마다 같은 결과가 나오게 id로 고정)
+    for i, q in enumerate(picked):
+        if q.get("q_type") == "순서" and q.get("difficulty") != QB_GICHUL_LEVEL and isinstance(q.get("content"), dict):
+            c = copy.deepcopy(q["content"])
+            if qb_fix_order(c, random.Random(str(q.get("id", ""))), only_if_needed=True):
+                picked[i] = {**q, "content": c}
     return picked, notes
 
 def qb_html(s) -> str:
@@ -5290,6 +5465,8 @@ body { font-family: 'Noto Serif KR', serif; font-size: 10.3pt; line-height: 1.62
 .choices, .box, .write { break-inside: avoid; }
 .q .stem { font-family: 'Noto Sans KR'; font-size: 10pt; margin-bottom: 3px; }
 .q .stem .no { font-weight: 900; font-size: 11pt; margin-right: 2px; }
+.q.setq { margin-bottom: 8px; }
+.q .stem.sethead { font-weight: 700; break-after: avoid; }
 .q .tag { display: block; font-family: 'Noto Sans KR'; font-size: 7.8pt; color: #444; margin: -1px 0 3px 16px; }
 .q .tag .bd { display: inline-block; font-weight: 700; padding: 0 5px; margin-left: 3px; border: 1px solid #111; }
 .q .tag .bd.real { background: #111; color: #fff; }
@@ -5573,15 +5750,26 @@ def render_qbank_exam(qs: List[Dict], meta: Dict, gidx: Dict[str, List[Dict]]) -
          f"""<div class='head'><div class='top'><div class='brand'><b>PQRS</b>영T {html.escape(meta.get('brand', '변형문제 TEST'))}</div><div class='kind'>{html.escape(meta.get('kind', ''))}</div></div>
 <h1>{html.escape(meta.get('title', ''))}</h1><div class='sub'>{html.escape(meta.get('sub', ''))}</div>
 <div class='info'><div>반 :</div><div>번호 :</div><div>이름 :</div><div>점수 :</div></div></div><div class='cols'>"""]
+    keys = [qb_set_key(r) for r in qs]
     for n, r in enumerate(qs, 1):
         c = r["content"]
+        k = keys[n - 1]
+        in_set = k is not None and ((n >= 2 and keys[n - 2] == k) or (n < len(qs) and keys[n] == k))
+        if in_set and (n < 2 or keys[n - 2] != k):
+            # 실제 기출처럼 한 지문에 문제 여러 개: 지문을 한 번만 싣고 아래에 문제들을 이어 붙임
+            last = n
+            while last < len(qs) and keys[last] == k:
+                last += 1
+            o.append(f"<div class='q setq'><div class='stem sethead'>[{n}~{last}] 다음 글을 읽고 물음에 답하시오.</div>"
+                     f"<div class='passage'>{qb_paras(c.get('passage'))}</div></div>")
         tm = f"<span class='tm'>⏱ {qb_time_text(qb_time_sec(r))}</span>" if meta.get("show_time", True) else ""
         o.append(f"<div class='q'><div class='stem'>{tm}<span class='no'>{n}.</span> {qb_html(c.get('stem'))}</div>")
         if meta.get("show_tag"):
             o.append(f"<span class='tag'>{tag_of(r)}</span>")
         if c.get("given"):
             o.append(f"<div class='given'>{qb_paras(c['given'])}</div>")
-        o.append(f"<div class='passage'>{qb_paras(c.get('passage'))}</div>")
+        if not in_set:
+            o.append(f"<div class='passage'>{qb_paras(c.get('passage'))}</div>")
         if c.get("box"):
             o.append(f"<div class='box'>{qb_paras(c['box'])}</div>")
         choices = c.get("choices") or []
@@ -5796,7 +5984,8 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
         return
     by_label = {p["label"]: p for p in mock_lib}
     st.markdown(QB_PICKER_CSS, unsafe_allow_html=True)
-    summary = qb_bank_summary(sb, tuple(sorted(by_label)))
+    links = [l for l in qb_link_labels(sb) if all(x in by_label for x in qb_link_parts(l)[1])]
+    summary = qb_bank_summary(sb, tuple(sorted(by_label) + links))
     label_counts = _qb_chip_counts(summary, "passage_label")
     t_gen, t_exam, t_manage, t_gichul = st.tabs(["🛠️ 문제 만들기 (누적)", "📄 시험지 만들기", "🗂️ 문제 보기·삭제", "🏫 기출 표시"])
 
@@ -5824,20 +6013,45 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
                                               value=False, key="qb_gen_batch",
                                               help="각 AI 회사의 Batch API를 써요. 요청을 모아 보내 두면 회사가 한가할 때 처리하고 값을 50% 깎아 줘요. "
                                                    "정답 검증은 결과가 들어온 뒤 바로 해요(검증 값은 그대로). 창을 닫아도 서버가 2분마다 확인해서 들어온 것부터 저장해요.")
-        n_jobs = len(sel) * len({("어법 (조합형)" if (t == "어법 (단일)" and lv == "최상") else t, lv) for t in q_types for lv in levels})
+            # 지문 연결: 고른 지문 여러 개를 한 지문으로 묶어 출제 (실제 내신처럼)
+            link = "따로"
+            if len(sel) >= 2:
+                link = _qb_row("지문 연결").segmented_control("지문 연결", list(QB_LINK_MODES), format_func=QB_LINK_MODES.get, default="따로",
+                                                            key="qb_gen_link", label_visibility="collapsed",
+                                                            help="이어 붙이기: 교과서 짧은 단락 2~4개를 실제 시험처럼 한 지문으로. "
+                                                                 "(A)(B): 같은 범위의 비슷한 내용 두 지문을 함께 묻는 추론·일치·주제형") or "따로"
+            gen_ps = [by_label[l] for l in sel]
+            if link == "join":
+                if len(sel) > 4:
+                    st.warning("이어 붙이기는 지문 4개까지예요. 앞의 4개만 묶어요.")
+                gen_ps = [qb_link_passage(gen_ps[:4], "join")]
+            elif link == "pair":
+                if len(sel) != 2:
+                    st.warning("(A)(B)는 지문을 정확히 2개 골라 주세요.")
+                    gen_ps = []
+                else:
+                    gen_ps = [qb_link_passage(gen_ps, "pair")]
+                    dropped_t = [t for t in q_types if t not in QB_PAIR_TYPES]
+                    q_types = [t for t in q_types if t in QB_PAIR_TYPES]
+                    if dropped_t:
+                        st.caption("💡 (A)(B) 두 지문은 " + " · ".join(QB_PAIR_TYPES) + " 유형만 만들어요 (나머지 유형은 이번에 빼요).")
+            if link != "따로" and gen_ps:
+                st.markdown(f"<div class='qb-note'>묶은 지문 <b>{html.escape(gen_ps[0]['label'])}</b> · "
+                            f"{len(gen_ps[0]['body_text'].split())}단어 · 시험지를 만들 때 묶은 지문을 모두 고르면 함께 뽑혀요</div>", unsafe_allow_html=True)
+        n_jobs = len(gen_ps) * len({("어법 (조합형)" if (t == "어법 (단일)" and lv == "최상") else t, lv) for t in q_types for lv in levels})
         if "어법 (단일)" in q_types and "최상" in levels:
             st.caption("💡 어법 최상은 실제 내신처럼 '옳은/틀린 것만을 있는 대로 고른 것'(ⓐ~ⓗ 조합형)으로 만듭니다.")
         n_q = n_jobs * count
         if n_jobs:
             combos = {("어법 (조합형)" if (t == "어법 (단일)" and lv == "최상") else t, lv) for t in q_types for lv in levels}
-            cost = len(sel) * sum(qb_job_cost_krw(light_model_for(text_model) if (light_easy and lv in ("하", "중")) else text_model, int(count), verify, batch)
+            cost = len(gen_ps) * sum(qb_job_cost_krw(light_model_for(text_model) if (light_easy and lv in ("하", "중")) else text_model, int(count), verify, batch)
                                   for _, lv in combos)
             when = "결과는 보통 몇 분~몇 시간, 길면 24시간 뒤" if batch else f"예상 시간 약 {max(1, n_jobs * 40 // 60)}분"
             st.caption(f"📦 작업 {n_jobs}건 · 문제 약 {n_q}개 · 예상 비용 약 {cost:,.0f}원 (문제당 약 {cost / max(1, n_q):,.0f}원){' · 💸 반값' if batch else ''} · "
                        f"{when} (창을 닫아도 서버에서 계속)")
             st.caption("💡 조합당 문제 수를 늘리면 지문·규칙을 읽는 고정 비용을 함께 나눠 문제당 값이 내려가요 (1개 → 2개 → 3개로 갈수록 싸지고, 그 뒤로는 차이가 작아요).")
         if st.button("🚀 변형문제 생성 시작", type="primary", disabled=not n_jobs, key="qb_gen_btn"):
-            n = enqueue_qbank([by_label[l] for l in sel], q_types, levels, school, int(count), verify, text_model, api_delay, academy_name, school_name, light_easy, underline, batch)
+            n = enqueue_qbank(gen_ps, q_types, levels, school, int(count), verify, text_model, api_delay, academy_name, school_name, light_easy, underline, batch)
             st.session_state.gen_flash = f"✅ 변형문제 {n}건을 생성 작업에 추가했습니다. 위 작업 칸에서 진행 상황을 볼 수 있어요."
             st.rerun()
 
@@ -5883,7 +6097,9 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
                             st.rerun()
                 if excl:
                     x1.markdown(f"<div class='qb-note'>고른 기록 {len(chosen)}개 · 문항 <b>{len(excl)}개</b>를 빼고 뽑아요</div>", unsafe_allow_html=True)
-            sel_set = set(sel_e)
+            # 연결 지문 문제는 묶인 지문을 모두 골랐을 때 함께 뽑음
+            sel_links = [l for l in links if set(qb_link_parts(l)[1]) <= set(sel_e)]
+            sel_set = set(sel_e) | set(sel_links)
             pool = [r for r in summary if r["passage_label"] in sel_set and (e_school == "전체" or r.get("school") == e_school) and r.get("id") not in excl]
             lv_counts = _qb_chip_counts([r for r in pool if r["difficulty"] != QB_GICHUL_LEVEL], "difficulty")
             lv_box = _qb_row("난이도")
@@ -5940,7 +6156,7 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
         reshuffle = b2.button("🔀 다른 조합으로 다시 뽑기", disabled="qb_exam_html" not in st.session_state, use_container_width=True, key="qb_exam_shuffle")
         if make or reshuffle:
             seed = random.randint(1, 10**9)
-            labels_ordered = sorted(sel_e, key=lambda l: natural_sort_key({"label": l}), reverse=order.startswith("지문 역순"))
+            labels_ordered = sorted(sel_e + sel_links, key=lambda l: natural_sort_key({"label": l}), reverse=order.startswith("지문 역순"))
             def wanted(r):
                 is_real = r["difficulty"] == QB_GICHUL_LEVEL
                 if (is_real and e_real == "빼기") or (not is_real and (e_real == "기출만" or r["difficulty"] not in e_levels)):
@@ -6002,7 +6218,7 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
             components.html(st.session_state.qb_exam_html, height=850, scrolling=True)
 
     with t_manage:
-        m_label = st.selectbox("📌 지문", [p["label"] for p in sorted(mock_lib, key=natural_sort_key)], key="qb_manage_label")
+        m_label = st.selectbox("📌 지문", sorted([p["label"] for p in mock_lib] + links, key=lambda l: natural_sort_key({"label": l})), key="qb_manage_label")
         rows = qb_fetch(sb, [m_label]) if m_label else []
         if not rows:
             st.caption("이 지문에는 아직 쌓인 문제가 없습니다.")
@@ -6927,6 +7143,8 @@ APP_HELP = {
 - **하·중은 가벼운 모델로**: 쉬운 문제는 싼 모델로, 상·최상은 지금 모델로 만들어 비용을 줄여요.
 - **💸 반값 모드**: 켜면 생성 비용이 절반이에요. 대신 결과가 바로 안 나오고 보통 몇 분~몇 시간, 길면 24시간 뒤에 들어와요. 급할 때는 끄고, 시간이 있을 때(예: 밤에 넣어 두고 다음 날) 켜세요. 창을 닫아도 서버가 2분마다 확인해서 들어온 것부터 저장해요.
 - 같은 지문을 다시 만들면 이미 쌓인 문제와 **다른 포인트**로 출제해요.
+- **🔗 지문 연결**(지문을 2개 이상 고르면 나와요): **이어 붙이기**는 교과서의 짧은 단락 2~4개를 실제 시험처럼 한 지문으로 묶어 출제해요 (예: 4-1 + 4-2). **(A)(B) 두 지문 함께**는 같은 범위의 비슷한 내용 두 지문을 (A)(B)로 싣고 '(A)와 (B)를 읽고 추론할 수 없는 것'처럼 두 글을 함께 묻는 문제를 만들어요 (추론·내용 일치·<보기>·주제·요지·제목 유형만). 묶은 지문 문제는 '4-1 + 4-2'처럼 따로 쌓이고, 시험지를 만들 때 묶인 지문을 모두 고르면 함께 뽑혀요.
+- **순서 유형 선택지**는 수능처럼 ① (A)-(C)-(B) ② (B)-(A)-(C) ③ (B)-(C)-(A) ④ (C)-(A)-(B) ⑤ (C)-(B)-(A)로 고정돼요 ((A)로 시작하는 선지는 ① 하나). 예전에 만든 순서 문제도 시험지에서는 이렇게 바뀌어 나와요.
 - **어법 밑줄**: 섞기(학교 기출 비율로 단어·구 밑줄과 문장 전체 밑줄을 무작위로) / 단어·구 / 문장 전체.
 - **문항마다 출제 장치를 무작위로 정해요** (AI 비용 추가 없음): 어법은 실제 기출 개념 약 20가지 중 2~3개를 '꼭 묻기'로 뽑아요. 학교마다 지금까지 만든 문제를 세서 덜 나온 개념부터 채우기 때문에, 분사처럼 많이 나온 개념만 반복되지 않고 실제 출제된 개념(5형식·관계부사·대명사 지칭·복합관계사 등)이 모두 고르게 나와요. 시험지를 뽑을 때도 어법 문제는 이미 나온 개념과 덜 겹치는 것을 골라요.
   영어 선택지·<보기>·요약문은 두 학교 모두 늘 재진술하고, 주제를 뒤집은 오답(제일고 1~2개, 운양고 가끔)을 넣어요.
@@ -6940,6 +7158,7 @@ APP_HELP = {
 - **학교 비율 → 학교별 문제 수 정하기**: 예) 운양고 스타일 20 + 제일고 스타일 10. 한쪽이 모자라면 다른 학교로 채우지 않고 알려 줘요.
 - **이미 낸 문항**: 전에 '문항 기록 저장'한 시험지를 고르면 **그 문항을 빼고** 뽑아요 (추가로 풀 학생에게 새 문제만 줄 때).
 - 뽑는 원리: 고른 지문에서 **같은 개수씩 골고루**, 지문 안에서는 **유형을 돌아가며** 뽑아요. 모자란 지문 몫은 문제가 많은 지문이 채워요.
+- **실제 기출 묶음**: 실제 시험에서 한 지문에 여러 문제가 나온 경우(예: 5·6번), 하나가 뽑히면 같은 지문 문제도 함께 넣고 '[5~6] 다음 글을 읽고 물음에 답하시오.' 아래에 지문을 한 번만 실어요. 유형을 골라 뽑으면 고른 유형만 따라오고, 늘어난 만큼 변형문제를 빼서 문항 수는 그대로예요.
 - **📄 시험지 만들기**: 미리보기·HTML 다운로드. **🔀 다른 조합으로 다시 뽑기**: 같은 조건에서 다른 문제로 다시 뽑아요.
 - **💾 문항 기록 저장**: 이름(예: 김민수 1차)을 붙여 이 시험지 문항을 기록해요. 다음 시험지에서 빼는 데 써요. 지우기는 '기록 관리'에서 해요 (문제는 그대로).
 - **표시 옵션**: 출처·구분, 같은 지문 기출 이력, 정답·해설, 학교 스타일 표시, 문항별 권장 풀이 시간(단어 수·유형으로 계산), **ANATOMY VISION 책으로**(앞뒤 표지·사용법·제작 소개·저작권 쪽 추가).
