@@ -4792,7 +4792,47 @@ DEFAULT_YT_POINTS = [
      "text": "어법 함정 장치(이 중 지문에 맞는 것을 골라 씀): 전치사+관계대명사에서 전치사를 절 뒤로 보내기(the house in which he lives → the house which he lives in, "
              "또는 전치사를 빼서 틀리게), enough 어순(old enough to ↔ enough old to), 후치수식해야 할 형용사(구)를 명사 앞에 두기(something important → important something, "
              "a box full of toys → a full of toys box), supply A with B의 A·B 자리 바꾸기(supply them with food ↔ supply food with them, provide·present·furnish도 같음)."},
+    {"on": True, "scope": "어법·낱말", "tb": False,
+     "text": "어법 함정 — 사소한 수일치 실수 유도(이 중 지문에 맞는 것 1~2개): one of 뒤 복수명사 자리에 단수명사(one of the reasons → one of the reason), "
+             "every·each 뒤 단수명사 자리에 복수명사(every student → every students), 소유격·대명사의 수일치(가리키는 명사가 복수인데 their → its, them → it, "
+             "또는 그 반대). 긴 수식어 때문에 가리키는 명사가 멀리 떨어진 자리를 고른다."},
+    {"on": True, "scope": "어법·낱말", "tb": False,
+     "text": "어법 함정 — 태·분사(이 중 지문에 맞는 것 1~2개): 현재완료 수동 ↔ 능동 바꾸기(has been reduced ↔ has reduced — 주어가 행위자인지 대상인지로 판단), "
+             "대표 자동사를 수동으로(emerge·happen·occur·appear·disappear·arise·exist·consist of·result in → was emerged, is occurred 등), "
+             "관용 분사 형태 바꾸기(compared to → comparing to, given that·provided that·considering 등도 같은 방식)."},
+    {"on": True, "scope": "어법·낱말", "tb": False,
+     "text": "어법 함정 — 비교급 강조·수량 형용사(이 중 지문에 맞는 것 1~2개): 비교급 강조는 much·still·far·even·a lot인데 very·more 등으로 바꾸기"
+             "(much better → very better), 셀 수 없는 명사에 쓰는 much·little ↔ 셀 수 있는 복수명사에 쓰는 many·few 바꾸기(little information → few information, many people → much people)."},
+    {"on": True, "scope": "어법·낱말", "tb": False,
+     "text": "어법 함정 — 동사의 목적어·목적격보어(이 중 지문에 맞는 것 1~2개): 동명사만 목적어로 취하는 동사(enjoy·avoid·mind·finish·consider·deny·suggest·give up) / "
+             "to부정사만 취하는 동사(want·decide·hope·plan·refuse·agree·expect·manage) / 둘 다 되는 동사(begin·start·like, remember·forget·stop은 뜻이 달라짐)의 목적어 형태 바꾸기, "
+             "5형식 목적격보어 바꾸기(want·ask·allow·encourage·enable·force + O + to V ↔ 원형·-ing, 사역 make·let·have + O + 원형 ↔ to V, 지각동사 + O + 원형·분사, "
+             "keep·find·leave + O + 형용사·분사)."},
+    {"on": True, "scope": "어법·낱말", "tb": False,
+     "text": "어법 함정 — 품사·가목적어·대동사(이 중 지문에 맞는 것 1~2개): 준동사(to V·동명사·분사)를 꾸미는 부사를 형용사로(to respond quick, by carefully reading → careful), "
+             "형용사 보어 자리(seem·remain·become·stay·sound, 5형식 find·keep·make O 형용사)를 부사로(remain silently, found it easily), "
+             "5형식 가목적어 it을 빼거나 다른 대명사로(make it possible to → make possible to / make this possible to), "
+             "대동사를 앞 동사 종류·시제와 다르게(앞이 일반동사인데 is, 과거인데 does)."},
+    {"on": True, "scope": "어법·낱말", "tb": False,
+     "text": "어법 함정 — 문장 구조(이 중 지문에 맞는 것 1~2개): 병렬 구조에서 and·or·but 뒤 동사를 앞 동사 시제와 맞추지 않고 동명사·분사로(collected and analyzing), "
+             "명령문이나 주절의 본동사를 동명사·분사로 바꿔 본동사를 없애기(Imagine → Imagining ~, 문장에 동사가 없게), "
+             "가정법 if 생략 도치 바꾸기(Had I known → I had known / If had I known, Were it not for, Should you need), "
+             "간접의문문 어순을 의문문 어순으로(I wonder what he wants → what does he want, how much it costs → how much does it cost)."},
+    {"on": True, "scope": "어법·낱말", "tb": False,
+     "text": "어법 함정 — 관계사(이 중 지문에 맞는 것 1~2개): 관계대명사 ↔ 관계부사(뒤가 불완전한데 where·when / 완전한데 which), "
+             "전치사+관계대명사 ↔ 관계대명사만(in which → which, 또는 전치사를 다른 것으로), 접속사 that ↔ 선행사를 포함한 what(선행사 유무·뒤 절의 완전성으로 판단), "
+             "사람 선행사의 who를 which로(또는 사물 선행사에 who), 콤마 뒤 that."},
 ]
+
+def qb_is_yt(r: Dict) -> bool:
+    """영쌤 출제 포인트로 낸 문항인지 (예전에 만든 문항은 출제 계획 기록으로 판단)"""
+    c = r.get("content") or {}
+    return bool(c.get("yt")) or any(str(x).startswith("영쌤 출제 포인트") for x in (c.get("plan") or []))
+
+QB_YT_FILTER = ["섞기", "🎣 영쌤 포인트 문제만", "영쌤 포인트 빼기"]
+
+def qb_yt_keep(r: Dict, mode: str) -> bool:
+    return mode == QB_YT_FILTER[0] or (qb_is_yt(r) == (mode == QB_YT_FILTER[1]))
 
 def qb_yt_points(dna: Dict = None) -> List[Dict]:
     """저장된 영쌤 출제 포인트 (처음이면 기본 4개)"""
@@ -4942,6 +4982,9 @@ def qb_parse(out, q_type: str, count: int, plans: List[List[str]], text: str) ->
                 qb_fix_order(q)  # 수능식 고정 선택지 + 정답 번호 고르게 (정답 검증 전에 바꿔서 검증도 바뀐 문항으로)
         if qi < len(plans) and plans[qi]:
             q["plan"] = plans[qi]   # 어떤 장치로 냈는지 남김 (나중에 골고루 나왔는지 확인용)
+            yt = [x.split("): ", 1)[-1] for x in plans[qi] if x.startswith("영쌤 출제 포인트")]
+            if yt:
+                q["yt"] = yt[0][:300]  # 영쌤 출제 포인트로 낸 문항 표시 (시험지 🎣 표시·고르기용)
         good.append(q)
     return good
 
@@ -5208,6 +5251,49 @@ def qb_link_passage(ps: List[Dict], mode: str) -> Dict:
     bodies = [str(p.get("body_text", "")).strip() for p in ps]
     text = "\n".join(f"({'AB'[i]}) {b}" for i, b in enumerate(bodies)) if mode == "pair" else "\n".join(bodies)
     return {"label": qb_link_label([p["label"] for p in ps], mode), "body_text": text, "exam_key": ps[0].get("exam_key", ""), "number": ""}
+
+# 교과서 짧은 단락 자동 이어 붙이기 (2026-11-05 선생님 요청: 실제 내신처럼 짧은 단락은 앞뒤 단락과 묶어 출제 — 예: 운양 25-2 기말 4-1(104단어)+4-2)
+QB_SHORT_WORDS = 120   # 이보다 짧은 교과서 단락은 앞뒤 단락과 묶음
+QB_JOIN_MIN = 150      # 묶은 지문이 이 길이가 될 때까지 (최대 3단락)
+QB_JOIN_MAX = 320
+QB_JOIN_TARGET = 230
+
+def _qb_words(p: Dict) -> int:
+    return len(str(p.get("body_text", "")).split())
+
+def qb_auto_join(ps: List[Dict], lib: List[Dict]) -> (List[Dict], List[str]):
+    """고른 지문 중 짧은 교과서 단락을 같은 단원의 바로 앞·뒤 단락(고른 것 중)과 묶음
+    → (만들 지문 목록, 묶은 이름들). 짧은 단락은 묶은 지문으로만 내고, 묶인 긴 단락은 따로도 냄. 모의고사는 그대로."""
+    chosen = {p["label"] for p in ps}
+    out, joined, used = [], [], set()
+    units = {}
+    for x in sorted(lib, key=natural_sort_key):
+        if x.get("source_type") == "textbook" and x.get("exam_key"):
+            units.setdefault(x["exam_key"], []).append(x)
+    short_done = set()
+    for seq in units.values():
+        for i, p in enumerate(seq):
+            if p["label"] not in chosen or _qb_words(p) >= QB_SHORT_WORDS or p["label"] in used:
+                continue
+            grp = [i]
+            while len(grp) < 3 and sum(_qb_words(seq[j]) for j in grp) < QB_JOIN_MIN:
+                tot = sum(_qb_words(seq[j]) for j in grp)
+                cands = [j for j in (grp[0] - 1, grp[-1] + 1) if 0 <= j < len(seq) and seq[j]["label"] in chosen
+                         and seq[j]["label"] not in used and tot + _qb_words(seq[j]) <= QB_JOIN_MAX]
+                if not cands:
+                    break
+                j = min(cands, key=lambda j: abs(tot + _qb_words(seq[j]) - QB_JOIN_TARGET))
+                grp = sorted(grp + [j])
+            if len(grp) < 2:
+                continue  # 붙일 이웃 단락이 없으면 그대로 따로
+            parts = [seq[j] for j in grp]
+            used.update(x["label"] for x in parts)
+            short_done.update(x["label"] for x in parts if _qb_words(x) < QB_SHORT_WORDS)
+            jp = qb_link_passage(parts, "join")
+            out.append(jp)
+            joined.append(jp["label"])
+    keep = [p for p in ps if p["label"] not in short_done]
+    return keep + out, joined
 
 def qb_link_note(label: str, text: str) -> str:
     """연결 지문이면 이번 출제 부분에 붙일 안내 (공통 앞부분은 그대로라 캐시에 영향 없음)"""
@@ -5902,7 +5988,7 @@ def render_qbank_exam(qs: List[Dict], meta: Dict, gidx: Dict[str, List[Dict]]) -
                      + (f" · {html.escape(re.sub(r'\s*점\s*$', '', str(src['points'])))}점" if src.get("points") else ""))
         else:
             style = f"{html.escape(r.get('school') or '')} 스타일 · " if meta.get("show_style", True) else ""
-            badge = f"<span class='bd var'>변형 · {style}{html.escape(r['difficulty'])}</span>"
+            badge = f"<span class='bd var'>변형 · {style}{html.escape(r['difficulty'])}</span>"  # 🎣 표시는 학생이 알아채지 않게 해설 쪽에만
         t = f"▶ {html.escape(r['passage_label'])} · {html.escape(r['q_type'])} {badge}"
         if meta.get("show_gichul"):
             groups = {}
@@ -5925,7 +6011,7 @@ def render_qbank_exam(qs: List[Dict], meta: Dict, gidx: Dict[str, List[Dict]]) -
     def kind_short(r):
         if r["difficulty"] == QB_GICHUL_LEVEL:
             return "기출"
-        return f"변({(r.get('school') or '?')[:1]})" if meta.get("show_style", True) else "변형"
+        return (f"변({(r.get('school') or '?')[:1]})" if meta.get("show_style", True) else "변형") + ("🎣" if qb_is_yt(r) else "")
 
     total_min = round(sum(qb_time_sec(r) for r in qs) / 60)
     if meta.get("show_time", True):
@@ -5981,14 +6067,15 @@ def render_qbank_exam(qs: List[Dict], meta: Dict, gidx: Dict[str, List[Dict]]) -
                      + "".join(f"<td><b>{'서술형' if r['q_type'] in QB_ESSAY_TYPES else html.escape(r['content'].get('answer', ''))}</b></td>" for r in part) + pad
                      + "</tr><tr><th>구분</th>" + "".join(f"<td>{html.escape(kind_short(r))}</td>" for r in part) + pad + "</tr></table>")
         o.append("<div class='keynote'>구분: 기출 = 실제 기출문제 · " + ("변(운) = 운양고 스타일 변형 · 변(제) = 제일고 스타일 변형" if meta.get("show_style", True) else "변형 = 변형문제")
-                 + " · 굵은 기출 이력 = 같은 유형으로 출제됨</div>")
+                 + (" · 🎣 = 영쌤 출제 포인트 문항" if any(qb_is_yt(r) for r in qs) else "") + " · 굵은 기출 이력 = 같은 유형으로 출제됨</div>")
         o.append("<div class='cols'>")
         for n, r in enumerate(qs, 1):
             c = r["content"]
             ans = qb_html(c.get("answer", ""))
             src = c.get("source") if r["difficulty"] == QB_GICHUL_LEVEL else None
             kind = (f"실제 기출 {src.get('short', '')} {src.get('no', '')}번" if src else
-                    (f"{r.get('school') or ''} 스타일 변형 · {r['difficulty']}" if meta.get("show_style", True) else f"변형 · {r['difficulty']}"))
+                    (f"{r.get('school') or ''} 스타일 변형 · {r['difficulty']}" if meta.get("show_style", True) else f"변형 · {r['difficulty']}")
+                    + (" · 🎣 영쌤 포인트" if qb_is_yt(r) else ""))
             note = f"<li><b>⚠️ {qb_html(c['answer_note'])}</b></li>" if c.get("answer_note") else ""
             o.append(f"<div class='exp'><h3>{n}번 정답 {ans}<span>({html.escape(r['passage_label'])} · {html.escape(r['q_type'])} · {html.escape(kind)})</span></h3><ul>"
                      + note + "".join(f"<li>{qb_html(e)}</li>" for e in (c.get("explanation") or [])) + "</ul></div>")
@@ -6209,6 +6296,10 @@ def render_weekly_clinic(sb, mock_lib: List[Dict], by_label: Dict, summary: List
     labels = sorted(w.get("labels", []), key=lambda l: natural_sort_key({"label": l}))
     labels = [l for l in labels if l in by_label]
     passages = [by_label[l] for l in labels]
+    # 이 주차 지문을 묶어 만든 문제(이어 붙이기·(A)(B))도 함께 · 모자란 문제는 짧은 교과서 단락을 자동으로 묶어 만듦
+    links_w = [l for l in qb_link_labels(sb) if set(qb_link_parts(l)[1]) <= set(labels)]
+    labels_all = sorted(labels + links_w, key=lambda l: natural_sort_key({"label": l}))
+    gen_passages = qb_auto_join(passages, mock_lib)[0]
     if set(sel) != set(w.get("labels", [])) or name.strip() != w.get("name") or school != w.get("school"):
         st.info("고친 내용이 아직 저장되지 않았어요. 아래 클리닉은 저장된 주차 기준으로 만들어요.")
     school = w.get("school", QB_SCHOOLS[0])
@@ -6224,15 +6315,19 @@ def render_weekly_clinic(sb, mock_lib: List[Dict], by_label: Dict, summary: List
                                     label_visibility="collapsed") or QB_CLINIC_TYPES
         want_vocab = _qb_row("선지 어휘").checkbox(f"맨 뒤에 문제 선지·<보기>에 쓰인 어휘 정리 쪽 넣기 (가벼운 모델 {light_model_for(text_model).split(':')[-1]} · 약 10~30원)",
                                                  value=True, key="qb_clinic_vocab")
+        c_yt = _qb_row("영쌤 포인트").segmented_control("영쌤 포인트", QB_YT_FILTER, default=QB_YT_FILTER[0], key="qb_clinic_ytf",
+                                                     label_visibility="collapsed") or QB_YT_FILTER[0]
         skip_used = _qb_row("이미 낸 문항").checkbox(f"이 주차 클리닉에 이미 넣은 문항은 빼기 ({len(w.get('used', []))}개)", value=True, key="qb_clinic_skip")
-        mine = [r for r in summary if r["passage_label"] in set(labels) and r.get("school") == school and r["difficulty"] != QB_GICHUL_LEVEL
+        # 영쌤 포인트로 거를 때는 문제 내용이 있어야 알 수 있어서 이 주차 문제만 내용까지 읽음
+        src_rows = summary if c_yt == QB_YT_FILTER[0] else [r for r in qb_fetch(sb, labels_all) if qb_yt_keep(r, c_yt)]
+        mine = [r for r in src_rows if r["passage_label"] in set(labels_all) and r.get("school") == school and r["difficulty"] != QB_GICHUL_LEVEL
                 and r["q_type"] in types and not (skip_used and r["id"] in set(w.get("used", [])))]
         have = {lv: sum(1 for r in mine if r["difficulty"] == lv) for lv in mix}
         n2.markdown("<div class='qb-note' style='margin-top:0'>" + " · ".join(f"{lv} <b>{n}</b>문항 (쌓인 문제 {have[lv]}개)" for lv, n in mix.items())
                     + f" · {school} 스타일 · 지문 {len(labels)}개</div>", unsafe_allow_html=True)
         short = {lv: n - have[lv] for lv, n in mix.items() if have[lv] < n}
         if short:
-            plan = qb_clinic_plan(summary, passages, short, school, types, sum(map(ord, wid)))
+            plan = qb_clinic_plan(summary, gen_passages, short, school, types, sum(map(ord, wid)))
             n_q = sum(n for *_, n in plan)
             cost = sum(qb_job_cost_krw(text_model, n) for *_, n in plan)
             st.warning("문제가 모자라요: " + " · ".join(f"{lv} {k}문항" for lv, k in short.items())
@@ -6249,9 +6344,9 @@ def render_weekly_clinic(sb, mock_lib: List[Dict], by_label: Dict, summary: List
     make = b1.button("📄 클리닉 만들기", type="primary", use_container_width=True, key="qb_clinic_btn", disabled=not labels)
     again = b2.button("🔀 다른 조합으로", use_container_width=True, key="qb_clinic_again", disabled="qb_clinic_html" not in st.session_state)
     if make or again:
-        rows = [r for r in qb_fetch(sb, labels) if r.get("school") == school and r["difficulty"] in mix and r["q_type"] in types
-                and not (skip_used and r["id"] in set(w.get("used", [])))]
-        picked, short2 = qb_clinic_pick(rows, labels, mix, random.randint(1, 10**9))
+        rows = [r for r in qb_fetch(sb, labels_all) if r.get("school") == school and r["difficulty"] in mix and r["q_type"] in types
+                and not (skip_used and r["id"] in set(w.get("used", []))) and qb_yt_keep(r, c_yt)]
+        picked, short2 = qb_clinic_pick(rows, labels_all, mix, random.randint(1, 10**9))
         if not picked:
             st.session_state.pop("qb_clinic_html", None)
             st.warning("이 주차 지문으로 만든 문제가 없어요. 위에서 '모자란 문제 만들기'를 먼저 눌러 주세요.")
@@ -6415,6 +6510,18 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
                                                             help="이어 붙이기: 교과서 짧은 단락 2~4개를 실제 시험처럼 한 지문으로. "
                                                                  "(A)(B): 같은 범위의 비슷한 내용 두 지문을 함께 묻는 추론·일치·주제형") or "따로"
             gen_ps = [by_label[l] for l in sel]
+            auto_joined = []
+            if link == "따로" and any(by_label[l].get("source_type") == "textbook" and _qb_words(by_label[l]) < QB_SHORT_WORDS for l in sel):
+                if _qb_row("짧은 단락").toggle(f"📚 짧은 교과서 단락({QB_SHORT_WORDS}단어 미만)은 앞뒤 단락과 자동으로 이어 붙여 출제", value=True, key="qb_gen_autojoin",
+                                              help="실제 내신처럼 짧은 단락은 같은 단원의 바로 앞·뒤 단락(고른 것 중)과 2~3개를 묶어 한 지문으로 내요. "
+                                                   "짧은 단락은 묶은 지문으로만, 함께 묶인 긴 단락은 따로도 만들어요. 모의고사 지문은 그대로예요."):
+                    gen_ps, auto_joined = qb_auto_join(gen_ps, mock_lib)
+                    if auto_joined:
+                        st.markdown("<div class='qb-note'>자동으로 묶은 지문: " + " · ".join(
+                            f"<b>{html.escape(l)}</b> ({len(by_label.get(l, {}).get('body_text', '').split()) or sum(_qb_words(by_label[x]) for x in qb_link_parts(l)[1])}단어)"
+                            for l in auto_joined) + "</div>", unsafe_allow_html=True)
+                    else:
+                        st.caption("💡 짧은 단락 옆에 함께 고른 단락이 없어서 이번에는 묶지 않아요 (앞·뒤 단락도 함께 골라 주세요).")
             if link == "join":
                 if len(sel) > 4:
                     st.warning("이어 붙이기는 지문 4개까지예요. 앞의 4개만 묶어요.")
@@ -6471,6 +6578,9 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
                                                        label_visibility="collapsed", help="변형문제는 그 학교 스타일, 실제 기출은 그 학교 시험만") or "전체"
             e_real = _qb_row("실제 기출").segmented_control("실제 기출", ["함께 섞기", "빼기", "기출만"], default="함께 섞기", key="qb_exam_real",
                                                          label_visibility="collapsed") or "함께 섞기"
+            e_yt = _qb_row("영쌤 포인트").segmented_control("영쌤 포인트", QB_YT_FILTER, default=QB_YT_FILTER[0], key="qb_exam_yt",
+                                                         label_visibility="collapsed",
+                                                         help="🎣 영쌤 출제 포인트로 만든 변형문제만 뽑거나 빼요 (위 개수 표시는 이 조건을 빼고 센 수예요)") or QB_YT_FILTER[0]
             logs = qb_exam_log(sb)
             excl = set()
             if logs:
@@ -6555,6 +6665,8 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
             def wanted(r):
                 is_real = r["difficulty"] == QB_GICHUL_LEVEL
                 if (is_real and e_real == "빼기") or (not is_real and (e_real == "기출만" or r["difficulty"] not in e_levels)):
+                    return False
+                if (is_real and e_yt == QB_YT_FILTER[1]) or (not is_real and not qb_yt_keep(r, e_yt)):
                     return False
                 return r["q_type"] in e_types and (e_school == "전체" or r.get("school") == e_school) and r["id"] not in excl
             rows = [r for r in qb_fetch(sb, labels_ordered) if wanted(r)]
@@ -7543,6 +7655,7 @@ APP_HELP = {
 - 같은 지문을 다시 만들면 이미 쌓인 문제와 **다른 포인트**로 출제해요.
 - **🔗 지문 연결**(지문을 2개 이상 고르면 나와요): **이어 붙이기**는 교과서의 짧은 단락 2~4개를 실제 시험처럼 한 지문으로 묶어 출제해요 (예: 4-1 + 4-2). **(A)(B) 두 지문 함께**는 같은 범위의 비슷한 내용 두 지문을 (A)(B)로 싣고 '(A)와 (B)를 읽고 추론할 수 없는 것'처럼 두 글을 함께 묻는 문제를 만들어요 (추론·내용 일치·<보기>·주제·요지·제목 유형만). 묶은 지문 문제는 '4-1 + 4-2'처럼 따로 쌓이고, 시험지를 만들 때 묶인 지문을 모두 고르면 함께 뽑혀요.
 - **🎣 영쌤 출제 포인트**: 왼쪽 메뉴 출제 DNA 화면 맨 아래 목록에 선생님의 '낚시' 출제 방식을 한 줄씩 적어 두면, 학교(운양고·제일고)와 관계없이 맞는 유형 문항에 하나씩 넣어요 (평소 문항 절반쯤, '🎣 영쌤 출제 포인트 위주로'를 켜면 모든 문항 · 난이도 '하'는 빼요). 새 포인트는 맨 아래 빈 줄에 계속 추가하면 돼요. '교과서만'을 켠 포인트는 교과서 지문에만 쓰고 같은 단원 다른 단락 원문을 함께 넘겨요.
+- **📚 짧은 교과서 단락 자동 묶기**: 교과서 단락을 고르면 120단어보다 짧은 단락은 같은 단원의 바로 앞·뒤 단락(함께 고른 것)과 2~3개를 묶어 한 지문으로 출제해요 (예: 4-1 + 4-2). 짧은 단락은 묶은 지문으로만, 함께 묶인 긴 단락은 따로도 만들어요. 모의고사 (A)(B) 묶기는 지금처럼 직접 골라요. 영쌤 포인트로 만든 문항은 학생이 알아채지 않게 문제지에는 표시하지 않고 정답표('변(운)🎣')·해설에만 표시되며, 시험지·클리닉에서 '영쌤 포인트 문제만/빼기'로 고를 수 있어요.
 - **📅 주간 클리닉**: 그 주에 배운 지문을 주차로 저장해 두면, 그 지문으로 만든 변형문제만 모아 클리닉 미니모의고사(기본 20문항 · 중4/상8/최상8 · 한 학교 스타일 · 실제 기출 제외)를 만들어요. 모자라면 '모자란 문제 만들기'가 지문·유형을 골고루 나눠 필요한 만큼만 생성하고, '낸 것으로 표시'하면 다음 클리닉에서 그 문항은 빠져요.
 - **순서 유형 선택지**는 수능처럼 ① (A)-(C)-(B) ② (B)-(A)-(C) ③ (B)-(C)-(A) ④ (C)-(A)-(B) ⑤ (C)-(B)-(A)로 고정돼요 ((A)로 시작하는 선지는 ① 하나). 예전에 만든 순서 문제도 시험지에서는 이렇게 바뀌어 나와요.
 - **어법 밑줄**: 섞기(학교 기출 비율로 단어·구 밑줄과 문장 전체 밑줄을 무작위로) / 단어·구 / 문장 전체.
