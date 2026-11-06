@@ -5697,16 +5697,25 @@ def qb_pick(rows: List[Dict], labels: List[str], total: int, seed: int) -> (List
 def qb_html(s) -> str:
     """AI가 쓴 글에서 <u>, <b>만 살리고 나머지는 글자로 표시"""
     s = html.escape(html.unescape(str(s or "")))
-    return re.sub(r"&lt;(/?)(u|b)&gt;", r"<\1\2>", s)
+    s = re.sub(r"&lt;(/?)(u|b)&gt;", r"<\1\2>", s)
+    return re.sub(r"<u>\s*</u>", QB_BLANK, s)  # 빈 밑줄(기출 빈칸)은 그대로 두면 안 보여서 빈칸 줄로
 
-def qb_paras(s, order: bool = False, given: str = "") -> str:
+QB_BLANK = "<span style='display:inline-block;min-width:34mm;border-bottom:1px solid #111;'>&nbsp;</span>"
+QB_SUM_BLANK = ("<span style='display:inline-block;min-width:24mm;border-bottom:1px solid #111;"
+                "text-align:center;font-weight:700;text-indent:0;'>(\\1)</span>")
+
+def qb_paras(s, order: bool = False, given: str = "", summary: bool = False) -> str:
     s = re.sub(r"(?i)<br\s*/?>", "\n", str(s or ""))  # AI가 줄바꿈을 <br>로 써 온 글 (그대로 두면 '<br>' 글자가 찍힘)
     if order:  # 순서: (A)(B)(C) 덩어리가 한 줄로 붙어 온 문항은 덩어리마다 새 줄, 주어진 글을 지문 앞에 또 쓴 문항은 앞부분 지움
         g = str(given or "").strip()
         if g and s.strip().startswith(g):
             s = s.strip()[len(g):]
         s = re.sub(r"\s+(?=\((?:A|B|C)\)\s)", "\n", s)
-    return "".join(f"<p>{qb_html(line)}</p>" for line in s.split("\n") if line.strip())
+    out = "".join(f"<p>{qb_html(line)}</p>" for line in s.split("\n") if line.strip())
+    if summary:  # 요약문 박스: (A)(B)를 실제 시험지처럼 단어가 들어갈 밑줄 칸으로 (이미 ___ 칸이 있으면 그대로)
+        out = re.sub(r"_{2,}\s*\(([AB])\)\s*_{2,}|_{2,}\s*\(([AB])\)|\(([AB])\)\s*_{2,}|\(([AB])\)",
+                     lambda m: QB_SUM_BLANK.replace("\\1", next(g for g in m.groups() if g)), out)
+    return out
 
 QB_EXAM_CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;700;900&family=Noto+Serif+KR:wght@400;700&display=swap');
@@ -6075,7 +6084,7 @@ def render_qbank_exam(qs: List[Dict], meta: Dict, gidx: Dict[str, List[Dict]]) -
             o.append(f"<div class='passage'>{qb_paras(c.get('passage'), r['q_type'] == '순서', c.get('given'))}</div>")
         if c.get("box"):
             # 긴 <보기>(진술 7~8개)는 통째로 다음 단으로 밀리면 앞 단이 비어서, 단을 넘어 이어지게
-            o.append(f"<div class='box{' long' if len(str(c['box'])) > 500 else ''}'>{qb_paras(c['box'])}</div>")
+            o.append(f"<div class='box{' long' if len(str(c['box'])) > 500 else ''}'>{qb_paras(c['box'], summary=r['q_type'] == '요약문 (A)(B)')}</div>")
         choices = c.get("choices") or []
         if r["q_type"] in QB_ESSAY_TYPES:
             o.append("<div class='write'></div><div class='write'></div>")
@@ -8296,7 +8305,7 @@ def render_final_exam(qs: List[Dict], meta: Dict) -> str:
             o.append(f"<div class='passage'>{qb_paras(c.get('passage'), r['q_type'] == '순서', c.get('given'))}</div>")
         if c.get("box"):
             bx = "<div class='bx'>&lt;보 기&gt;</div>" if re.search(r"[ⓐ-ⓩ]", str(c["box"])) else ""
-            o.append(f"<div class='box{' long' if len(str(c['box'])) > 500 else ''}'>{bx}{qb_paras(c['box'])}</div>")
+            o.append(f"<div class='box{' long' if len(str(c['box'])) > 500 else ''}'>{bx}{qb_paras(c['box'], summary=r['q_type'] == '요약문 (A)(B)')}</div>")
         ch = c.get("choices") or []
         if essay:
             o.append("<div class='write'></div>")
