@@ -5699,8 +5699,14 @@ def qb_html(s) -> str:
     s = html.escape(html.unescape(str(s or "")))
     return re.sub(r"&lt;(/?)(u|b)&gt;", r"<\1\2>", s)
 
-def qb_paras(s) -> str:
-    return "".join(f"<p>{qb_html(line)}</p>" for line in str(s or "").split("\n") if line.strip())
+def qb_paras(s, order: bool = False, given: str = "") -> str:
+    s = re.sub(r"(?i)<br\s*/?>", "\n", str(s or ""))  # AI가 줄바꿈을 <br>로 써 온 글 (그대로 두면 '<br>' 글자가 찍힘)
+    if order:  # 순서: (A)(B)(C) 덩어리가 한 줄로 붙어 온 문항은 덩어리마다 새 줄, 주어진 글을 지문 앞에 또 쓴 문항은 앞부분 지움
+        g = str(given or "").strip()
+        if g and s.strip().startswith(g):
+            s = s.strip()[len(g):]
+        s = re.sub(r"\s+(?=\((?:A|B|C)\)\s)", "\n", s)
+    return "".join(f"<p>{qb_html(line)}</p>" for line in s.split("\n") if line.strip())
 
 QB_EXAM_CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;700;900&family=Noto+Serif+KR:wght@400;700&display=swap');
@@ -6066,7 +6072,7 @@ def render_qbank_exam(qs: List[Dict], meta: Dict, gidx: Dict[str, List[Dict]]) -
         if c.get("given"):
             o.append(f"<div class='given'>{qb_paras(c['given'])}</div>")
         if not in_set:
-            o.append(f"<div class='passage'>{qb_paras(c.get('passage'))}</div>")
+            o.append(f"<div class='passage'>{qb_paras(c.get('passage'), r['q_type'] == '순서', c.get('given'))}</div>")
         if c.get("box"):
             # 긴 <보기>(진술 7~8개)는 통째로 다음 단으로 밀리면 앞 단이 비어서, 단을 넘어 이어지게
             o.append(f"<div class='box{' long' if len(str(c['box'])) > 500 else ''}'>{qb_paras(c['box'])}</div>")
@@ -8287,7 +8293,7 @@ def render_final_exam(qs: List[Dict], meta: Dict) -> str:
         if c.get("given"):
             o.append(f"<div class='given'>{qb_paras(c['given'])}</div>")
         if not in_set:
-            o.append(f"<div class='passage'>{qb_paras(c.get('passage'))}</div>")
+            o.append(f"<div class='passage'>{qb_paras(c.get('passage'), r['q_type'] == '순서', c.get('given'))}</div>")
         if c.get("box"):
             bx = "<div class='bx'>&lt;보 기&gt;</div>" if re.search(r"[ⓐ-ⓩ]", str(c["box"])) else ""
             o.append(f"<div class='box{' long' if len(str(c['box'])) > 500 else ''}'>{bx}{qb_paras(c['box'])}</div>")
