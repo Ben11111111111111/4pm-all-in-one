@@ -6014,6 +6014,209 @@ def qb_choice_vocab(qs: List[Dict], model: str, logs: List[str]) -> List[Dict]:
     words.sort(key=lambda w: min([int(x) for x in (w.get("nos") or []) if str(x).lstrip("-").isdigit()] or [999]))
     return words
 
+# ---- 선지 해석본: 선지(<보기> 조합형은 <보기> 진술)를 한국어로 옮기고, 그 선지에 나온 단어 뜻을 바로 아래에 ----
+#   한 번 해석한 문항은 문항 content['choice_ko']에 저장해서 다시 출력하면 AI 호출 없음 (선지가 바뀌면 다시 해석)
+QB_TRANS_SKIP = {"순서", "어법 (조합형)"} | QB_MARK_TYPES | QB_ESSAY_TYPES  # 선지가 번호·조합뿐인 유형
+QB_TRANS_BATCH = 6  # 한 번 호출에 넣는 문항 수 (답이 너무 길어져 잘리지 않게)
+SCHEMA_QB_TRANS = {"type": "object", "properties": {"items": {"type": "array", "items": {"type": "object", "properties": {
+    "index": {"type": "integer"},
+    "lines": {"type": "array", "items": {"type": "object", "properties": {
+        "ko": {"type": "string"},
+        "words": {"type": "array", "items": {"type": "object", "properties": {"word": {"type": "string"}, "meaning": {"type": "string"}},
+                                             "required": ["word", "meaning"]}}},
+        "required": ["ko", "words"]}}},
+    "required": ["index", "lines"]}}}, "required": ["items"]}
+
+def qb_trans_parts(r: Dict) -> List[str]:
+    """해석할 영어 줄 (없으면 빈 목록)"""
+    c = r.get("content") or {}
+    if r.get("q_type") in QB_TRANS_SKIP:
+        return []
+    if r.get("q_type") == "<보기> 일치 조합형":
+        lines = [x for x in re.sub(r"(?i)<br\s*/?>", "\n", str(c.get("box") or "")).split("\n")]
+    else:
+        lines = [str(x) for x in (c.get("choices") or [])]
+    lines = [re.sub(r"<[^>]+>", "", html.unescape(x)).strip() for x in lines]
+    lines = [x for x in lines if x]
+    return lines if sum(1 for x in lines if re.search(r"[A-Za-z]{3}", x)) >= 2 else []
+
+def _qb_trans_hash(lines: List[str]) -> str:
+    return hashlib.md5("\n".join(lines).encode("utf-8")).hexdigest()[:12]
+
+def qb_trans_cached(r: Dict):
+    parts = qb_trans_parts(r)
+    ck = (r.get("content") or {}).get("choice_ko") or {}
+    if parts and ck.get("h") == _qb_trans_hash(parts) and len(ck.get("lines") or []) == len(parts):
+        return ck["lines"]
+    return None
+
+def qb_trans_estimate(qs: List[Dict], model: str) -> (int, float):
+    """아직 해석 안 된 문항 수와 예상 비용(원)"""
+    todo = [qb_trans_parts(r) for r in qs if qb_trans_parts(r) and qb_trans_cached(r) is None]
+    n_lines = sum(len(p) for p in todo)
+    p_in, _, p_out = ai_price(model)
+    calls = -(-len(todo) // QB_TRANS_BATCH)
+    return len(todo), (calls * 500 + n_lines * 45) * p_in / 1e6 * 1400 + n_lines * 120 * p_out / 1e6 * 1400
+
+def qb_choice_trans(sb, qs: List[Dict], model: str, logs: List[str]) -> Dict[str, List[Dict]]:
+    """문항 id → [{'en','ko','words'}] (저장된 해석은 그대로 쓰고, 없는 것만 가벼운 모델로 해석해 문항에 저장)"""
+    out, todo = {}, []
+    for r in qs:
+        parts = qb_trans_parts(r)
+        if not parts:
+            continue
+        got = qb_trans_cached(r)
+        if got is not None:
+            out[r["id"]] = [{"en": e, **g} for e, g in zip(parts, got)]
+        else:
+            todo.append((r, parts))
+
+    def one(batch):
+        blocks = [f"### 문항 {k}\n" + "\n".join(f"{j + 1}) {x}" for j, x in enumerate(parts)) for k, (_, parts) in enumerate(batch, 1)]
+        prompt = ("아래는 고등학교 1학년 영어 시험 문항의 선지(또는 <보기> 진술)다. 선지가 길어서 어려워하는 학생을 위한 해석본을 만든다.\n"
+                  "- 각 줄(1), 2), …)마다 ko = 자연스럽고 정확한 한국어 해석. 영어 문장 구조가 보이게 직역에 가깝게, 뜻을 빼거나 보태지 않는다. "
+                  "'word1 …… word2' 같은 어휘 짝은 '(A) 뜻 …… (B) 뜻'처럼 옮긴다. 줄 앞의 ①·ⓐ 같은 기호는 ko에 다시 쓰지 않는다.\n"
+                  "- words = 그 줄에 나온 단어·숙어 중 고1 학생이 모를 만한 것 2~5개(쉬운 기초 단어 제외, 짧은 줄은 0~2개). "
+                  "word는 사전형(동사 원형, 명사 단수, 숙어는 'be influenced by'처럼), meaning은 그 줄에서 쓰인 뜻의 짧은 한국어.\n"
+                  "- 문항마다 index(문항 번호)와, 받은 줄 수와 똑같은 개수의 lines를 순서대로 반환한다.\n\n" + "\n\n".join(blocks))
+        res = _qb_call(None, model, prompt, SCHEMA_QB_TRANS, 0.2, logs, "선지 해석")
+        got = {int(it.get("index", 0)): it.get("lines") or [] for it in ((res or {}).get("items") or []) if isinstance(it, dict)}
+        done = []
+        for k, (r, parts) in enumerate(batch, 1):
+            lines = [{"ko": str(x.get("ko", "")).strip(),
+                      "words": [{"word": str(w.get("word", "")).strip(), "meaning": str(w.get("meaning", "")).strip()}
+                                for w in (x.get("words") or []) if isinstance(w, dict) and str(w.get("word", "")).strip()][:6]}
+                     for x in got.get(k, []) if isinstance(x, dict)]
+            if len(lines) == len(parts) and all(x["ko"] for x in lines):
+                done.append((r, parts, lines))
+        return done
+
+    batches = [todo[i:i + QB_TRANS_BATCH] for i in range(0, len(todo), QB_TRANS_BATCH)]
+    if batches:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(4, len(batches))) as pool:
+            results = [x for b in pool.map(one, batches) for x in b]
+        for r, parts, lines in results:
+            out[r["id"]] = [{"en": e, **g} for e, g in zip(parts, lines)]
+            c = dict(r.get("content") or {})
+            c["choice_ko"] = {"h": _qb_trans_hash(parts), "lines": lines}
+            r["content"] = c
+            if sb is not None:
+                try:
+                    sb.table(QB_TABLE).update({"content": c}).eq("id", r["id"]).execute()
+                except Exception as e:
+                    logs.append(f"⚠️ 해석 저장 실패(다음에 다시 해석): {str(e)[:80]}")
+        miss = len(todo) - len(results)
+        if miss:
+            logs.append(f"⚠️ {miss}문항은 해석을 받지 못했어요 (한 번 더 누르면 그 문항만 다시 해석해요)")
+    return out
+
+QB_TRANS_CSS = """
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;700;900&family=Noto+Serif+KR:wght@400;700&display=swap');
+@page { size: A4; margin: 13mm 12mm; }
+* { box-sizing: border-box; }
+body { font-family: 'Noto Sans KR', sans-serif; font-size: 9.6pt; line-height: 1.5; color: #111; margin: 0; background: #fff;
+  -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+.sheet { max-width: 186mm; margin: 0 auto; }
+.head { border: 2px solid #111; padding: 6px 12px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: baseline; }
+.head h1 { font-size: 15pt; font-weight: 900; margin: 0; }
+.head .sub { font-size: 9pt; color: #444; }
+.cols { column-count: 2; column-gap: 8mm; column-rule: 1px solid #bbb; }
+.tq { margin: 0 0 10px; }
+.tq .no { font-weight: 900; font-size: 10.5pt; break-after: avoid; border-bottom: 1px solid #111; margin-bottom: 4px; }
+.tq .no span { font-weight: 400; font-size: 8.3pt; color: #555; margin-left: 4px; }
+.tl { break-inside: avoid; margin: 0 0 6px; }
+.tl .en { font-family: 'Noto Serif KR', serif; font-size: 9.4pt; padding-left: 1.3em; text-indent: -1.3em; }
+.tl .ko { color: #0b3d91; padding-left: 1.3em; }
+.tl .wd { font-size: 8.4pt; color: #333; padding-left: 1.3em; }
+.tl .wd b { font-family: 'Noto Serif KR', serif; color: #111; }
+.foot { text-align: center; font-size: 8pt; color: #555; margin-top: 8px; }
+.printbar { position: sticky; top: 0; text-align: right; padding: 6px; background: #fff; }
+.printbar button { font-size: 13px; padding: 6px 14px; cursor: pointer; }
+@media print { .printbar { display: none; } }
+"""
+
+def render_choice_trans(qs: List[Dict], trans: Dict[str, List[Dict]], meta: Dict) -> str:
+    """선지 해석본 HTML (문항 번호는 시험지와 같음, 해석이 없는 유형은 건너뜀)"""
+    o = []
+    for n, r in enumerate(qs, 1):
+        lines = trans.get(r.get("id"))
+        if not lines:
+            continue
+        box = r.get("q_type") == "<보기> 일치 조합형"
+        o.append(f"<div class='tq'><div class='no'>{n}. <span>{html.escape(r['q_type'])}</span></div>")
+        for j, x in enumerate(lines):
+            en = html.escape(x["en"])
+            if not box and not re.match(r"^[①-⑤]", x["en"]):
+                en = f"{CIRCLED[j]} {en}"
+            wd = " · ".join(f"<b>{html.escape(w['word'])}</b> {html.escape(w['meaning'])}" for w in x.get("words") or [])
+            o.append(f"<div class='tl'><div class='en'>{en}</div><div class='ko'>→ {html.escape(x['ko'])}</div>"
+                     + (f"<div class='wd'>{wd}</div>" if wd else "") + "</div>")
+        o.append("</div>")
+    body = "".join(o) or "<p>해석할 선지가 있는 문항이 없어요 (순서·삽입·어법·낱말 등은 선지가 번호라서 빠져요).</p>"
+    return (f"<!doctype html><html><head><meta charset='utf-8'><title>{html.escape(meta.get('title', ''))} 선지 해석</title>"
+            f"<style>{QB_TRANS_CSS}</style></head><body><div class='printbar'><button onclick='window.print()'>🖨️ 인쇄 / PDF로 저장</button></div>"
+            f"<div class='sheet'><div class='head'><h1>{html.escape(meta.get('title', ''))} · 선지 해석</h1>"
+            f"<div class='sub'>{html.escape(meta.get('academy', ''))} · 문항 번호는 시험지와 같아요</div></div>"
+            f"<div class='cols'>{body}</div><div class='foot'>{html.escape(meta.get('academy', ''))}</div></div></body></html>")
+
+def qb_trans_words(qs: List[Dict], trans: Dict[str, List[Dict]]) -> List[Dict]:
+    """해석본에 나온 단어 → 기출 어휘 단어장 형식 (같은 단어는 처음 나온 문항에 한 번만)"""
+    seen, out = set(), []
+    for n, r in enumerate(qs, 1):
+        for x in trans.get(r.get("id")) or []:
+            for w in x.get("words") or []:
+                k = w["word"].lower()
+                if k in seen:
+                    continue
+                seen.add(k)
+                out.append({"word": w["word"], "pos": "", "pronunciation": "", "meaning": w["meaning"],
+                            "category": f"{n}번 [선지]", "synonyms": [], "antonyms": []})
+    return out
+
+def render_choice_trans_ui(sb, key: str, qids: List[str], title: str, text_model: str, academy_name: str, school_name: str):
+    """시험지·클리닉 아래: 선지 해석본 만들기 + 단어장에 넣기"""
+    with st.container(border=True):
+        qs_all = {r["id"]: r for r in qb_fetch_ids(sb, qids)} if f"{key}_rows" not in st.session_state or st.session_state[f"{key}_rows"][0] != qids else None
+        if qs_all is not None:
+            st.session_state[f"{key}_rows"] = (qids, [qs_all[i] for i in qids if i in qs_all])
+        qs = st.session_state[f"{key}_rows"][1]
+        model = light_model_for(text_model)
+        n_todo, won = qb_trans_estimate(qs, model)
+        n_has = sum(1 for r in qs if qb_trans_parts(r))
+        c1, c2 = st.columns([2, 3], vertical_alignment="center")
+        go = c1.button("📝 선지 해석본 만들기", use_container_width=True, key=f"{key}_btn", disabled=not n_has)
+        c2.caption(f"선지가 문장인 문항 {n_has}개 (순서·삽입·어법·낱말은 빠짐) · "
+                   + (f"새로 해석 {n_todo}문항, 예상 약 {max(1, round(won)):,}원" if n_todo else "모두 해석돼 있어서 0원")
+                   + " · 한 번 해석한 문항은 저장돼서 다시 뽑으면 0원")
+        if go:
+            logs = []
+            with st.spinner("선지를 해석하는 중... (20문항이면 30초~1분)"):
+                trans = qb_choice_trans(sb, qs, model, logs)
+            flush_ai_usage()
+            meta = {"title": title, "academy": academy_name}
+            st.session_state[f"{key}_out"] = (qids, render_choice_trans(qs, trans, meta), qb_trans_words(qs, trans), logs)
+        got = st.session_state.get(f"{key}_out")
+        if got and got[0] == qids:
+            _, page, words, logs = got
+            for m in logs:
+                st.warning(m)
+            safe = re.sub(r'[\\/:*?"<>|]', "", title).strip() or "시험지"
+            d1, d2 = st.columns([3, 2])
+            d1.download_button("📥 선지 해석본 HTML 다운로드 — 열어서 '인쇄 / PDF로 저장'", page, f"{safe}_선지해석.html", "text/html",
+                               use_container_width=True, key=f"{key}_dl")
+            label = f"[{safe} 선지 어휘]"
+            if d2.button(f"📚 선지 단어 {len(words)}개 → 기출 어휘 단어장", use_container_width=True, key=f"{key}_voca", disabled=not words,
+                         help="'기출 어휘 단어장' 탭에 이 시험지 이름으로 저장돼요. 거기서 단어장으로 출력할 수 있어요 (같은 이름이면 합쳐짐)"):
+                st.session_state.saved_past_voca.append({"id": str(uuid.uuid4()), "label": label, "data": {"voca_list": words},
+                                                         "body_text": f"{label} 시험지 선지 어휘", "academy_name": academy_name,
+                                                         "school_name": school_name})
+                st.session_state.saved_past_voca, _ = consolidate_past_voca_records(st.session_state.saved_past_voca)
+                save_to_file(PAST_VOCA_FILE, st.session_state.saved_past_voca)
+                st.success(f"✅ '기출 어휘 단어장' 탭에 {label}로 저장했어요.")
+            with st.expander("해석본 미리 보기", expanded=False):
+                components.html(page, height=700, scrolling=True)
+
 def render_qbank_exam(qs: List[Dict], meta: Dict, gidx: Dict[str, List[Dict]]) -> str:
     def tag_of(r):
         """1줄: 지문 · 유형 + [실제 기출]/[변형 · ○○고 스타일 · 난이도]  2줄: 기출 이력 (같은 시험은 번호를 묶고, 같은 유형은 굵게)"""
@@ -6091,7 +6294,7 @@ def render_qbank_exam(qs: List[Dict], meta: Dict, gidx: Dict[str, List[Dict]]) -
         elif all(not str(x).strip() for x in choices):
             o.append("<div class='choices inline'>" + "".join(f"<div>{ch}</div>" for ch in CIRCLED) + "</div>")
         else:
-            o.append("<div class='choices'>" + "".join(f"<div>{CIRCLED[i]} {qb_html(x)}</div>" for i, x in enumerate(choices[:5])) + "</div>")
+            o.append("<div class='choices'>" + "".join(f"<div>{CIRCLED[i]} {qb_html(re.sub(r'^\s*[①-⑤]\s*', '', str(x)))}</div>" for i, x in enumerate(choices[:5])) + "</div>")
         o.append("</div>")
     o.append("</div>")
     if meta.get("with_answers"):
@@ -6415,6 +6618,7 @@ def render_weekly_clinic(sb, mock_lib: List[Dict], by_label: Dict, summary: List
             qb_clinic_update(sb, lambda ws: [{**x, "used": list(dict.fromkeys(x.get("used", []) + qids))} if x.get("id") == wid else x for x in ws])
             st.session_state.qb_clinic_marked = True
             st.rerun()
+        render_choice_trans_ui(sb, "qb_clinic_tr", qids, fname, text_model, academy_name, school_name)
         components.html(st.session_state.qb_clinic_html, height=850, scrolling=True)
 
 def _qb_passage_picker(key: str, mock_lib: List[Dict], counts: Dict[str, int]) -> List[str]:
@@ -6758,6 +6962,7 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
                 qb_exam_log_update(sb, lambda rs: [rec] + rs)
                 st.session_state.qb_exam_logged = True
                 st.rerun()
+            render_choice_trans_ui(sb, "qb_exam_tr", st.session_state.get("qb_exam_qids", []), fname, text_model, academy_name, school_name)
             components.html(st.session_state.qb_exam_html, height=850, scrolling=True)
 
     with t_clinic:
@@ -8312,7 +8517,7 @@ def render_final_exam(qs: List[Dict], meta: Dict) -> str:
         elif all(not str(x).strip() for x in ch):
             o.append("<div class='choices inline'>" + "".join(f"<div>{x}</div>" for x in CIRCLED) + "</div>")
         else:
-            o.append("<div class='choices'>" + "".join(f"<div>{CIRCLED[n]} {qb_html(x)}</div>" for n, x in enumerate(ch[:5])) + "</div>")
+            o.append("<div class='choices'>" + "".join(f"<div>{CIRCLED[n]} {qb_html(re.sub(r'^\s*[①-⑤]\s*', '', str(x)))}</div>" for n, x in enumerate(ch[:5])) + "</div>")
         o.append("</div>")
     o.append("</div>")
     if meta.get("with_answers"):
