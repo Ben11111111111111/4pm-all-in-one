@@ -7695,7 +7695,7 @@ APP_HELP = {
 - **💸 반값 모드**: 켜면 생성 비용이 절반이에요. 대신 결과가 바로 안 나오고 보통 몇 분~몇 시간, 길면 24시간 뒤에 들어와요. 급할 때는 끄고, 시간이 있을 때(예: 밤에 넣어 두고 다음 날) 켜세요. 창을 닫아도 서버가 2분마다 확인해서 들어온 것부터 저장해요.
 - 같은 지문을 다시 만들면 이미 쌓인 문제와 **다른 포인트**로 출제해요.
 - **🔗 지문 연결**(지문을 2개 이상 고르면 나와요): **이어 붙이기**는 교과서의 짧은 단락 2~4개를 실제 시험처럼 한 지문으로 묶어 출제해요 (예: 4-1 + 4-2). **(A)(B) 두 지문 함께**는 같은 범위의 비슷한 내용 두 지문을 (A)(B)로 싣고 '(A)와 (B)를 읽고 추론할 수 없는 것'처럼 두 글을 함께 묻는 문제를 만들어요 (추론·내용 일치·<보기>·주제·요지·제목 유형만). 묶은 지문 문제는 '4-1 + 4-2'처럼 따로 쌓이고, 시험지를 만들 때 묶인 지문을 모두 고르면 함께 뽑혀요.
-- **🎣 영쌤 출제 포인트**: 왼쪽 메뉴 출제 DNA 화면 맨 아래 목록에 선생님의 '낚시' 출제 방식을 한 줄씩 적어 두면, 학교(운양고·제일고)와 관계없이 맞는 유형 문항에 하나씩 넣어요 (평소 문항 절반쯤, '🎣 영쌤 출제 포인트 위주로'를 켜면 모든 문항 · 난이도 '하'는 빼요). 새 포인트는 맨 아래 빈 줄에 계속 추가하면 돼요. '교과서만'을 켠 포인트는 교과서 지문에만 쓰고 같은 단원 다른 단락 원문을 함께 넘겨요.
+- **🎣 영쌤 출제 포인트**: 왼쪽 메뉴 출제 DNA 화면 맨 아래 목록에 선생님의 '낚시' 출제 방식을 한 줄씩 적어 두면, 학교(운양고·제일고)와 관계없이 맞는 유형 문항에 하나씩 넣어요 (평소 문항 절반쯤, '🎣 영쌤 출제 포인트 위주로'를 켜면 모든 문항 · 난이도 '하'는 빼요). 새 포인트는 맨 아래 빈 줄에 계속 추가하면 돼요. **✨ 정리해서 저장하기**를 누르면 새로 쓰거나 고친 포인트를 AI가 출제 지시문으로 정리해 보여 주고(한 칸에 섞어 쓴 포인트는 나눠 줌), 고칠 곳을 고친 뒤 **✅ 확정해서 저장**해야 올라가요 (몇 개에 약 1~5원). '교과서만'을 켠 포인트는 교과서 지문에만 쓰고 같은 단원 다른 단락 원문을 함께 넘겨요.
 - **📚 짧은 교과서 단락 자동 묶기**: 교과서 단락을 고르면 120단어보다 짧은 단락은 같은 단원의 바로 앞·뒤 단락(함께 고른 것)과 2~3개를 묶어 한 지문으로 출제해요 (예: 4-1 + 4-2). 짧은 단락은 묶은 지문으로만, 함께 묶인 긴 단락은 따로도 만들어요. 모의고사 (A)(B) 묶기는 지금처럼 직접 골라요. 영쌤 포인트로 만든 문항은 학생이 알아채지 않게 문제지에는 표시하지 않고 정답표('변(운)🎣')·해설에만 표시되며, 시험지·클리닉에서 '영쌤 포인트 문제만/빼기'로 고를 수 있어요.
 - **📅 주간 클리닉**: 그 주에 배운 지문을 주차로 저장해 두면, 그 지문으로 만든 변형문제만 모아 클리닉 미니모의고사(기본 20문항 · 중4/상8/최상8 · 한 학교 스타일 · 실제 기출 제외)를 만들어요. 모자라면 '모자란 문제 만들기'가 지문·유형을 골고루 나눠 필요한 만큼만 생성하고, '낸 것으로 표시'하면 다음 클리닉에서 그 문항은 빠져요.
 - **순서 유형 선택지**는 수능처럼 ① (A)-(C)-(B) ② (B)-(A)-(C) ③ (B)-(C)-(A) ④ (C)-(A)-(B) ⑤ (C)-(B)-(A)로 고정돼요 ((A)로 시작하는 선지는 ① 하나). 예전에 만든 순서 문제도 시험지에서는 이렇게 바뀌어 나와요.
@@ -8785,17 +8785,33 @@ def render_yt_points_editor():
             "교과서만": st.column_config.CheckboxColumn("교과서만", default=False, width="small"),
         })
     y1, y2 = st.columns(2)
-    if y1.button("💾 영쌤 출제 포인트 저장", type="primary", use_container_width=True, key="yt_points_save"):
-        new = []
+    if y1.button("✨ 정리해서 저장하기", type="primary", use_container_width=True, key="yt_points_save",
+                 help="새로 쓰거나 고친 포인트를 AI가 출제 지시문으로 깔끔하게 정리해 보여 줘요. 확인·수정한 뒤 '확정해서 저장'을 눌러야 올라가요 (포인트 몇 개에 약 1~5원)."):
+        rows = []
         for _, r in edited.iterrows():
             t = str(r.get("출제 포인트") or "").strip()
             if t and t.lower() != "nan":
-                new.append({"on": bool(r.get("사용")) if pd.notna(r.get("사용")) else True, "text": t,
-                            "scope": r.get("적용 유형") if r.get("적용 유형") in QB_YT_SCOPES else "전체 유형",
-                            "tb": bool(r.get("교과서만")) if pd.notna(r.get("교과서만")) else False})
-        st.session_state.exam_dna["yt_points"] = new
-        save_exam_dna(st.session_state.exam_dna)
-        st.success(f"✅ 영쌤 출제 포인트 {len(new)}개를 저장했어요. 다음에 시작하는 변형문제 작업부터 반영돼요.")
+                rows.append({"on": bool(r.get("사용")) if pd.notna(r.get("사용")) else True, "text": t,
+                             "scope": r.get("적용 유형") if r.get("적용 유형") in QB_YT_SCOPES else "전체 유형",
+                             "tb": bool(r.get("교과서만")) if pd.notna(r.get("교과서만")) else False})
+        have = {str(p.get("text", "")).strip() for p in pts}
+        changed = [i for i, r in enumerate(rows) if r["text"] not in have]
+        if not changed:
+            # 글은 그대로이고 사용·유형·교과서만만 바꾼 경우는 정리할 것이 없으니 바로 저장
+            st.session_state.exam_dna["yt_points"] = rows
+            save_exam_dna(st.session_state.exam_dna)
+            st.success(f"✅ 영쌤 출제 포인트 {len(rows)}개를 저장했어요. 다음에 시작하는 변형문제 작업부터 반영돼요.")
+        else:
+            with st.spinner(f"새로 쓰거나 고친 포인트 {len(changed)}개를 정리하는 중..."):
+                tidy = yt_tidy_points([rows[i] for i in changed], text_model)
+            if tidy is None:
+                st.error("정리에 실패했어요. 잠시 뒤 다시 눌러 주세요. (아무것도 저장하지 않았어요)")
+            else:
+                for t in tidy:
+                    t["src"] = changed[t["src"]]  # 정리한 목록 번호 → 전체 목록 번호
+                st.session_state.yt_draft = {"rows": rows, "tidy": tidy}
+                st.session_state.pop("yt_draft_editor", None)
+                st.rerun()
     if y2.button("↩️ 기본 포인트 다시 넣기", use_container_width=True, key="yt_points_reset",
                  help="지금 목록 뒤에 처음 넣어 둔 기본 포인트 중 빠진 것만 다시 붙여요 (직접 쓴 포인트는 그대로)"):
         have = {str(p.get("text", "")).strip() for p in pts}
@@ -8803,6 +8819,108 @@ def render_yt_points_editor():
         save_exam_dna(st.session_state.exam_dna)
         st.session_state.pop("yt_points_editor", None)
         st.rerun()
+
+    draft = st.session_state.get("yt_draft")
+    if draft:
+        with st.container(border=True):
+            st.markdown("##### ✨ 정리한 버전 — 확인하고 고칠 곳을 고친 뒤 확정해 주세요")
+            st.caption("새로 쓰거나 고친 포인트만 정리했어요. '정리한 포인트' 칸은 직접 고칠 수 있고, 마음에 안 들면 '내가 쓴 그대로'를 켜면 원래 쓴 말로 저장해요. "
+                       "한 칸에 여러 포인트를 섞어 쓴 경우는 여러 줄로 나눠 정리했어요. '확정해서 저장'을 누르기 전에는 아무것도 바뀌지 않아요.")
+            ddf = pd.DataFrame([{"원래 쓴 말": t["raw"], "정리한 포인트": t["text"], "적용 유형": t["scope"] if t["scope"] in QB_YT_SCOPES else "전체 유형",
+                                 "교과서만": bool(t.get("tb")), "내가 쓴 그대로": False, "무엇을 고쳤나": t.get("note", "")} for t in draft["tidy"]])
+            ded = st.data_editor(ddf, hide_index=True, use_container_width=True, key="yt_draft_editor", disabled=["원래 쓴 말", "무엇을 고쳤나"],
+                                 column_config={
+                                     "원래 쓴 말": st.column_config.TextColumn("원래 쓴 말", width="medium"),
+                                     "정리한 포인트": st.column_config.TextColumn("정리한 포인트 ✏️", width="large"),
+                                     "적용 유형": st.column_config.SelectboxColumn("적용 유형 ✏️", options=list(QB_YT_SCOPES), required=True),
+                                     "교과서만": st.column_config.CheckboxColumn("교과서만", width="small"),
+                                     "내가 쓴 그대로": st.column_config.CheckboxColumn("내가 쓴 그대로", width="small"),
+                                     "무엇을 고쳤나": st.column_config.TextColumn("무엇을 고쳤나", width="medium")})
+            k1, k2 = st.columns(2)
+            if k1.button("✅ 확정해서 저장", type="primary", use_container_width=True, key="yt_draft_ok"):
+                out = yt_merge_draft(draft["rows"], draft["tidy"], ded.to_dict("records"))
+                st.session_state.exam_dna["yt_points"] = out
+                save_exam_dna(st.session_state.exam_dna)
+                for k in ("yt_draft", "yt_points_editor", "yt_draft_editor"):
+                    st.session_state.pop(k, None)
+                st.session_state.yt_saved_msg = f"✅ 영쌤 출제 포인트 {len(out)}개를 저장했어요. 다음에 시작하는 변형문제 작업부터 반영돼요."
+                st.rerun()
+            if k2.button("✖️ 취소 (저장 안 함)", use_container_width=True, key="yt_draft_cancel"):
+                st.session_state.pop("yt_draft", None)
+                st.session_state.pop("yt_draft_editor", None)
+                st.rerun()
+    msg = st.session_state.pop("yt_saved_msg", None)
+    if msg:
+        st.success(msg)
+
+
+SCHEMA_YT_TIDY = {
+    "type": "object",
+    "properties": {"points": {"type": "array", "items": {"type": "object", "properties": {
+        "src": {"type": "integer", "description": "원래 쓴 말의 번호 (입력 목록의 번호)"},
+        "text": {"type": "string", "description": "정리한 출제 포인트 (한국어 지시문)"},
+        "scope": {"type": "string", "enum": list(QB_YT_SCOPES)},
+        "tb": {"type": "boolean", "description": "교과서 지문에만 쓰는 포인트인지"},
+        "note": {"type": "string", "description": "무엇을 고쳤는지 25자 이내"},
+    }, "required": ["src", "text", "scope", "tb", "note"]}}},
+    "required": ["points"],
+}
+
+def yt_tidy_points(rows: List[Dict], model: str):
+    """선생님이 급히 쓴 출제 포인트 → 변형문제 출제 지시문으로 정리 (뜻·예시는 그대로, AI 1회).
+    → [{src(rows 번호), raw, text, scope, tb, note}] / 실패하면 None"""
+    examples = "\n".join(f"- [{p['scope']}] {p['text']}" for p in DEFAULT_YT_POINTS[:3])
+    items = "\n".join(f"{i}. [지금 고른 유형: {r['scope']}{' · 교과서만' if r['tb'] else ''}] {r['text']}" for i, r in enumerate(rows))
+    prompt = f"""너는 고등 영어 내신 출제 팀장이다. 아래는 선생님이 급하게 적은 '낚시' 출제 방식 메모다. 각 메모를 변형문제를 만드는 AI가 그대로 따라 할 수 있는 깔끔한 출제 지시문으로 정리하라.
+규칙:
+- 선생님의 뜻·의도·예시·단어를 빠뜨리거나 바꾸지 않는다. 메모에 없는 새 장치를 지어내지 않는다. 오타·띄어쓰기·뒤죽박죽인 순서만 바로잡고, 무엇을(어디에) 어떻게 바꾸는지, 학생이 왜 낚이는지가 드러나게 쓴다.
+- 영어 예시 표현은 그대로 살려 괄호 안에 '(예: …)'로 둔다.
+- 한 메모에 서로 다른 포인트가 여러 개 섞여 있으면 포인트마다 나눠 같은 src 번호로 여러 개 낸다. 하나뿐이면 하나만.
+- scope는 이 포인트가 맞는 문제 유형 묶음을 고른다(지금 고른 유형이 맞으면 그대로). tb는 교과서 지문에서만 쓸 수 있는 포인트(같은 단원 다른 단락 내용 등)면 true.
+- '~한다.'체로 1~3문장.
+- note에는 무엇을 고쳤는지 짧게(예: 오타 수정, 두 포인트로 나눔, 예시 정리).
+
+[이미 저장된 포인트 문체 예시]
+{examples}
+
+[정리할 메모]
+{items}"""
+    out = _qb_call(client, model, prompt, SCHEMA_YT_TIDY, 0.2, [], "영쌤 출제 포인트 정리")
+    if not isinstance(out, dict) or not out.get("points"):
+        return None
+    tidy = []
+    for t in out["points"]:
+        i = t.get("src")
+        if isinstance(i, int) and 0 <= i < len(rows) and str(t.get("text", "")).strip():
+            tidy.append({"src": i, "raw": rows[i]["text"], "text": str(t["text"]).strip(), "scope": t.get("scope") or rows[i]["scope"],
+                         "tb": bool(t.get("tb")) or rows[i]["tb"], "note": str(t.get("note", ""))[:40]})
+    for i, r in enumerate(rows):  # AI가 빠뜨린 메모는 원래 쓴 말 그대로 보여 줌
+        if not any(t["src"] == i for t in tidy):
+            tidy.append({"src": i, "raw": r["text"], "text": r["text"], "scope": r["scope"], "tb": r["tb"], "note": "정리 못 함 — 원래 쓴 말"})
+    return sorted(tidy, key=lambda t: t["src"])
+
+def yt_merge_draft(rows: List[Dict], tidy: List[Dict], edited: List[Dict]) -> List[Dict]:
+    """전체 목록(rows) 중 정리한 줄만 확인 표의 내용으로 바꿈 (목록 순서 유지, '내가 쓴 그대로'면 원래 줄)"""
+    by_src = {}
+    for t, e in zip(tidy, edited):
+        by_src.setdefault(t["src"], []).append(e)
+    out = []
+    for i, r in enumerate(rows):
+        if i not in by_src:
+            out.append(r)
+            continue
+        es = by_src[i]
+        if any(e.get("내가 쓴 그대로") for e in es):
+            out.append(r)  # 여러 줄로 나눈 것 중 하나라도 '그대로'면 원래 한 줄로
+            continue
+        for e in es:
+            txt = str(e.get("정리한 포인트") or "").strip()
+            if txt and txt.lower() != "nan":
+                tb = e.get("교과서만")
+                out.append({"on": r["on"], "text": txt,
+                            "scope": e.get("적용 유형") if e.get("적용 유형") in QB_YT_SCOPES else r["scope"],
+                            "tb": bool(tb) if tb is not None and not (isinstance(tb, float) and tb != tb) else r["tb"]})
+    return out
 
 
 def page_past_voca():
