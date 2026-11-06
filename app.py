@@ -3685,6 +3685,9 @@ def render_library_manager(prefix: str, title_name: str, file_path: str, css_str
         if target_type == "victory":
             render_class_ppt_section(sel_passages, school_name)
 
+        if target_type == "voca":
+            sel_passages = render_voca_choice_option(prefix, sel_passages, text_model)
+
         if target_type in ["voca", "past_voca"]:
             r_col1, r_col2, r_col3, r_col4, r_col5 = st.columns([1.8, 1.8, 2.1, 2.1, 2.2])
         else:
@@ -6174,6 +6177,70 @@ def qb_trans_words(qs: List[Dict], trans: Dict[str, List[Dict]]) -> List[Dict]:
                             "category": f"{n}번 [선지]", "synonyms": [], "antonyms": []})
     return out
 
+@st.cache_data(ttl=60, show_spinner=False)
+def qb_rows_for_voca(_sb, labels: tuple) -> List[Dict]:
+    """단어장 지문들에 딸린 문제 (연결 지문 'A + B'로 만든 문제도 각 지문에 포함)"""
+    want = set(labels)
+    links = [l for l in qb_link_labels(_sb) if set(qb_link_parts(l)[1]) & want]
+    return qb_fetch(_sb, list(labels) + links, "id,passage_label,q_type,difficulty,content")
+
+def qb_voca_choice_words(rows: List[Dict], label: str, have: set) -> List[Dict]:
+    """한 지문의 변형·기출 문제 선지에 나온 단어 (해석본·선지 단어 뽑기로 저장된 것) → 단어장 행. 단어장에 이미 있는 단어는 뺌"""
+    out, seen = [], set(have)
+    for r in rows:
+        if label not in qb_link_parts(r.get("passage_label", ""))[1]:
+            continue
+        for x in qb_trans_cached(r) or []:
+            for w in x.get("words") or []:
+                k = str(w.get("word", "")).strip().lower()
+                if not k or k in seen:
+                    continue
+                seen.add(k)
+                out.append({"word": w["word"], "pos": "", "pronunciation": "", "meaning": w.get("meaning", ""),
+                            "category": "기출 선지" if r.get("difficulty") == QB_GICHUL_LEVEL else "변형 선지",
+                            "synonyms": [], "antonyms": []})
+    return out
+
+def render_voca_choice_option(prefix: str, sel_passages: List[Dict], text_model: str) -> List[Dict]:
+    """Anatomy Voca 출력: 그 지문 변형문제 선지 단어를 넣을지 고르기 (넣으면 출력용 사본에만 붙이고 저장된 단어장은 그대로)"""
+    sb = supabase if IS_CLOUD_DB else None
+    labels = tuple(p.get("label", "") for p in sel_passages)
+    try:
+        rows = qb_rows_for_voca(sb, labels)
+    except Exception:
+        return sel_passages
+    with st.container(border=True):
+        on = st.checkbox("➕ 변형문제 선지에 나온 단어도 같이 넣기 (지문마다 '변형 선지' 표시로 맨 뒤에)", key=f"{prefix}_with_choice")
+        added = {p.get("label", ""): qb_voca_choice_words(rows, p.get("label", ""),
+                                                          {str(w.get("word", "")).strip().lower() for w in (p.get("data") or {}).get("voca_list", [])})
+                 for p in sel_passages}
+        todo = [r for r in rows if qb_trans_parts(r) and qb_trans_cached(r) is None]
+        model = light_model_for(text_model)
+        n_todo, won = qb_trans_estimate(todo, model)
+        c1, c2 = st.columns([3, 2], vertical_alignment="center")
+        c1.caption(f"선지 단어 {sum(len(v) for v in added.values())}개 (단어장에 이미 있는 단어는 뺌) · "
+                   f"선지 단어를 아직 안 뽑은 문제 {n_todo}개" + (f" → 뽑으면 약 {max(1, round(won)):,}원" if n_todo else ""))
+        if n_todo and c2.button(f"🔎 남은 {n_todo}문제 선지 단어 뽑기", use_container_width=True, key=f"{prefix}_pull_choice",
+                                help="문제마다 선지 해석과 단어를 한 번 뽑아 저장해요 (시험지 '선지 해석본'과 같은 데이터, 다시 뽑지 않음)"):
+            logs = []
+            with st.spinner(f"선지 단어를 뽑는 중... ({n_todo}문제)"):
+                qb_choice_trans(sb, todo, model, logs)
+            flush_ai_usage()
+            qb_rows_for_voca.clear()
+            for m in logs:
+                st.warning(m)
+            st.rerun()
+    if not on:
+        return sel_passages
+    out = []
+    for p in sel_passages:
+        extra = added.get(p.get("label", ""), [])
+        if extra:
+            p = copy.deepcopy(p)
+            p.setdefault("data", {})["voca_list"] = list(p["data"].get("voca_list", [])) + extra
+        out.append(p)
+    return out
+
 def render_choice_trans_ui(sb, key: str, qids: List[str], title: str, text_model: str, academy_name: str, school_name: str):
     """시험지·클리닉 아래: 선지 해석본 만들기 + 단어장에 넣기"""
     with st.container(border=True):
@@ -6205,15 +6272,8 @@ def render_choice_trans_ui(sb, key: str, qids: List[str], title: str, text_model
             d1, d2 = st.columns([3, 2])
             d1.download_button("📥 선지 해석본 HTML 다운로드 — 열어서 '인쇄 / PDF로 저장'", page, f"{safe}_선지해석.html", "text/html",
                                use_container_width=True, key=f"{key}_dl")
-            label = f"[{safe} 선지 어휘]"
-            if d2.button(f"📚 선지 단어 {len(words)}개 → 기출 어휘 단어장", use_container_width=True, key=f"{key}_voca", disabled=not words,
-                         help="'기출 어휘 단어장' 탭에 이 시험지 이름으로 저장돼요. 거기서 단어장으로 출력할 수 있어요 (같은 이름이면 합쳐짐)"):
-                st.session_state.saved_past_voca.append({"id": str(uuid.uuid4()), "label": label, "data": {"voca_list": words},
-                                                         "body_text": f"{label} 시험지 선지 어휘", "academy_name": academy_name,
-                                                         "school_name": school_name})
-                st.session_state.saved_past_voca, _ = consolidate_past_voca_records(st.session_state.saved_past_voca)
-                save_to_file(PAST_VOCA_FILE, st.session_state.saved_past_voca)
-                st.success(f"✅ '기출 어휘 단어장' 탭에 {label}로 저장했어요.")
+            d2.caption(f"📚 선지 단어 {len(words)}개는 문제마다 그 지문 이름으로 저장됐어요. "
+                       "Anatomy Voca에서 그 지문 단어장을 출력할 때 '변형문제 선지 단어도 같이 넣기'를 켜면 함께 나와요.")
             with st.expander("해석본 미리 보기", expanded=False):
                 components.html(page, height=700, scrolling=True)
 
