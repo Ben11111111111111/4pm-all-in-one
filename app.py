@@ -955,8 +955,12 @@ def save_to_file(filepath: str, passages: List[Dict], replace: bool = False):
             if meta is not None and not replace:
                 now_ver = _doc_version(doc_key)
                 if now_ver and _ver_key(now_ver) != _ver_key(meta.get("ver")):
-                    res = supabase.table("app_storage").select("content").eq("doc_key", doc_key).execute()
-                    remote = res.data[0].get("content") if res.data else None
+                    hit = _lib_mem_cache().get(doc_key)
+                    if hit and hit[0] and _ver_key(hit[0]) == _ver_key(now_ver):
+                        remote = json.loads(hit[1])  # 같은 서버의 생성 작업이 방금 저장한 것 → 다시 받지 않음
+                    else:
+                        res = supabase.table("app_storage").select("content").eq("doc_key", doc_key).execute()
+                        remote = res.data[0].get("content") if res.data else None
                     if isinstance(remote, list):
                         merged, n_theirs = _merge_library(meta.get("fp") or {}, passages, remote)
                         passages[:] = merged
@@ -3917,10 +3921,30 @@ GEN_TYPE_NAMES = {t: name for t, _, name in GEN_TYPES}
 GEN_RETRY_WAITS = [60, 180, 600]  # 분석 실패 시 1분 → 3분 → 10분 기다렸다가 다시 시도
 GEN_WORKER_LEASE_SEC = 1200  # 작업 담당 서버가 이 시간 동안 소식이 없으면 다른 서버가 넘겨받음
 
+# 교재·원문처럼 큰 문서는 생성 작업(서버 스레드)도 화면과 같은 서버 기억(_lib_mem_cache)을 씀:
+#   저장 시각만 먼저 읽어 그대로면 내용을 다시 내려받지 않음.
+#   (예전에는 지문 하나 만들 때마다 '이미 있나' 확인·저장 직전에 교재 문서 전체를 여러 번 받아서 DB 전송량이 컸음)
+#   스레드에서 st.cache_resource를 부르지 않도록, 화면이 실행될 때 같은 dict를 꺼내 둠.
+_BIG_DOC_KEYS = {filepath_to_doc_key(f) for f in (VICTORY_FILE, ANATOMY_FILE, CORE_FILE, VOCA_FILE, PAST_VOCA_FILE, MOCK_FILE)}
+_SHARED_DOC_CACHE = _lib_mem_cache()
+
 def _store_get(sb, filepath, default=None):
     """스레드에서도 쓸 수 있는 DB 읽기 (st.* 를 쓰지 않음)"""
     doc_key = filepath_to_doc_key(filepath)
     if sb is not None:
+        if doc_key in _BIG_DOC_KEYS:
+            hit = _SHARED_DOC_CACHE.get(doc_key)
+            if hit and hit[0]:
+                res = sb.table("app_storage").select("updated_at").eq("doc_key", doc_key).execute()
+                if res.data and _ver_key(res.data[0].get("updated_at")) == _ver_key(hit[0]):
+                    return json.loads(hit[1])
+            res = sb.table("app_storage").select("content,updated_at").eq("doc_key", doc_key).execute()
+            if res.data:
+                content = res.data[0]["content"]
+                if content is not None:
+                    _SHARED_DOC_CACHE[doc_key] = (res.data[0].get("updated_at"), json.dumps(content, ensure_ascii=False))
+                return content
+            return default
         res = sb.table("app_storage").select("content").eq("doc_key", doc_key).execute()
         if res.data:
             return res.data[0]["content"]
@@ -3935,7 +3959,10 @@ def _store_put(sb, filepath, content):
     if isinstance(content, list):
         content.sort(key=natural_sort_key)
     if sb is not None:
-        _doc_upsert(sb, doc_key, content)
+        ver = _doc_upsert(sb, doc_key, content)
+        if doc_key in _BIG_DOC_KEYS:
+            # 방금 저장한 내용을 서버 기억에도 → 화면이 1분마다 새로 불러올 때도 다시 내려받지 않음
+            _SHARED_DOC_CACHE[doc_key] = (ver, json.dumps(content, ensure_ascii=False))
     try:
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(content, f, ensure_ascii=False, indent=2)
