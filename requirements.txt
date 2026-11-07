@@ -1,8 +1,8 @@
-streamlit
-google-genai
-pandas
-openpyxl
-supabase
-python-pptx
-openai
-anthropic
+streamlit>=1.57,<1.58
+google-genai>=2.6,<3
+pandas<4
+openpyxl<4
+supabase>=2.33,<3
+python-pptx<2
+openai>=2.38,<3
+anthropic>=2.4,<3

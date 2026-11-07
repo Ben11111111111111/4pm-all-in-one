@@ -528,6 +528,23 @@ os.makedirs(IMAGE_DIR, exist_ok=True)
 def filepath_to_doc_key(filepath: str) -> str:
     return os.path.splitext(os.path.basename(filepath))[0]
 
+# app_storage 문서 쓰기는 모두 여기를 거침
+#   - updated_at에 저장 시각을 찍음 (예전에는 처음 만든 시각에서 바뀌지 않았음) → 다른 곳이 먼저 저장했는지 가볍게 확인
+#   - 저장한 내용을 돌려받지 않음 (예전에는 저장할 때마다 문서 전체를 다시 내려받아 DB 전송량이 두 배였음)
+try:
+    from postgrest import ReturnMethod as _PgReturnMethod
+    _UPSERT_MIN = {"returning": _PgReturnMethod.minimal}
+except Exception:
+    _UPSERT_MIN = {}
+
+def _doc_upsert(sb, doc_key: str, content) -> str:
+    """문서 저장 → 찍은 저장 시각을 돌려줌"""
+    from datetime import datetime, timezone
+    ver = datetime.now(timezone.utc).isoformat()
+    sb.table("app_storage").upsert({"doc_key": doc_key, "content": content, "updated_at": ver},
+                                   on_conflict="doc_key", **_UPSERT_MIN).execute()
+    return ver
+
 DEFAULT_EXAM_DNA = {
     "updated_at": "2026-10 (운양고 1·2·3학년 7개 시험지 & 제일고 2학년 1개 시험지 기출 DNA 탑재)",
     "rules_text": """[운양고 & 제일고 실제 내신 출제 DNA 핵심 규칙]
@@ -575,7 +592,7 @@ def save_exam_dna(dna_data: Dict):
     doc_key = filepath_to_doc_key(DNA_FILE)
     if IS_CLOUD_DB:
         try:
-            supabase.table("app_storage").upsert({"doc_key": doc_key, "content": dna_data}, on_conflict="doc_key").execute()
+            _doc_upsert(supabase, doc_key, dna_data)
         except Exception as e:
             st.warning(f"⚠️ 클라우드 출제 DNA 저장 실패: {e}")
     try:
@@ -609,7 +626,7 @@ def save_app_settings(settings: Dict):
     doc_key = filepath_to_doc_key(SETTINGS_FILE)
     if IS_CLOUD_DB:
         try:
-            supabase.table("app_storage").upsert({"doc_key": doc_key, "content": settings}, on_conflict="doc_key").execute()
+            _doc_upsert(supabase, doc_key, settings)
         except Exception as e:
             st.warning(f"⚠️ 설정 클라우드 저장 실패: {e}")
     try:
@@ -792,8 +809,9 @@ def normalize_passage_records(data: List[Dict]) -> (List[Dict], bool):
             base_fn = os.path.basename(str(p["image_path"]).replace("\\", "/"))
             norm_path = os.path.join(IMAGE_DIR, base_fn)
             if p["image_path"] != norm_path:
+                # 이 컴퓨터의 폴더 경로로만 바꿈 (파일 이름은 그대로라 다시 저장할 필요 없음
+                #  — 예전에는 PC 앱·배포 앱을 번갈아 열 때마다 열자마자 교재 전체를 다시 저장했음)
                 p["image_path"] = norm_path
-                needs_save = True
         if "image_data_url" in p and len(p.get("image_data_url", "")) > 1000:
             file_id = p.get("id", str(uuid.uuid4()))
             img_path = save_base64_to_image_file(p["image_data_url"], custom_filename=f"{file_id}.png")
@@ -804,15 +822,101 @@ def normalize_passage_records(data: List[Dict]) -> (List[Dict], bool):
     data.sort(key=natural_sort_key)
     return data, needs_save
 
+# ---- 교재 문서 저장 안전장치 ----
+#   교재·원문·기출 어휘는 종류마다 문서 하나에 목록 전체가 들어 있어서, 저장할 때 목록 전체를 다시 씀.
+#   그래서 다른 창(PC·폰)이나 서버의 생성 작업이 그 사이 저장한 지문이 있으면, 오래된 목록으로 덮어써 사라질 수 있었음.
+#   → 저장할 때마다 updated_at에 시각을 찍고, 저장 직전에 그 시각만 읽어(가벼움) 내가 불러온 뒤 바뀌었으면
+#     최신 목록을 받아 '내가 고친·추가한·지운 지문'만 그 위에 반영해서 저장함.
+def _doc_versions() -> Dict:
+    """모든 문서의 마지막 저장 시각 {doc_key: updated_at} (내용은 안 읽어서 가벼움)"""
+    if not IS_CLOUD_DB:
+        return {}
+    res = supabase.table("app_storage").select("doc_key,updated_at").execute()
+    return {r["doc_key"]: r.get("updated_at") for r in (res.data or [])}
+
+def _doc_version(doc_key: str):
+    res = supabase.table("app_storage").select("updated_at").eq("doc_key", doc_key).execute()
+    return res.data[0].get("updated_at") if res.data else None
+
+def _ver_key(v) -> tuple:
+    """DB가 돌려주는 시각 글자는 소수점 뒤 0을 빼기도 해서, 비교할 때는 6자리로 맞춤"""
+    m = re.match(r"(\d{4}-\d\d-\d\d)[T ](\d\d:\d\d:\d\d)(?:\.(\d+))?", str(v or ""))
+    return (m.group(1), m.group(2), (m.group(3) or "").ljust(6, "0")[:6]) if m else (str(v or ""),)
+
+def _item_fp(p: Dict) -> str:
+    """지문 하나의 내용 지문(指紋) — 이미지 경로는 컴퓨터마다 폴더가 달라서 파일 이름만 비교"""
+    q = p
+    if isinstance(p, dict) and p.get("image_path"):
+        q = {**p, "image_path": os.path.basename(str(p["image_path"]).replace("\\", "/"))}
+    return hashlib.md5(json.dumps(q, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+def _lib_meta() -> Dict:
+    """이 창이 마지막으로 DB와 맞춘 시점의 {doc_key: {"ver": 시각, "fp": {지문 id: 내용 지문}}}"""
+    if "_lib_meta" not in st.session_state:
+        st.session_state["_lib_meta"] = {}
+    return st.session_state["_lib_meta"]
+
+def _remember_lib(doc_key: str, ver, items: List[Dict]):
+    _lib_meta()[doc_key] = {"ver": ver, "fp": {p.get("id"): _item_fp(p) for p in items if isinstance(p, dict) and p.get("id")}}
+
+@st.cache_resource(show_spinner=False)
+def _lib_mem_cache() -> Dict:
+    """서버 하나가 같이 쓰는 교재 원본 {doc_key: (저장 시각, JSON 글자)}.
+    새로 연 창·새로고침은 DB의 저장 시각이 같으면 내용을 다시 내려받지 않고 여기서 읽음 (앱 여는 시간·DB 전송량 절약)"""
+    return {}
+
+def _merge_library(base_fp: Dict, local: List[Dict], remote: List[Dict]) -> (List[Dict], int):
+    """remote(DB 최신) 위에 이 창에서 바꾼 것만 반영. 돌려주는 수: 다른 곳에서 추가·수정돼 함께 살린 지문 수"""
+    local_by = {p.get("id"): p for p in local if isinstance(p, dict)}
+    out, seen, n_theirs = [], set(), 0
+    local_new_labels = {p.get("label") for p in local if isinstance(p, dict) and p.get("id") not in base_fp}
+    for r in remote:
+        if not isinstance(r, dict):
+            continue
+        rid = r.get("id")
+        seen.add(rid)
+        if rid in base_fp:
+            if rid not in local_by:
+                continue                      # 이 창에서 지움
+            lp = local_by[rid]
+            if _item_fp(lp) != base_fp[rid]:
+                out.append(lp)                # 이 창에서 고침 → 이 창 것
+            else:
+                out.append(r)                 # 이 창에선 그대로 → DB 최신 것
+                n_theirs += _item_fp(r) != base_fp[rid]
+        elif rid in local_by:
+            out.append(local_by[rid])
+        elif r.get("label") in local_new_labels:
+            continue                          # 같은 지문을 이 창에서도 새로 만듦 → 이 창 것 하나만
+        else:
+            out.append(r)                     # 다른 곳에서 새로 추가
+            n_theirs += 1
+    for p in local:
+        if not isinstance(p, dict) or p.get("id") in seen:
+            continue
+        if p.get("id") in base_fp and _item_fp(p) == base_fp[p.get("id")]:
+            continue                          # 다른 곳에서 지웠고 이 창에선 안 고침 → 지운 대로
+        out.append(p)                         # 이 창에서 새로 추가(또는 다른 곳에서 지웠지만 이 창에서 고친 것)
+    return out, n_theirs
+
 def load_from_file(filepath: str) -> List[Dict]:
     doc_key = filepath_to_doc_key(filepath)
     data = None
+    ver = None
 
     if IS_CLOUD_DB:
         try:
-            res = supabase.table("app_storage").select("content").eq("doc_key", doc_key).execute()
-            if res.data and isinstance(res.data[0].get("content"), list):
-                data = res.data[0]["content"]
+            cache = _lib_mem_cache()
+            hit = cache.get(doc_key)
+            ver = _doc_version(doc_key) if hit else None
+            if hit and ver and _ver_key(hit[0]) == _ver_key(ver):
+                data = json.loads(hit[1])
+            else:
+                res = supabase.table("app_storage").select("content,updated_at").eq("doc_key", doc_key).execute()
+                if res.data and isinstance(res.data[0].get("content"), list):
+                    data = res.data[0]["content"]
+                    ver = res.data[0].get("updated_at")
+                    cache[doc_key] = (ver, json.dumps(data, ensure_ascii=False))
         except Exception as e:
             st.warning(f"⚠️ 클라우드 데이터 로드 중 오류 ({doc_key}): {e}")
 
@@ -832,19 +936,36 @@ def load_from_file(filepath: str) -> List[Dict]:
         if c_changed:
             needs_save = True
 
+    if IS_CLOUD_DB:
+        _remember_lib(doc_key, ver, data)
     if needs_save:
         save_to_file(filepath, data)
     return data
 
-def save_to_file(filepath: str, passages: List[Dict]):
+def save_to_file(filepath: str, passages: List[Dict], replace: bool = False):
+    """replace=True: 데이터 이식의 '전체 바꾸기'처럼 목록을 그대로 덮어쓸 때 (다른 곳 변경과 합치지 않음)"""
     doc_key = filepath_to_doc_key(filepath)
+    for p in passages:
+        if isinstance(p, dict) and not p.get("id"):
+            p["id"] = str(uuid.uuid4())
     passages.sort(key=natural_sort_key)
     if IS_CLOUD_DB:
         try:
-            supabase.table("app_storage").upsert({
-                "doc_key": doc_key,
-                "content": passages
-            }, on_conflict="doc_key").execute()
+            meta = _lib_meta().get(doc_key)
+            if meta is not None and not replace:
+                now_ver = _doc_version(doc_key)
+                if now_ver and _ver_key(now_ver) != _ver_key(meta.get("ver")):
+                    res = supabase.table("app_storage").select("content").eq("doc_key", doc_key).execute()
+                    remote = res.data[0].get("content") if res.data else None
+                    if isinstance(remote, list):
+                        merged, n_theirs = _merge_library(meta.get("fp") or {}, passages, remote)
+                        passages[:] = merged
+                        passages.sort(key=natural_sort_key)
+                        if n_theirs:
+                            st.toast(f"🔀 다른 창·생성 작업에서 그사이 저장된 {n_theirs}개도 함께 살려 저장했어요")
+            ver = _doc_upsert(supabase, doc_key, passages)
+            _remember_lib(doc_key, ver, passages)
+            _lib_mem_cache()[doc_key] = (ver, json.dumps(passages, ensure_ascii=False))
         except Exception as e:
             st.warning(f"⚠️ 클라우드 자동 저장 실패 ({doc_key}): {e}")
     try:
@@ -854,6 +975,9 @@ def save_to_file(filepath: str, passages: List[Dict]):
         pass
 
 # 통합 세션 스테이트 초기화
+_lib_load_note = st.empty()
+if "saved_v" not in st.session_state:
+    _lib_load_note.info("📚 교재·원문 데이터를 불러오는 중이에요... 창을 처음 열 때만 잠깐 걸려요.")
 if "saved_v" not in st.session_state:
     st.session_state.saved_v = load_from_file(VICTORY_FILE)
 if "v_selected" not in st.session_state:
@@ -898,6 +1022,7 @@ if "app_settings" not in st.session_state:
 
 if "exam_dna" not in st.session_state:
     st.session_state.exam_dna = load_exam_dna()
+_lib_load_note.empty()
 
 @st.cache_data(show_spinner=False, max_entries=30)
 def cached_read_image_base64(img_filename: str) -> str:
@@ -3499,12 +3624,15 @@ def render_library_manager(prefix: str, title_name: str, file_path: str, css_str
                     col_sync1.markdown(
                         f"💡 **엑셀 재업로드 불필요!** 기존 저장된 지문 중 **{title_name} 데이터가 아직 없는 지문이 `{len(source_pool)}개`** 있습니다."
                     )
-                    if col_sync2.button(f"🔄 누락된 {len(source_pool)}개 지문 {title_name} 자동 생성", type="primary", use_container_width=True, key=f"sync_{prefix}_btn"):
-                        rows = [{"label": sp["label"], "text": sp["body_text"], "school": sp.get("school_name", ""), "img_path": sp.get("image_path", "")}
-                                for sp in source_pool.values()]
-                        n_added = enqueue_generation(rows, [target_type], text_model, api_delay, academy_name, school_name)
-                        st.session_state.gen_flash = f"✅ {n_added}개 지문의 {title_name} 생성을 작업에 추가했습니다. 창을 닫아도 서버에서 계속 진행됩니다."
-                        st.rerun()
+                    # 비용이 드는 일괄 생성이라 바로 시작하지 않고 예상 비용을 보여 준 뒤 한 번 더 확인
+                    with col_sync2.popover(f"🔄 누락된 {len(source_pool)}개 지문 {title_name} 자동 생성", use_container_width=True):
+                        st.caption(book_cost_line(text_model, {target_type: len(source_pool)}))
+                        if st.button("생성 시작", type="primary", use_container_width=True, key=f"sync_{prefix}_btn"):
+                            rows = [{"label": sp["label"], "text": sp["body_text"], "school": sp.get("school_name", ""), "img_path": sp.get("image_path", "")}
+                                    for sp in source_pool.values()]
+                            n_added = enqueue_generation(rows, [target_type], text_model, api_delay, academy_name, school_name)
+                            st.session_state.gen_flash = f"✅ {n_added}개 지문의 {title_name} 생성을 작업에 추가했습니다. 창을 닫아도 서버에서 계속 진행됩니다."
+                            st.rerun()
 
                 if target_type == "voca" and core_by_label and saved_list:
                     if st.button("🔗 이미 생성된 [ANATOMY CORE]의 주제·요약 패러프레이징 어휘들을 현재 VOCA 단어장에 일괄 병합", use_container_width=True, key="merge_core_to_voca_btn"):
@@ -3807,7 +3935,7 @@ def _store_put(sb, filepath, content):
     if isinstance(content, list):
         content.sort(key=natural_sort_key)
     if sb is not None:
-        sb.table("app_storage").upsert({"doc_key": doc_key, "content": content}, on_conflict="doc_key").execute()
+        _doc_upsert(sb, doc_key, content)
     try:
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(content, f, ensure_ascii=False, indent=2)
@@ -3829,9 +3957,40 @@ def _job_update(sb, fn):
     """작업 문서를 새로 읽어 fn으로 고친 뒤 저장 (화면에서 누른 중단·추가가 덮어써지지 않게 매번 새로 읽음)"""
     job = _store_get(sb, GEN_JOB_FILE) or {}
     fn(job)
+    _job_slim(job)
     job["updated_at"] = time.time()
     _store_put(sb, GEN_JOB_FILE, job)
     return job
+
+# 작업 문서를 가볍게: 같은 지문 본문을 건마다 복사하지 않고 job["texts"]에 한 번만 두고 건에는 이름표(text_key)만 둠
+#   (변형문제는 지문 1개 × 유형 15 × 난이도 2 = 30건이 같은 본문을 쓰는데, 작업 문서는 처리 중 계속 읽고 쓰므로 DB 전송량이 컸음)
+#   AI에 보내는 지문 글자는 예전과 똑같음 → 프롬프트 캐시 영향 없음 · 예전 방식(건에 text가 있는 작업)도 그대로 처리
+def _job_text_key(job: Dict, text: str) -> str:
+    k = hashlib.md5(str(text).encode("utf-8")).hexdigest()[:12]
+    job.setdefault("texts", {})[k] = str(text)
+    return k
+
+def job_item_full(job: Dict, it: Dict) -> Dict:
+    """처리할 때 쓸 작업 1건 (지문 본문·같은 단원 원문을 채운 사본)"""
+    out = dict(it)
+    texts = job.get("texts") or {}
+    if "text" not in out:
+        out["text"] = texts.get(it.get("text_key", ""), "")
+    if "unit_other" not in out and it.get("unit_key"):
+        out["unit_other"] = texts.get(it["unit_key"], "")
+    return out
+
+def _job_slim(job: Dict):
+    """끝난 건은 본문을 지우고, 남은 건이 아무도 안 쓰는 본문은 작업 문서에서 뺌 (실패한 건은 다시 시도할 수 있게 남김)"""
+    items = job.get("items") or []
+    for it in items:
+        if it.get("state") == "done":
+            it.pop("text", None)
+            it.pop("unit_other", None)
+            it.pop("plans", None)
+    if job.get("texts"):
+        used = {k for it in items if it.get("state") != "done" for k in (it.get("text_key"), it.get("unit_key")) if k}
+        job["texts"] = {k: v for k, v in job["texts"].items() if k in used}
 
 def _generate_one_type(sb, gclient, item: Dict, t: str, opts: Dict, dna_rules: str, logs: List[str]) -> (bool, str):
     """지문 하나의 교재 1종을 생성해 저장. 이미 있으면 건너뜀. (동시 실행되므로 각자 받은 DB 연결만 사용)"""
@@ -3963,7 +4122,7 @@ def gen_worker_main(api_key: str, sb_url: str, sb_key: str):
             # 반값 모드: 새로 들어온 건은 모아서 한 번에 제출 → 'waiting'. 결과는 몇 분마다 확인해서 들어온 것부터 검증·저장
             fresh = [it for it in all_items if it.get("state") == "pending" and it.get("batch") and it.get("kind") == "qbank"]
             if fresh:
-                qb_batch_submit(sb, fresh[:QB_BATCH_MAX], job.get("opts", {}), dna_rules, essay_rules, claim, yt_points)
+                qb_batch_submit(sb, [job_item_full(job, it) for it in fresh[:QB_BATCH_MAX]], job.get("opts", {}), dna_rules, essay_rules, claim, yt_points)
                 continue
             pending = [it for it in all_items if it.get("state") == "pending"]
             waiting = [it for it in all_items if it.get("state") == "waiting"]
@@ -3979,7 +4138,7 @@ def gen_worker_main(api_key: str, sb_url: str, sb_key: str):
             if not pending:
                 _job_update(sb, lambda j: (j.update(status="done", current="", worker=None), _job_log(j, "🎉 모든 작업을 마쳤습니다.")))
                 return
-            item = pending[0]
+            item = job_item_full(job, pending[0])
             item_model = job_item_model(item, job.get("opts", {}))
             _job_update(sb, lambda j: (j.update(current=item["label"], current_model=item_model), claim(j)))
             logs = []
@@ -4033,8 +4192,21 @@ def start_gen_thread() -> bool:
         return True
 
 def load_gen_job() -> Dict:
+    """작업 상태 읽기: 저장 시각만 먼저 보고 바뀌었을 때만 내용을 내려받음
+    (진행 중에는 5초마다·화면을 누를 때마다 읽어서, 예전에는 작업이 클수록 DB 전송량이 컸음)"""
     try:
-        return _store_get(supabase if IS_CLOUD_DB else None, GEN_JOB_FILE) or {}
+        if not IS_CLOUD_DB:
+            return _store_get(None, GEN_JOB_FILE) or {}
+        doc_key = filepath_to_doc_key(GEN_JOB_FILE)
+        cached = st.session_state.get("_gen_job_cache")
+        if cached:
+            ver = _doc_version(doc_key)
+            if ver and _ver_key(cached[0]) == _ver_key(ver):
+                return cached[1]
+        res = supabase.table("app_storage").select("content,updated_at").eq("doc_key", doc_key).execute()
+        job = (res.data[0].get("content") if res.data else None) or {}
+        st.session_state["_gen_job_cache"] = ((res.data[0].get("updated_at") if res.data else None), job)
+        return job
     except Exception:
         return {}
 
@@ -4057,7 +4229,7 @@ def enqueue_generation(rows: List[Dict], types_list: List[str], text_model: str,
             key = (r["label"], tuple(types_list))
             if key in queued:
                 continue
-            job["items"].append({"id": str(uuid.uuid4()), "label": r["label"], "text": r["text"],
+            job["items"].append({"id": str(uuid.uuid4()), "label": r["label"], "text_key": _job_text_key(job, r["text"]),
                                  "school": r.get("school", ""), "img_path": r.get("img_path", ""),
                                  "gen_image": bool(r.get("gen_image")), "image_style": r.get("image_style", ""),
                                  "image_model": r.get("image_model", ""),
@@ -4069,6 +4241,7 @@ def enqueue_generation(rows: List[Dict], types_list: List[str], text_model: str,
     return added["n"]
 
 def reload_libraries_from_db():
+    """교재 목록 다시 불러오기 (DB에서 바뀐 교재만 실제로 내려받고, 그대로인 교재는 서버에 기억해 둔 것을 씀)"""
     st.session_state.saved_v = load_from_file(VICTORY_FILE)
     st.session_state.saved_a = load_from_file(ANATOMY_FILE)
     st.session_state.saved_c = load_from_file(CORE_FILE)
@@ -4160,8 +4333,14 @@ def _gen_job_live_body(slow: bool):
     done_books = sum(1 for it in job.get("items", []) if it.get("state") == "done" and it.get("kind") != "qbank")
     seen = st.session_state.get("gen_seen_done")
     if seen is not None and seen != done_books:
-        reload_libraries_from_db()
-    st.session_state.gen_seen_done = done_books
+        # 지문이 빨리 끝날 때 몇 초마다 교재 전체를 다시 받지 않게 1분에 한 번까지만 (작업이 끝나면 바로)
+        #  — 저장할 때 최신 목록과 합쳐 저장하므로, 잠깐 오래된 목록이 보여도 지문이 사라지지 않음
+        if job.get("status") not in ("running", "stopping") or time.time() - st.session_state.get("_gen_lib_reload_ts", 0) > 60:
+            reload_libraries_from_db()
+            st.session_state["_gen_lib_reload_ts"] = time.time()
+            st.session_state.gen_seen_done = done_books
+    else:
+        st.session_state.gen_seen_done = done_books
     if job.get("status") in ("running", "stopping") and not gen_thread_alive():
         start_gen_thread()  # 서버가 재시작된 경우 자동으로 이어서 진행
     _render_gen_job_body(job)
@@ -4218,6 +4397,38 @@ def qb_job_cost_krw(model_spec: str, n_q: int, verify: bool = True, batch: bool 
     ver = (400 * p_in + n_q * (600 * p_in + 50 * p_out)) if verify else 0
     return (gen * (0.5 if batch else 1) + ver) / 1_000_000 * 1400
 
+# 교재 생성 비용 추정 (원, 1달러 1,400원) — 지문 1개·교재 1종의 대략 토큰 (2026-11 저장된 교재 220개 글자 수 ÷ 2로 잼)
+#   (공통 앞부분: 규칙·출제 DNA, 두 번째 지문부터 캐시로 읽음 / 지문·나머지 입력 / 출력) · 생각 토큰은 변형문제 실측 비율(QB_OUT_TOKENS)로 더함
+BOOK_TOKENS = {"victory": (5500, 500, 3600), "anatomy": (0, 700, 2400), "core": (12800, 500, 3900), "voca": (12800, 900, 3300)}
+
+def book_cost_krw(model_spec: str, counts: Dict) -> float:
+    """counts: {교재 종류: 새로 만들 지문 수}"""
+    name = split_model_spec(model_spec)[1].lower()
+    p_in, p_cache, p_out = ai_price(model_spec)
+    think = next((v for k, v in QB_OUT_TOKENS.items() if k in name), 1200) / QB_OUT_TOKENS["gpt"]
+    usd = 0.0
+    for t, n in counts.items():
+        c, i, o = BOOK_TOKENS.get(t, (0, 1000, 3000))
+        usd += n * (c * p_cache + i * p_in + o * think * p_out) / 1_000_000
+    return usd * 1400
+
+def book_new_counts(labels: List[str], types_list: List[str]) -> Dict:
+    """고른 지문 중 교재 종류별로 아직 없는 지문 수 (이미 있는 교재는 생성 작업이 건너뜀 → 비용 없음)"""
+    have = {"victory": st.session_state.saved_v, "anatomy": st.session_state.saved_a,
+            "core": st.session_state.saved_c, "voca": st.session_state.saved_w}
+    out = {}
+    for t in types_list:
+        names = {p.get("label") for p in have.get(t, [])}
+        out[t] = sum(1 for l in dict.fromkeys(labels) if l not in names)
+    return out
+
+def book_cost_line(model_spec: str, counts: Dict, extra: str = "") -> str:
+    if not sum(counts.values()):
+        return "✅ 고른 지문은 이미 교재가 다 있어요 (눌러도 새로 만들지 않아 비용 없음)"
+    parts = " · ".join(f"{GEN_TYPE_NAMES[t].replace('Anatomy ', '')} {n}개" for t, n in counts.items() if n)
+    return (f"🧾 새로 만들 교재: {parts} · 🤖 {ai_model_label(model_spec)} · 예상 비용 약 {book_cost_krw(model_spec, counts):,.0f}원"
+            f"{extra} (대략 · 이미 있는 교재는 건너뛰어요)")
+
 QB_SETUP_SQL = """create table if not exists public.question_bank (
   id uuid primary key default gen_random_uuid(),
   created_at timestamptz not null default now(),
@@ -4230,6 +4441,7 @@ QB_SETUP_SQL = """create table if not exists public.question_bank (
   content jsonb not null
 );
 create index if not exists question_bank_label_idx on public.question_bank (passage_label);
+create index if not exists question_bank_label_created_idx on public.question_bank (passage_label, created_at, id);
 alter table public.question_bank enable row level security;
 create policy "qb select" on public.question_bank for select using (true);
 create policy "qb insert" on public.question_bank for insert with check (true);
@@ -5063,7 +5275,7 @@ def qb_insert(sb, rows: List[Dict]):
     if not rows:
         return
     if sb is not None:
-        sb.table(QB_TABLE).insert(rows).execute()
+        sb.table(QB_TABLE).insert(rows, **_UPSERT_MIN).execute()  # 넣은 문제를 다시 돌려받지 않음 (전송량 절약)
         return
     data = _qb_local_load() + [{**r, "created_at": time.strftime("%Y-%m-%dT%H:%M:%S")} for r in rows]
     with open(QB_FILE, "w", encoding="utf-8") as f:
@@ -5082,7 +5294,7 @@ def qb_fetch(sb, labels: List[str], cols: str = "*") -> List[Dict]:
         chunk = labels[i:i + 40]
         start = 0
         while True:
-            res = sb.table(QB_TABLE).select(cols).in_("passage_label", chunk).order("created_at").range(start, start + 999).execute()
+            res = sb.table(QB_TABLE).select(cols).in_("passage_label", chunk).order("created_at").order("id").range(start, start + 999).execute()  # id까지 정렬해야 1000개씩 나눠 읽을 때 겹치거나 빠지지 않음 (한 번에 넣은 문제는 created_at이 같음)
             out += res.data or []
             if len(res.data or []) < 1000:
                 break
@@ -5192,7 +5404,7 @@ def qb_batch_submit(sb, items: List[Dict], opts: Dict, dna_rules: str, essay_rul
 
 def qb_batch_poll(sb, gclient, job: Dict, claim):
     """기다리는 반값 묶음마다 끝났는지 확인 → 끝난 묶음은 결과를 받아 건마다 정답 검증·저장"""
-    waiting = [it for it in job.get("items", []) if it.get("state") == "waiting"]
+    waiting = [job_item_full(job, it) for it in job.get("items", []) if it.get("state") == "waiting"]
     by_batch = {}
     for it in waiting:
         by_batch.setdefault(it.get("batch_id", ""), []).append(it)
@@ -5389,10 +5601,10 @@ def enqueue_qbank(passages: List[Dict], q_types: List[str], levels: List[str], s
         for p, t, lv, cnt in todo:
             job["items"].append({"id": str(uuid.uuid4()), "kind": "qbank", "label": f"{p['label']} · {t} · {lv}",
                                  "passage_label": p["label"], "exam_key": p.get("exam_key", ""), "number": str(p.get("number", "")),
-                                 "text": p.get("body_text", ""), "q_type": t, "difficulty": lv, "school": school,
+                                 "text_key": _job_text_key(job, p.get("body_text", "")), "q_type": t, "difficulty": lv, "school": school,
                                  "count": cnt, "verify": verify, "state": "pending", "error": "",
                                  "light": bool(light_easy and lv in ("하", "중")), "underline": underline, "batch": bool(batch),
-                                 "yt_focus": bool(yt_focus), "unit_other": unit_for(p, t)})
+                                 "yt_focus": bool(yt_focus), "unit_key": (_job_text_key(job, uo) if (uo := unit_for(p, t)) else "")})
             added["n"] += 1
         _job_log(job, f"➕ 변형문제 {added['n']}건 추가 ({note or (school + ' · ' + ', '.join(levels) + f' · 건당 {count}문제')}{' · 💸 반값 모드' if batch else ''}"
                       f"{' · 🎣 영쌤 포인트 위주' if yt_focus else ''})")
@@ -6106,7 +6318,7 @@ def qb_choice_trans(sb, qs: List[Dict], model: str, logs: List[str]) -> Dict[str
             r["content"] = c
             if sb is not None:
                 try:
-                    sb.table(QB_TABLE).update({"content": c}).eq("id", r["id"]).execute()
+                    sb.table(QB_TABLE).update({"content": c}, **_UPSERT_MIN).eq("id", r["id"]).execute()
                 except Exception as e:
                     logs.append(f"⚠️ 해석 저장 실패(다음에 다시 해석): {str(e)[:80]}")
         miss = len(todo) - len(results)
@@ -6551,6 +6763,7 @@ def render_weekly_clinic(sb, mock_lib: List[Dict], by_label: Dict, summary: List
                          text_model: str, api_delay: int, academy_name: str, school_name: str):
     st.caption("그 주에 배운 지문을 주차로 저장해 두고, 그 지문으로 만든 변형문제만 모아 클리닉 미니모의고사를 만들어요 "
                "(실제 기출은 넣지 않고, 한 학교 스타일만). 문제가 모자라면 모자란 만큼만 골라서 새로 만들 수 있어요.")
+    st.caption("🧭 이럴 때: 매주 배운 지문으로 같은 구성의 클리닉지를 만들 때 · 자유 구성은 '📄 시험지 만들기', 학교 실제 시험과 같은 구성·배점은 왼쪽 '🏁 영T FINAL 모의고사'")
     weeks = qb_clinic_weeks(sb)
     wmap = {w["id"]: w for w in weeks}
     ids = ["__new__"] + [w["id"] for w in weeks]
@@ -6771,7 +6984,9 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
     links = [l for l in qb_link_labels(sb) if all(x in by_label for x in qb_link_parts(l)[1])]
     summary = qb_bank_summary(sb, tuple(sorted(by_label) + links))
     label_counts = _qb_chip_counts(summary, "passage_label")
-    t_gen, t_exam, t_clinic, t_manage, t_gichul = st.tabs(["🛠️ 문제 만들기 (누적)", "📄 시험지 만들기", "📅 주간 클리닉", "🗂️ 문제 보기·삭제", "🏫 기출 표시"])
+    # 탭 상태를 기억해서(on_change="rerun"), 안 보이는 '문제 보기·삭제' 탭은 문제를 DB에서 읽지 않음 (예전에는 화면을 누를 때마다 읽었음)
+    t_gen, t_exam, t_clinic, t_manage, t_gichul = st.tabs(["🛠️ 문제 만들기 (누적)", "📄 시험지 만들기", "📅 주간 클리닉", "🗂️ 문제 보기·삭제", "🏫 기출 표시"],
+                                                          key="qb_tabs", on_change="rerun")
 
     with t_gen:
         st.caption("고른 지문 × 유형 × 난이도마다 문제를 만들어 계속 쌓습니다. 같은 지문을 다시 만들면 이미 만든 문제와 다른 포인트로 출제합니다.")
@@ -6871,6 +7086,7 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
 
     with t_exam:
         st.caption("고른 번호에서 같은 개수씩 골고루 뽑고, 번호 안에서는 유형을 돌아가며 섞습니다.")
+        st.caption("🧭 이럴 때: 지문·유형·문항 수를 마음대로 정해 시험지를 만들 때 · 매주 같은 구성은 '📅 주간 클리닉', 학교 실제 시험과 같은 구성·배점은 왼쪽 '🏁 영T FINAL 모의고사'")
         sel_e = _qb_passage_picker("qb_exam_labels", mock_lib, label_counts)
         with st.container(key="qb_card_exam_opts"):
             st.markdown("<div class='qb-title'>시험지 구성</div>", unsafe_allow_html=True)
@@ -7030,7 +7246,7 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
 
     with t_manage:
         m_label = st.selectbox("📌 지문", sorted([p["label"] for p in mock_lib] + links, key=lambda l: natural_sort_key({"label": l})), key="qb_manage_label")
-        rows = qb_fetch(sb, [m_label]) if m_label else []
+        rows = qb_fetch(sb, [m_label]) if (m_label and t_manage.open is not False) else []
         if not rows:
             st.caption("이 지문에는 아직 쌓인 문제가 없습니다.")
         else:
@@ -7711,6 +7927,9 @@ def render_mock_exam_tab(text_model: str, api_delay: int, academy_name: str, sch
                 del st.session_state["mock_draft"]
                 st.rerun()
 
+    if not draft:
+        st.caption("2️⃣ 검수 — 위에서 PDF를 올려 본문을 뽑으면 여기에서 확인·수정한 뒤 저장해요.")
+
     # ---- 3) 모의고사(연도/월/학년) 또는 교과서(과목/출판사/단원) → 번호 클릭 선택 ----
     saved_mock: List[Dict] = st.session_state.saved_mock
     kind_items = [p for p in saved_mock if (p.get("source_type") == "textbook") == is_textbook]
@@ -7860,6 +8079,9 @@ def render_mock_exam_tab(text_model: str, api_delay: int, academy_name: str, sch
         mdo_w = g_col4.checkbox("📖 Anatomy Voca", value=True, key="mock_do_w")
         if any(p.get("needs_review") for p in selected):
             st.warning("⚠️ 선택한 지문 중 정답 확인이 필요한 지문이 있습니다. 위 '원문 확인·수정'에서 먼저 검토하는 것을 권장합니다.")
+        m_types = [t for t, on in [("victory", mdo_v), ("anatomy", mdo_a), ("core", mdo_c), ("voca", mdo_w)] if on]
+        if selected and m_types:
+            st.caption(book_cost_line(text_model, book_new_counts([p["label"] for p in selected], m_types)))
         if st.button(f"🚀 선택한 {len(selected)}개 지문 교재 생성 시작", type="primary", use_container_width=True, key="mock_gen_btn"):
             if not (mdo_v or mdo_a or mdo_c or mdo_w):
                 st.warning("생성할 교재 종류를 최소 1개 이상 체크해주세요.")
@@ -7890,7 +8112,7 @@ APP_HELP = {
 | ② 교재 만들기 | 📝 원문 라이브러리 아래쪽 / 🚀 엑셀 원클릭 | 지문을 골라 One-Shot·Self-Note·Core·Voca 생성 (서버에서 백그라운드로 진행) |
 | ③ 출력 | 🖨️ 교재 출력 (🏆 🦅 💎 📖) | 지문을 골라 '단행본 렌더링' → HTML 다운로드 → 열어서 **인쇄 / PDF로 저장** |
 | ④ 변형문제 | 🧩 변형문제 은행·시험지 | 문제를 계속 쌓아 두고, 조건에 맞게 뽑아 시험지·책으로 출력 |
-| ⑤ 학교 스타일 학습 | 🎯 출제DNA 학습기 · 📚 기출 어휘 | 운양고·제일고 기출 PDF로 출제 규칙과 어휘를 쌓음 → ②·④ 생성에 반영 |
+| ⑤ 학교 스타일 학습 | 🎯 출제 DNA · 📚 기출 어휘 | 운양고·제일고 기출 PDF로 출제 규칙과 어휘를 쌓음 → ②·④ 생성에 반영 |
 
 ##### ⚙️ 왼쪽 메뉴 아래 (모든 화면에 공통으로 적용)
 - **🤖 AI 모델**: 모든 AI 작업(교재·변형문제·PDF 분석)에 이 모델을 써요. 모델마다 **값과 품질이 크게 달라요** → 바로 아래 '📊 모델 고르기 참고표'를 보고 고르세요.
@@ -8013,7 +8235,7 @@ AI가 짝지은 원문과 내용 단어가 20%도 안 겹치면 잘못 연결된
 - **👁️ 단행본 렌더링** → **HTML 다운로드** → 받은 파일을 크롬으로 열어 **인쇄 / PDF로 저장**. Voca는 엑셀·CSV로도 받을 수 있어요.
 """,
 "dna": """
-##### 🎯 출제DNA 학습기 — 학교 출제 스타일을 AI에게 가르치는 곳
+##### 🎯 출제 DNA — 학교 출제 스타일을 AI에게 가르치는 곳
 여기 저장된 **출제 DNA 규칙**은 교재·변형문제를 만들 때 AI에게 함께 전달돼요. 그래서 이 규칙이 좋을수록 '그 학교다운' 문제가 나와요.
 - 맨 위 **📊 현황판**: 학교별로 참고하는 기출 시험지 수, 실제 시험에 많이 나온 유형·어법 개념, 지문을 얼마나 바꾸는지, 그래서 문제를 어떻게 만드는지를 보여 줘요. 시험지를 더 올리면 바로 바뀌어요 (보기만 하는 화면이라 비용 없음).
   - 시험지 수·유형 통계는 **🧩 변형문제 은행·시험지 → 🏫 기출 표시**에 올린 시험지에서, 학습 기록은 이 화면의 PDF 업로드에서 쌓여요.
@@ -8642,6 +8864,7 @@ def final_rebuild(sb, rec: Dict) -> List[Dict]:
 
 def render_final_tab(text_model: str, api_delay: int, academy_name: str, school_name: str):
     sb = supabase if IS_CLOUD_DB else None
+    st.caption("🧭 이럴 때: 학교 실제 시험과 같은 문항 수·배점·디자인의 회차별 모의고사가 필요할 때 · 자유 구성 시험지나 주간 클리닉은 '🧩 변형문제 은행·시험지'")
     ready, err = qb_table_status(sb)
     if not ready:
         st.error("변형문제 표가 아직 없습니다. '변형문제 은행·시험지' 화면의 안내대로 먼저 만들어 주세요.")
@@ -8855,9 +9078,35 @@ def page_home():
         st.markdown(APP_HELP["overview"])
 
 
+def excel_template_bytes() -> bytes:
+    """엑셀 원클릭 빈 양식 (열 이름 + 예시 한 줄)"""
+    buf = io.BytesIO()
+    pd.DataFrame([{"라벨": "[2025년 6월 고1] 20번", "지문": "Many people believe that ... (영어 원문을 그대로 붙여 넣기)",
+                   "학교명": "운양고", "이미지명": "(선택) 함께 올릴 이미지 파일 이름, 예: q20.png"}]).to_excel(buf, index=False)
+    return buf.getvalue()
+
 def page_excel():
-    xlsx = st.file_uploader("📂 엑셀 업로드", type=["xlsx"])
+    e1, e2 = st.columns([3, 1.2], vertical_alignment="bottom")
+    xlsx = e1.file_uploader("📂 엑셀 업로드", type=["xlsx"])
+    e2.download_button("📄 빈 엑셀 양식 받기", excel_template_bytes(), "4pm_엑셀원클릭_양식.xlsx",
+                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True,
+                       help="열 이름: 라벨 · 지문 · 학교명 · 이미지명 (영어 열 이름 label · passage · school · image_name도 돼요). 지문만 꼭 채우면 돼요.")
     imgs = st.file_uploader("🖼️ 이미지 대량 업로드 (선택)", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
+    # 올린 엑셀을 미리 읽어 지문 수·예상 비용을 보여 줌 (생성 버튼을 눌렀을 때 읽는 것과 같은 규칙)
+    xl_preview = []
+    if xlsx:
+        try:
+            _df = pd.read_excel(io.BytesIO(xlsx.getvalue()))
+            for i, r in _df.iterrows():
+                raw_text = r.get('passage', r.get('지문', ''))
+                if pd.isna(raw_text) or not str(raw_text).strip():
+                    continue
+                xl_preview.append({"label": clean_label(r.get('label', r.get('라벨', f'지문_{i+1}'))),
+                                   "img": str(r.get('image_name', r.get('이미지명', ''))).strip()})
+            if not xl_preview:
+                st.warning("⚠️ 엑셀에서 지문을 찾지 못했어요. '지문'(또는 passage) 열에 영어 원문이 있는지 확인해 주세요. 위 '빈 엑셀 양식 받기'의 열 이름과 같아야 해요.")
+        except Exception as e:
+            st.warning(f"⚠️ 엑셀을 읽지 못했어요: {str(e)[:150]}")
 
     with st.container(border=True):
         x_col1, x_col2, x_col3 = st.columns([2.2, 1.4, 1.4])
@@ -8874,6 +9123,12 @@ def page_excel():
     do_a = g_col2.checkbox("🦅 Anatomy Self-Note", value=True)
     do_c = g_col3.checkbox("💎 Anatomy Core", value=True)
     do_w = g_col4.checkbox("📖 Anatomy Voca", value=True)
+    x_types = [t for t, on in [("victory", do_v), ("anatomy", do_a), ("core", do_c), ("voca", do_w)] if on]
+    if xl_preview and x_types:
+        up_names = {i.name for i in (imgs or [])}
+        n_pic = sum(1 for r in xl_preview if r["img"] not in up_names) if xl_gen_image and set(x_types) & {"victory", "anatomy"} else 0
+        st.caption(f"📄 엑셀 지문 {len(xl_preview)}개 · " + book_cost_line(text_model, book_new_counts([r["label"] for r in xl_preview], x_types),
+                                                                       f" + AI 이미지 최대 {n_pic}장(별도)" if n_pic else ""))
 
     if xlsx and st.button("🚀 올인원 통합 생성 시작", type="primary"):
         if not (do_v or do_a or do_c or do_w):
@@ -9302,6 +9557,178 @@ def page_past_voca():
 
 
 
+# ---- 전체 백업 · 되살리기 (설정 화면) ----
+LIB_SESSION_KEYS = {VICTORY_FILE: "saved_v", ANATOMY_FILE: "saved_a", CORE_FILE: "saved_c", VOCA_FILE: "saved_w",
+                    MOCK_FILE: "saved_mock", PAST_VOCA_FILE: "saved_past_voca"}
+LIB_NAMES = {VICTORY_FILE: "One-Shot(한판승)", ANATOMY_FILE: "Self-Note", CORE_FILE: "Core", VOCA_FILE: "Voca",
+             MOCK_FILE: "원문 라이브러리", PAST_VOCA_FILE: "기출 어휘"}
+BACKUP_SKIP_DOCS = {"gen_job"}  # 진행 중 작업 상태는 되살리지 않음 (백업에는 넣음)
+
+def build_full_backup(with_images: bool = False) -> (bytes, str, str):
+    """DB의 모든 문서 + 변형문제 은행 (+ 이미지) → ZIP (파일 내용, 파일 이름, 요약)"""
+    buf = io.BytesIO()
+    counts = []
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        if IS_CLOUD_DB:
+            for k in sorted(_doc_versions()):
+                res = supabase.table("app_storage").select("content").eq("doc_key", k).execute()
+                content = res.data[0].get("content") if res.data else None
+                zf.writestr(f"{k}.json", json.dumps(content, ensure_ascii=False))
+                if isinstance(content, list):
+                    counts.append(f"{k} {len(content)}개")
+            rows, start = [], 0
+            while True:
+                r = supabase.table(QB_TABLE).select("*").order("id").range(start, start + 999).execute()
+                rows += r.data or []
+                if len(r.data or []) < 1000:
+                    break
+                start += 1000
+        else:
+            for fp in glob_local_docs():
+                with open(fp, "r", encoding="utf-8") as f:
+                    zf.writestr(os.path.basename(fp), f.read())
+            rows = _qb_local_load()
+        zf.writestr("question_bank.json", json.dumps(rows, ensure_ascii=False))
+        counts.append(f"변형문제 {len(rows):,}개")
+        n_img = 0
+        if with_images:
+            names = []
+            if IS_CLOUD_DB:
+                off = 0
+                while True:
+                    lst = supabase.storage.from_("image_assets").list("", {"limit": 1000, "offset": off}) or []
+                    names += [x["name"] for x in lst if x.get("name") and x.get("id")]
+                    if len(lst) < 1000:
+                        break
+                    off += 1000
+            elif os.path.isdir(IMAGE_DIR):
+                names = os.listdir(IMAGE_DIR)
+            prog = st.progress(0.0, text="이미지 받는 중")
+            for i, nm in enumerate(names):
+                try:
+                    if IS_CLOUD_DB:
+                        raw = supabase.storage.from_("image_assets").download(nm)
+                    else:
+                        with open(os.path.join(IMAGE_DIR, nm), "rb") as f:
+                            raw = f.read()
+                    zf.writestr(f"image_assets/{nm}", raw)
+                    n_img += 1
+                except Exception:
+                    pass
+                prog.progress((i + 1) / max(1, len(names)), text=f"이미지 받는 중 {i + 1}/{len(names)}")
+            prog.empty()
+            counts.append(f"이미지 {n_img}개")
+    stamp = time.strftime("%Y%m%d_%H%M", time.gmtime(time.time() + 9 * 3600))
+    return buf.getvalue(), f"4pm_backup_{stamp}.zip", " · ".join(counts)
+
+def glob_local_docs() -> List[str]:
+    """로컬 PC 모드에서 백업할 JSON 파일들"""
+    skip = {"question_bank.json"}
+    return [os.path.join(BASE_DIR, f) for f in sorted(os.listdir(BASE_DIR)) if f.endswith(".json") and f not in skip
+            and not f.startswith(".")]
+
+def _mig_target(name: str, exact: bool):
+    """파일 이름 → 교재 파일 (백업 ZIP 안은 문서 이름 그대로만, 따로 올린 JSON은 예전처럼 이름에 든 글자로)"""
+    base = os.path.splitext(os.path.basename(name))[0].lower()
+    by_key = {filepath_to_doc_key(fp): fp for fp in LIB_SESSION_KEYS}
+    if base in by_key:
+        return by_key[base]
+    if exact:
+        return None
+    for word, fp in (("victory", VICTORY_FILE), ("anatomy", ANATOMY_FILE), ("core", CORE_FILE), ("mock", MOCK_FILE),
+                     ("past", PAST_VOCA_FILE), ("voca", VOCA_FILE)):
+        if word in base:
+            return fp
+    return None
+
+def migration_read_uploads(files) -> (Dict, List[Dict], Dict, List[str]):
+    """올린 JSON·백업 ZIP → ({교재 파일: {"name", "data"}}, 변형문제 행, 그 밖의 문서 {doc_key: 내용}, 문제 메시지)"""
+    plan, qb_rows, others, bad = {}, [], {}, []
+
+    def take(name, raw, exact):
+        try:
+            data = json.loads(raw)
+        except Exception:
+            bad.append(f"{name}: JSON으로 읽을 수 없어 건너뜀")
+            return
+        base = os.path.splitext(os.path.basename(name))[0]
+        if base == "question_bank":
+            if isinstance(data, list):
+                qb_rows.extend(r for r in data if isinstance(r, dict) and r.get("id"))
+            return
+        fp = _mig_target(name, exact)
+        if fp:
+            if isinstance(data, list):
+                plan[fp] = {"name": os.path.basename(name), "data": data}
+            else:
+                bad.append(f"{name}: 지문 목록 형식이 아니라 건너뜀")
+        elif exact and base not in BACKUP_SKIP_DOCS and data is not None:
+            others[base] = data
+        elif not exact:
+            bad.append(f"{name}: 어느 교재 파일인지 몰라 건너뜀 (파일 이름에 victory·anatomy·core·voca·past·mock 중 하나가 있어야 해요)")
+
+    for uf in files:
+        if uf.name.lower().endswith(".zip"):
+            try:
+                with zipfile.ZipFile(io.BytesIO(uf.getvalue())) as zf:
+                    for info in zf.infolist():
+                        if not info.is_dir() and info.filename.lower().endswith(".json") and "/" not in info.filename.strip("/"):
+                            take(info.filename, zf.read(info.filename), True)
+            except Exception as e:
+                bad.append(f"{uf.name}: ZIP을 열 수 없음 ({str(e)[:80]})")
+        else:
+            take(uf.name, uf.getvalue(), False)
+    return plan, qb_rows, others, bad
+
+def migration_new_items(cur: List[Dict], incoming: List[Dict]) -> List[Dict]:
+    """지금 목록에 없는 지문 (id도 지문 이름도 겹치지 않는 것)"""
+    ids = {p.get("id") for p in cur if isinstance(p, dict)}
+    labels = {p.get("label") for p in cur if isinstance(p, dict)}
+    out = []
+    for p in incoming:
+        if isinstance(p, dict) and p.get("id") not in ids and p.get("label") not in labels:
+            out.append(p)
+            labels.add(p.get("label"))
+    return out
+
+def migration_restore_qbank(rows: List[Dict]) -> int:
+    """백업의 변형문제 중 지금 은행에 없는 것만 다시 넣음 → 넣은 수"""
+    sb = supabase if IS_CLOUD_DB else None
+    if sb is None:
+        have = {r.get("id") for r in _qb_local_load()}
+    else:
+        have, start = set(), 0
+        while True:
+            r = sb.table(QB_TABLE).select("id").order("id").range(start, start + 999).execute()
+            have |= {x["id"] for x in (r.data or [])}
+            if len(r.data or []) < 1000:
+                break
+            start += 1000
+    cols = ("id", "created_at", "passage_label", "exam_key", "number", "q_type", "difficulty", "school", "content")
+    todo = [{k: r[k] for k in cols if k in r} for r in rows if r.get("id") not in have]
+    for i in range(0, len(todo), 200):
+        chunk = todo[i:i + 200]
+        if sb is None:
+            qb_insert(None, chunk)
+        else:
+            sb.table(QB_TABLE).insert(chunk, **_UPSERT_MIN).execute()
+    return len(todo)
+
+def migration_restore_docs(docs: Dict) -> int:
+    """설정·출제 DNA 등 그 밖의 문서: DB에 없는 것만 되살림 → 되살린 수"""
+    have = set(_doc_versions()) if IS_CLOUD_DB else {os.path.splitext(f)[0] for f in os.listdir(BASE_DIR)}
+    n = 0
+    for k, content in docs.items():
+        if k in have:
+            continue
+        if IS_CLOUD_DB:
+            _doc_upsert(supabase, k, content)
+        with open(os.path.join(BASE_DIR, f"{k}.json"), "w", encoding="utf-8") as f:
+            json.dump(content, f, ensure_ascii=False, indent=2)
+        n += 1
+    return n
+
+
 def page_settings():
     settings_changed = False
     with st.container(border=True):
@@ -9356,11 +9783,30 @@ def page_settings():
 
     with st.container(border=True):
         st.markdown(f"##### ☁️ 저장소 · {'클라우드 DB 연결됨 🟢' if IS_CLOUD_DB else '로컬 PC 모드 🟡'}")
-        st.markdown("**📦 기존 PC 데이터 클라우드 이전 / 백업**")
-        st.caption("💡 이미지는 Supabase의 [Storage -> image_assets 버킷]에 직접 드래그해 올리거나, 구글 드라이브에서 받은 ZIP 파일 1개로 한 번에 올릴 수 있습니다.")
+        st.markdown("**💾 전체 백업 받기** (AI 비용 없음)")
+        st.caption("교재 4종·원문 라이브러리·기출 어휘·설정·출제 DNA·기출 지도·클리닉 기록과 변형문제 은행 전체를 ZIP 파일 하나로 받아요. "
+                   "한 달에 한 번쯤, 그리고 큰 작업(데이터 이식·대량 삭제) 전에 받아 두면 아래 '되살리기'로 돌릴 수 있어요.")
+        bk1, bk2 = st.columns([1.3, 2])
+        bk_img = bk2.checkbox("🖼️ 이미지 파일도 넣기 (시간이 더 걸리고 파일이 커져요)", value=False, key="bk_with_images")
+        if bk1.button("📦 백업 파일 만들기", use_container_width=True, key="bk_build"):
+            with st.spinner("DB에서 모든 데이터를 모으는 중이에요..."):
+                try:
+                    st.session_state["bk_zip"] = build_full_backup(bk_img)
+                except Exception as e:
+                    st.error(f"⚠️ 백업을 만들지 못했어요: {str(e)[:200]}")
+        if st.session_state.get("bk_zip"):
+            data, fname, summary = st.session_state["bk_zip"]
+            st.download_button(f"📥 {fname} 받기 ({len(data) / 1_000_000:.1f}MB)", data, fname, "application/zip",
+                               type="primary", use_container_width=True, key="bk_dl")
+            st.caption(summary)
+
+        st.divider()
+        st.markdown("**📥 백업·JSON 되살리기 (데이터 이식)**")
+        st.caption("💡 이미지는 Supabase의 [Storage -> image_assets 버킷]에 직접 드래그해 올리거나, 구글 드라이브에서 받은 ZIP 파일 1개로 한 번에 올릴 수 있습니다. "
+                   "위에서 받은 백업 ZIP은 1)에 올리면 교재·원문·변형문제를, 2)에 올리면 이미지를 되살려요.")
         up_jsons = st.file_uploader(
-            "1) 기존 JSON 파일 업로드 (victory, anatomy, core, voca, past_voca)",
-            type=["json"],
+            "1) JSON 파일 또는 전체 백업 ZIP 업로드 (victory, anatomy, core, voca, past_voca, mock)",
+            type=["json", "zip"],
             accept_multiple_files=True,
             key="cloud_mig_json"
         )
@@ -9369,7 +9815,33 @@ def page_settings():
             type=["zip"],
             key="cloud_mig_zip"
         )
-        if st.button("🚀 클라우드 DB로 데이터 이식 실행", type="primary", use_container_width=True):
+        plan, qb_rows, other_docs, bad = migration_read_uploads(up_jsons or [])
+        for b in bad:
+            st.warning(f"⚠️ {b}")
+        mig_mode = "add"
+        confirm_ok = True
+        if plan:
+            mig_mode = st.radio("되살리는 방식", ["add", "replace"], horizontal=True, key="mig_mode",
+                                format_func=lambda m: {"add": "➕ 없는 지문만 추가 (지금 데이터는 그대로)",
+                                                       "replace": "♻️ 파일 내용으로 전체 바꾸기"}[m])
+            rows_view = []
+            for fp, info in plan.items():
+                cur = st.session_state.get(LIB_SESSION_KEYS[fp]) or []
+                new_n = len(migration_new_items(cur, info["data"]))
+                rows_view.append({"교재": LIB_NAMES[fp], "파일": info["name"], "지금": len(cur), "파일 속": len(info["data"]),
+                                  "없는 지문만 추가": f"+{new_n}개",
+                                  "전체 바꾸기": f"{len(cur)}개 → {len(info['data'])}개"})
+            st.dataframe(pd.DataFrame(rows_view), hide_index=True, use_container_width=True)
+            if mig_mode == "replace":
+                shrink = [r for r in rows_view if r["파일 속"] < r["지금"]]
+                st.warning("♻️ 전체 바꾸기는 위 교재의 지금 목록을 파일 내용으로 통째로 바꿔요. 파일에 없는 지문은 지워져요."
+                           + (f" 특히 {', '.join(r['교재'] for r in shrink)}은(는) 지금보다 줄어들어요." if shrink else ""))
+                confirm_ok = st.checkbox("위 표의 '전체 바꾸기' 개수대로 바뀌는 것을 확인했어요", key="mig_confirm")
+        qb_restore = bool(qb_rows) and st.checkbox(f"🧩 변형문제 은행: 백업의 {len(qb_rows):,}문제 중 지금 없는 문제만 다시 넣기", value=True, key="mig_qb")
+        docs_restore = bool(other_docs) and st.checkbox(
+            f"⚙️ 그 밖의 문서 {len(other_docs)}개(설정·출제 DNA·기출 지도 등) 중 DB에 없는 것만 되살리기 (있는 문서는 그대로)", value=True, key="mig_docs")
+        if st.button("🚀 클라우드 DB로 데이터 이식 실행", type="primary", use_container_width=True,
+                     disabled=not (up_zip is not None or plan or qb_restore or docs_restore) or not confirm_ok):
             with st.spinner("데이터를 클라우드 DB에 동기화 중입니다..."):
                 if up_zip is not None:
                     with zipfile.ZipFile(up_zip) as zf:
@@ -9394,33 +9866,35 @@ def page_settings():
                             prog.progress((idx + 1) / max(1, len(img_entries)))
                         prog.empty()
 
-                for uj in (up_jsons or []):
-                    j_data = json.load(uj)
-                    if isinstance(j_data, list):
-                        j_data, _ = normalize_passage_records(j_data)
-                        fname = uj.name.lower()
-                        if "victory" in fname:
-                            st.session_state.saved_v = j_data
-                            save_to_file(VICTORY_FILE, j_data)
-                        elif "anatomy" in fname:
-                            st.session_state.saved_a = j_data
-                            save_to_file(ANATOMY_FILE, j_data)
-                        elif "core" in fname:
-                            st.session_state.saved_c = j_data
-                            save_to_file(CORE_FILE, j_data)
-                        elif "mock" in fname:
-                            st.session_state.saved_mock = j_data
-                            save_to_file(MOCK_FILE, j_data)
-                        elif "past" in fname:
-                            j_data, _ = consolidate_past_voca_records(j_data)
-                            st.session_state.saved_past_voca = j_data
-                            save_to_file(PAST_VOCA_FILE, j_data)
-                        elif "voca" in fname:
-                            st.session_state.saved_w = j_data
-                            save_to_file(VOCA_FILE, j_data)
+                done_msgs = []
+                for fp, info in plan.items():
+                    key = LIB_SESSION_KEYS[fp]
+                    j_data, _ = normalize_passage_records(copy.deepcopy(info["data"]))
+                    if fp == PAST_VOCA_FILE:
+                        j_data, _ = consolidate_past_voca_records(j_data)
+                    if mig_mode == "replace":
+                        st.session_state[key] = j_data
+                        save_to_file(fp, st.session_state[key], replace=True)
+                        done_msgs.append(f"{LIB_NAMES[fp]} {len(j_data)}개로 바꿈")
+                    else:
+                        cur = st.session_state.get(key) or []
+                        new_items = migration_new_items(cur, j_data)
+                        if new_items:
+                            cur.extend(new_items)
+                            st.session_state[key] = cur
+                            save_to_file(fp, st.session_state[key])
+                        done_msgs.append(f"{LIB_NAMES[fp]} +{len(new_items)}개")
+                if qb_restore:
+                    n_qb = migration_restore_qbank(qb_rows)
+                    done_msgs.append(f"변형문제 +{n_qb:,}개")
+                if docs_restore:
+                    n_doc = migration_restore_docs(other_docs)
+                    done_msgs.append(f"문서 {n_doc}개 되살림")
                 st.cache_data.clear()
-                st.success("✅ 클라우드 DB로 모든 데이터 이식이 완료되었습니다!")
+                st.session_state["mig_done"] = "✅ 데이터 이식을 마쳤어요" + (f" · {' · '.join(done_msgs)}" if done_msgs else "")
                 st.rerun()
+        if st.session_state.get("mig_done"):
+            st.success(st.session_state.pop("mig_done"))
 
 
 # ---- 메뉴 정의 (title: 메뉴 이름, short: 홈 화면 한 줄 설명, desc: 화면 위 설명, help: 사용법 키) ----
