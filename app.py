@@ -5441,7 +5441,7 @@ def _generate_qbank_item(sb_factory, gclient, item: Dict, opts: Dict, dna_rules:
     label, q_type, level, school = item["passage_label"], item["q_type"], item["difficulty"], item.get("school", "운양고")
     count = int(item.get("count", 2))
     model = job_item_model(item, opts)
-    existing = [r for r in qb_fetch(sb, [label], "q_type,content") if r.get("q_type") == q_type]
+    existing = [r for r in qb_fetch(sb, [label], "q_type,school,content") if r.get("q_type") == q_type]
     avoid = [str((r.get("content") or {}).get("focus", "")) for r in existing if (r.get("content") or {}).get("focus")]
     questions = []
     for round_idx in range(len(GEN_RETRY_WAITS) + 1):
@@ -5454,11 +5454,50 @@ def _generate_qbank_item(sb_factory, gclient, item: Dict, opts: Dict, dna_rules:
             time.sleep(GEN_RETRY_WAITS[round_idx])
     if not questions:
         return False, "변형문제 생성 실패"
-    return qb_save_questions(sb, gclient, model, item, questions, logs)
+    return qb_save_questions(sb, gclient, model, item, questions, logs, existing)
 
-def qb_save_questions(sb, gclient, model: str, item: Dict, questions: List[Dict], logs: List[str]) -> (bool, str):
-    """정답 검증 → 통과한 문제만 문제 표에 저장"""
+_QB_SIG_KEYS = ("stem", "given", "passage", "box", "choices", "answer", "target")
+
+def qb_content_sig(c) -> str:
+    """문제 내용이 같은지 비교하는 지문(指紋): 발문·지문·선지·정답이 모두 같으면 같은 문제 (해설·난이도 표시는 안 봄)"""
+    c = c if isinstance(c, dict) else {}
+    return json.dumps({k: c.get(k) for k in _QB_SIG_KEYS}, ensure_ascii=False, sort_keys=True)
+
+def qb_dedupe_rows(rows: List[Dict]) -> List[Dict]:
+    """같은 지문·유형·학교에서 내용이 완전히 같은 문제는 하나만 남김 (난이도 이름만 다르게 두 번 저장된 경우 등)
+    → 한 시험지·클리닉에 같은 문제가 두 번 들어가지 않게. 내용을 안 읽은 줄은 그대로 둠"""
+    seen, out = set(), []
+    for r in rows:
+        if not isinstance(r.get("content"), dict):
+            out.append(r)
+            continue
+        key = (r.get("passage_label"), r.get("q_type"), r.get("school"), qb_content_sig(r["content"]))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(r)
+    return out
+
+def qb_save_questions(sb, gclient, model: str, item: Dict, questions: List[Dict], logs: List[str], existing: List[Dict] = None) -> (bool, str):
+    """정답 검증 → 통과한 문제만 문제 표에 저장. 이미 있는 문제와 내용이 똑같은 문제는 저장하지 않음 (검증 비용도 아낌)"""
     label, q_type, level, school = item["passage_label"], item["q_type"], item["difficulty"], item.get("school", "운양고")
+    if existing is None:
+        try:
+            existing = [r for r in qb_fetch(sb, [label], "q_type,school,content") if r.get("q_type") == q_type]
+        except Exception:
+            existing = []
+    have = {qb_content_sig(r.get("content")) for r in existing if r.get("school", school) == school}
+    uniq = []
+    for q in questions:
+        sig = qb_content_sig(q)
+        if sig not in have:
+            have.add(sig)
+            uniq.append(q)
+    n_same = len(questions) - len(uniq)
+    if not uniq:
+        logs.append(f"⏭️ {item['label']}: 새로 만든 문제가 이미 있는 문제와 똑같아 저장하지 않았어요 ({n_same}개)")
+        return True, ""
+    questions = uniq
     checks = qb_verify(gclient, model, item["text"], questions, logs, level) if item.get("verify", True) else [True] * len(questions)
     rows, lowered = [], 0
     for q, ok in zip(questions, checks):
@@ -5479,7 +5518,8 @@ def qb_save_questions(sb, gclient, model: str, item: Dict, questions: List[Dict]
         return False, f"정답 검증을 통과한 문제가 없음 ({len(questions)}개 모두 탈락)"
     qb_insert(sb, rows)
     logs.append(f"✅ 변형문제 {len(rows)}개 저장: {item['label']}" + (f" (정답 검증 탈락 {dropped}개)" if dropped else "")
-                + (f" · {level} 기준 미달 {lowered}개는 낮춰 저장" if lowered else ""))
+                + (f" · {level} 기준 미달 {lowered}개는 낮춰 저장" if lowered else "")
+                + (f" · 이미 있는 문제와 똑같은 {n_same}개는 저장 안 함" if n_same else ""))
     return True, ""
 
 # ---- 반값 모드 작업 처리 (서버 스레드에서) ----
@@ -5848,6 +5888,14 @@ def gichul_check_links(res: Dict, mock_by_label: Dict[str, Dict]) -> int:
 def load_gichul_map() -> Dict:
     return _store_get(supabase if IS_CLOUD_DB else None, GICHUL_FILE, {}) or {}
 
+def gichul_add_exam(exam_id: str, ex: Dict):
+    """기출 시험지 하나를 DB 최신 기출 기록에 더해 바로 저장 (다른 창에서 그사이 더한 시험지도 지켜짐)"""
+    sb_ = supabase if IS_CLOUD_DB else None
+    gmap = _store_get(sb_, GICHUL_FILE, {}) or {}
+    gmap.setdefault("exams", {})[exam_id] = ex
+    gmap["updated_at"] = time.strftime("%Y-%m-%d %H:%M")
+    _store_put(sb_, GICHUL_FILE, gmap)
+
 def gichul_index(gmap: Dict, labels: set) -> Dict[str, List[Dict]]:
     """지문 label → 그 지문이 나온 실제 기출 문항 목록 (운양고·제일고 전부, 최신 시험 먼저)"""
     idx = {}
@@ -5980,6 +6028,7 @@ def qb_keep_sets(picked: List[Dict], rows: List[Dict]) -> (List[Dict], List[str]
 def qb_pick(rows: List[Dict], labels: List[str], total: int, seed: int) -> (List[Dict], List[str]):
     """고른 지문에서 골고루(같은 개수씩) 뽑고, 지문 안에서는 유형을 돌아가며 뽑음. 부족한 지문 몫은 남는 지문이 채움."""
     rnd = random.Random(seed)
+    rows = qb_dedupe_rows(rows)
     pools = {}
     for lbl in labels:
         by_type = {}
@@ -6869,6 +6918,7 @@ def qb_clinic_mix(total: int, levels: List[str]) -> Dict[str, int]:
 
 def qb_clinic_pick(rows: List[Dict], labels: List[str], mix: Dict[str, int], seed: int) -> (List[Dict], Dict[str, int]):
     """난이도별로 지문 골고루 뽑아 합침 → (지문 순서대로 문항, 난이도별 모자란 수)"""
+    rows = qb_dedupe_rows(rows)  # 난이도마다 따로 뽑으므로, 난이도 이름만 다른 같은 문제를 먼저 하나로
     picked, short = [], {}
     for lv, n in mix.items():
         if n <= 0:
@@ -7448,10 +7498,11 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
                     linked = list({gichul_question_label(exams[key_md5], q, set(by_label)) for q in res.get("questions", [])} - {""})
                     bank_rows = gichul_bank_rows(client, text_model, key_md5, res, by_label, qb_existing_gichul_keys(qb_fetch(sb, linked)), [])
                     qb_insert(sb, bank_rows)
+                    # 시험지 하나 끝날 때마다 바로 저장 (DB 최신 기록을 다시 읽어 이 시험지만 더함)
+                    #   예전엔 모든 PDF가 끝난 뒤에만 저장해서, 중간에 끊기거나 다른 창에서 올리면 비용을 낸 분석이 기출 이력에서 빠졌음
+                    gichul_add_exam(key_md5, exams[key_md5])
                     st.toast(f"✅ {exams[key_md5]['display']}: 실제 기출문제 {len(bank_rows)}개 수록")
                 prog.progress(i / len(g_pdfs))
-            gmap["exams"], gmap["updated_at"] = exams, time.strftime("%Y-%m-%d %H:%M")
-            _store_put(supabase if IS_CLOUD_DB else None, GICHUL_FILE, gmap)
             dna_board_exam_stats.clear()  # 출제DNA 탭 현황판 숫자 갱신 (보기용 캐시만 비움)
             st.success("✅ 기출 출처를 저장했습니다.")
             st.rerun()
@@ -8763,6 +8814,7 @@ def final_pick(rows: List[Dict], slots: List[Dict], labels: List[str], target_ra
     """문항 칸마다 같은 유형 문제를 골라 넣음 (AI 호출 없음). 목표: 예상 평균 ≈ 목표, 지문을 골고루, 지문 단어 수 ≈ 실제 기출.
     → 칸 순서가 아닌 지문 순서로 정렬한 문제 목록 (각 문제에 'points' 붙음), 알림"""
     rnd = random.Random(seed)
+    rows = qb_dedupe_rows(rows)
     pools = {}
     for r in rows:
         pools.setdefault(r["q_type"], []).append(r)
