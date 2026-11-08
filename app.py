@@ -176,6 +176,8 @@ def _gemini_part(gc, f: AiFile):
 #   단가(1M 토큰당 달러)는 2026-11 기준 공개 가격. 금액은 화면에 보일 때 토큰 수 × 지금 단가로 다시 계산 (단가를 고치면 지난 기록도 맞게 바뀜)
 #   정확한 청구액은 각 회사 콘솔(결제 화면)이 기준 (부가세 별도)
 AI_PRICES = [  # (모델 이름에 들어 있는 글자, 입력, 캐시 읽기, 출력) — 위에서부터 먼저 맞는 것을 씀
+    # 이미지 모델: 출력 단가는 '이미지 출력' 단가 (1K 이미지 1장 = 1120토큰 → 3.1 flash 약 $0.067 · 3 pro 약 $0.134, 2026-11 Google 공개 가격)
+    ("gemini-3.1-flash-image", 0.50, 0.05, 60.0), ("gemini-3-pro-image", 2.0, 0.20, 120.0),
     ("claude-fable-5-1", 10, 0.25, 50), ("claude-fable", 10, 1.0, 50), ("claude-mythos", 10, 1.0, 50),
     ("claude-opus-5-5", 4, 0.20, 20), ("claude-opus", 5, 0.50, 25), ("claude-sonnet", 2, 0.20, 10), ("claude-haiku", 0.10, 0.01, 0.50),
     ("gpt-6.1-sol", 2.0, 0.10, 10.0), ("gpt-6.1-terra", 1.0, 0.05, 5.0), ("gpt-6-astra", 10.0, 1.0, 50.0), ("gpt-6-sol", 2.0, 0.20, 10.0),
@@ -572,10 +574,13 @@ def load_exam_dna() -> Dict:
     if IS_CLOUD_DB:
         try:
             res = supabase.table("app_storage").select("content").eq("doc_key", doc_key).execute()
-            if res.data and res.data[0].get("content"):
-                return res.data[0]["content"]
-        except Exception:
-            pass
+        except Exception as e:
+            # DB 읽기가 잠깐 실패한 것 → 기본값을 화면에만 쓰고 DB에는 절대 저장하지 않음 (예전엔 기본값으로 덮어써서 규칙·영쌤 포인트가 사라질 수 있었음)
+            st.warning(f"⚠️ 출제 DNA를 DB에서 불러오지 못해 기본값으로 보여 줘요. 저장할 때는 DB 최신 내용을 다시 읽어서 그 위에 반영해요. ({str(e)[:80]})")
+            return copy.deepcopy(DEFAULT_EXAM_DNA)
+        if res.data and res.data[0].get("content"):
+            return res.data[0]["content"]
+        # 여기부터는 DB에 출제 DNA 문서가 정말 없을 때만 (처음 설치 등)
     if os.path.exists(DNA_FILE):
         try:
             with open(DNA_FILE, "r", encoding="utf-8") as f:
@@ -585,8 +590,26 @@ def load_exam_dna() -> Dict:
             return data
         except Exception:
             pass
-    save_exam_dna(DEFAULT_EXAM_DNA)
-    return DEFAULT_EXAM_DNA
+    save_exam_dna(copy.deepcopy(DEFAULT_EXAM_DNA))
+    return copy.deepcopy(DEFAULT_EXAM_DNA)
+
+def exam_dna_update(fn) -> bool:
+    """출제 DNA를 DB에서 새로 읽어 fn으로 바꿀 부분만 고친 뒤 저장.
+    창마다 처음 열 때 읽은 사본을 통째로 저장하면 다른 창에서 그사이 바꾼 규칙·영쌤 포인트·학습 기록이 되돌아가서, 저장할 때마다 최신본 위에 반영함"""
+    latest = None
+    if IS_CLOUD_DB:
+        try:
+            res = supabase.table("app_storage").select("content").eq("doc_key", filepath_to_doc_key(DNA_FILE)).execute()
+            latest = res.data[0].get("content") if res.data else None
+        except Exception as e:
+            st.error(f"❌ 출제 DNA 최신본을 읽지 못해서 저장하지 않았어요. 잠시 뒤 다시 눌러 주세요. ({str(e)[:80]})")
+            return False
+    if not isinstance(latest, dict) or not latest:
+        latest = copy.deepcopy(st.session_state.get("exam_dna") or DEFAULT_EXAM_DNA)
+    fn(latest)
+    save_exam_dna(latest)
+    st.session_state.exam_dna = latest
+    return True
 
 def save_exam_dna(dna_data: Dict):
     doc_key = filepath_to_doc_key(DNA_FILE)
@@ -899,7 +922,8 @@ def _merge_library(base_fp: Dict, local: List[Dict], remote: List[Dict]) -> (Lis
         out.append(p)                         # 이 창에서 새로 추가(또는 다른 곳에서 지웠지만 이 창에서 고친 것)
     return out, n_theirs
 
-def load_from_file(filepath: str) -> List[Dict]:
+def load_from_file(filepath: str, keep: List[Dict] = None) -> List[Dict]:
+    """keep: 다시 불러오기에서 지금 화면에 있는 목록. DB 읽기가 실패하면 이 목록을 그대로 둠 (빈 목록으로 바꾸지 않음)"""
     doc_key = filepath_to_doc_key(filepath)
     data = None
     ver = None
@@ -918,17 +942,22 @@ def load_from_file(filepath: str) -> List[Dict]:
                     ver = res.data[0].get("updated_at")
                     cache[doc_key] = (ver, json.dumps(data, ensure_ascii=False))
         except Exception as e:
+            data, ver = None, None  # ver를 비워 두면 다음 저장 때 반드시 DB 최신과 합침
             st.warning(f"⚠️ 클라우드 데이터 로드 중 오류 ({doc_key}): {e}")
+            if keep is not None:
+                return keep  # 지금 목록과 그때 맞춘 기록을 그대로 둠 → 저장하면 DB 최신과 합쳐짐
 
     if data is None:
-        if not os.path.exists(filepath):
-            return []
-        try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception as e:
-            st.error(f"⚠️ 파일 로드 중 에러 발생 ({os.path.basename(filepath)}): {e}")
-            return []
+        data = []
+        if os.path.exists(filepath):
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception as e:
+                st.error(f"⚠️ 파일 로드 중 에러 발생 ({os.path.basename(filepath)}): {e}")
+                data = []
+        if not isinstance(data, list):
+            data = []
 
     data, needs_save = normalize_passage_records(data)
     if filepath == PAST_VOCA_FILE:
@@ -951,8 +980,9 @@ def save_to_file(filepath: str, passages: List[Dict], replace: bool = False):
     passages.sort(key=natural_sort_key)
     if IS_CLOUD_DB:
         try:
-            meta = _lib_meta().get(doc_key)
-            if meta is not None and not replace:
+            # 이 창이 DB와 맞춘 기록이 없으면(불러오기 실패 등) 기준을 비워 두고 DB 최신과 합침 → DB 지문은 하나도 안 지워짐
+            meta = _lib_meta().get(doc_key) or {}
+            if not replace:
                 now_ver = _doc_version(doc_key)
                 if now_ver and _ver_key(now_ver) != _ver_key(meta.get("ver")):
                     hit = _lib_mem_cache().get(doc_key)
@@ -2656,7 +2686,7 @@ def render_voca(p):
             </td>
             <td>
                 <span class="voca-word-main">{w}</span>
-                <span class="voca-pron-badge">[{pron}]</span>
+                {f'<span class="voca-pron-badge">[{pron}]</span>' if pron else ''}
                 <span class="voca-pos-badge">{pos}</span><br>
                 {cat_badge}
             </td>
@@ -3095,6 +3125,29 @@ def analyze_passage(label, text, model_name, target_type="victory", core_context
 # -----------------------------
 # 4-B. 원본 JSON 영구 수정 에디터 (5개 라이브러리 전체 지원)
 # -----------------------------
+def _cell(v, default: str = "") -> str:
+    """표 편집기 칸 값 → 글자. 비운 칸(None·NaN)은 'None'·'nan' 글자가 아니라 빈 글자(또는 default)로"""
+    try:
+        if v is None or (not isinstance(v, (list, dict)) and pd.isna(v)):
+            return default
+    except (TypeError, ValueError):
+        pass
+    t = str(v).strip()
+    return default if not t or t.lower() in ("nan", "none") else t
+
+def _df_records(df) -> List[Dict]:
+    """표 편집기 → 기록 목록. 비운 칸은 빈 글자로, 모든 칸이 빈 줄(+로 추가만 한 줄)은 버림"""
+    out = []
+    for rec in df.to_dict(orient="records"):
+        clean = {}
+        for k, v in rec.items():
+            if hasattr(v, "item") and not isinstance(v, (list, dict, str)):
+                v = v.item()  # numpy 숫자·참거짓 → 파이썬 값
+            clean[k] = v if isinstance(v, (bool, int, float, list, dict)) and not (isinstance(v, float) and pd.isna(v)) else _cell(v)
+        if any(v not in ("", None, False) for v in clean.values()):
+            out.append(clean)
+    return out
+
 def parse_rel_string(rel_str: str) -> List[Dict]:
     res_list = []
     if not rel_str or pd.isna(rel_str):
@@ -3159,15 +3212,15 @@ def render_permanent_json_editor(prefix: str, target_type: str, file_path: str, 
             if st.button("💾 단어장 수정사항 영구 저장", type="primary", key=f"{prefix}_save_json_{pid}"):
                 new_voca_list = []
                 for _, r in edited_df.iterrows():
-                    w_val = str(r.get("영어 단어/숙어", "")).strip()
-                    if not w_val or w_val == "nan":
+                    w_val = _cell(r.get("영어 단어/숙어"))
+                    if not w_val:
                         continue
                     new_voca_list.append({
-                        "category": str(r.get("출제 트랙/문항출처", "지문핵심")).strip(),
+                        "category": _cell(r.get("출제 트랙/문항출처"), "지문핵심"),
                         "word": w_val,
-                        "pos": str(r.get("품사", "")).strip(),
-                        "pronunciation": str(r.get("한글 발음", "")).strip(),
-                        "meaning": str(r.get("한국어 뜻", "")).strip(),
+                        "pos": _cell(r.get("품사")),
+                        "pronunciation": _cell(r.get("한글 발음")),
+                        "meaning": _cell(r.get("한국어 뜻")),
                         "synonyms": parse_rel_string(r.get("유의어 (단어[발음](뜻))", "")),
                         "antonyms": parse_rel_string(r.get("반의어 (단어[발음](뜻))", ""))
                     })
@@ -3190,11 +3243,11 @@ def render_permanent_json_editor(prefix: str, target_type: str, file_path: str, 
 
             if st.button("💾 ANATOMY CORE 수정사항 영구 저장", type="primary", key=f"{prefix}_save_json_{pid}"):
                 target_p["label"] = clean_label(new_label)
-                pdata["topics"] = top_df.to_dict(orient="records")
-                pdata["titles"] = tit_df.to_dict(orient="records")
-                pdata["main_ideas"] = mi_df.to_dict(orient="records")
-                pdata["summaries"] = sum_df.to_dict(orient="records")
-                pdata["paraphrased_tf"] = tf_df.to_dict(orient="records")
+                pdata["topics"] = _df_records(top_df)
+                pdata["titles"] = _df_records(tit_df)
+                pdata["main_ideas"] = _df_records(mi_df)
+                pdata["summaries"] = _df_records(sum_df)
+                pdata["paraphrased_tf"] = _df_records(tf_df)
                 save_to_file(file_path, all_saved)
                 st.success(f"✅ [{target_p['label']}] ANATOMY CORE 데이터가 영구 업데이트되었습니다!")
 
@@ -3208,14 +3261,19 @@ def render_permanent_json_editor(prefix: str, target_type: str, file_path: str, 
             if st.button("💾 한판승 수정사항 영구 저장", type="primary", key=f"{prefix}_save_json_{pid}"):
                 target_p["label"] = clean_label(new_label)
                 pdata["summary"] = new_sum
-                pdata["keywords"] = kw_df.to_dict(orient="records")
+                pdata["keywords"] = _df_records(kw_df)
                 orig_analysis = pdata.get("analysis", [])
                 updated_analysis = []
                 for idx, r in ana_df.iterrows():
-                    orig_row = orig_analysis[idx] if idx < len(orig_analysis) else {}
+                    try:
+                        orig_row = orig_analysis[int(idx)] if 0 <= int(idx) < len(orig_analysis) else {}
+                    except (TypeError, ValueError):
+                        orig_row = {}
+                    cells = {k: _cell(r.get(k)) for k in ("eng", "kor", "grammar", "ys")}
+                    if not any(cells.values()):
+                        continue  # +로 추가만 하고 비워 둔 줄
                     updated_analysis.append({
-                        "eng": str(r.get("eng", "")), "kor": str(r.get("kor", "")),
-                        "grammar": str(r.get("grammar", "")), "ys": str(r.get("ys", "")),
+                        **cells,
                         "sentence_vocab": orig_row.get("sentence_vocab", []),
                         "grammar_points": orig_row.get("grammar_points", []),
                         "essay_candidate": orig_row.get("essay_candidate", False),
@@ -3241,8 +3299,8 @@ def render_permanent_json_editor(prefix: str, target_type: str, file_path: str, 
                 pdata["english_title"], pdata["korean_title"] = new_en_t, new_ko_t
                 pdata["topic"], pdata["translation"] = new_topic, new_trans
                 pdata["easy_explanation"], pdata["structure_flow"] = new_easy, new_flow
-                pdata["vocab"] = v_df.to_dict(orient="records")
-                pdata["quizzes"] = q_df.to_dict(orient="records")
+                pdata["vocab"] = _df_records(v_df)
+                pdata["quizzes"] = _df_records(q_df)
                 save_to_file(file_path, all_saved)
                 st.success(f"✅ [{target_p['label']}] ANATOMY 데이터가 영구 업데이트되었습니다!")
 
@@ -3980,6 +4038,16 @@ def _job_log(job: Dict, msg: str):
     job.setdefault("log", []).append(f"{time.strftime('%m-%d %H:%M:%S')} {msg}")
     job["log"] = job["log"][-60:]
 
+def _job_update_retry(sb, fn, waits=(5, 15, 30)):
+    """작업 문서 쓰기가 잠깐 실패해도 쓰기만 몇 번 더 시도 (예전엔 바로 1분 쉬고 처음부터 다시 해서 같은 지문을 또 만들거나 반값 묶음을 또 냈음)"""
+    for i in range(len(waits) + 1):
+        try:
+            return _job_update(sb, fn)
+        except Exception:
+            if i == len(waits):
+                raise
+            time.sleep(waits[i])
+
 def _job_update(sb, fn):
     """작업 문서를 새로 읽어 fn으로 고친 뒤 저장 (화면에서 누른 중단·추가가 덮어써지지 않게 매번 새로 읽음)"""
     job = _store_get(sb, GEN_JOB_FILE) or {}
@@ -4130,9 +4198,23 @@ def gen_worker_main(api_key: str, sb_url: str, sb_key: str):
     my_id = str(uuid.uuid4())
     def claim(j):
         j["worker"] = {"id": my_id, "ts": time.time()}
+    # DB가 길게 끊겨 작업 문서에 못 쓴 변경(지문 완료·반값 제출 기록)을 기억해 두고 다음 바퀴에 먼저 씀
+    #   → 이미 만든 지문을 또 만들거나, 이미 낸 반값 묶음을 또 내서 비용이 두 번 나가지 않게
+    unsaved = []
+    def write(fn):
+        try:
+            return _job_update_retry(sb, fn)
+        except Exception:
+            unsaved.append(fn)
+            raise
     last_poll = 0.0
+    last_err = ""
     while True:
         try:
+            if unsaved:
+                _job_update(sb, unsaved[0])
+                unsaved.pop(0)
+                continue
             job = _store_get(sb, GEN_JOB_FILE) or {}
             lease = job.get("worker") or {}
             if lease.get("id") not in (None, my_id) and time.time() - float(lease.get("ts", 0)) < GEN_WORKER_LEASE_SEC:
@@ -4149,13 +4231,14 @@ def gen_worker_main(api_key: str, sb_url: str, sb_key: str):
             # 반값 모드: 새로 들어온 건은 모아서 한 번에 제출 → 'waiting'. 결과는 몇 분마다 확인해서 들어온 것부터 검증·저장
             fresh = [it for it in all_items if it.get("state") == "pending" and it.get("batch") and it.get("kind") == "qbank"]
             if fresh:
-                qb_batch_submit(sb, [job_item_full(job, it) for it in fresh[:QB_BATCH_MAX]], job.get("opts", {}), dna_rules, essay_rules, claim, yt_points)
+                qb_batch_submit(sb, [job_item_full(job, it) for it in fresh[:QB_BATCH_MAX]], job.get("opts", {}), dna_rules, essay_rules, claim, yt_points,
+                                write=write)
                 continue
             pending = [it for it in all_items if it.get("state") == "pending"]
             waiting = [it for it in all_items if it.get("state") == "waiting"]
             if waiting and time.time() - last_poll > (QB_BATCH_POLL_SEC if not pending else QB_BATCH_POLL_BUSY_SEC):
                 last_poll = time.time()
-                qb_batch_poll(sb, gclient, job, claim)
+                qb_batch_poll(sb, gclient, job, claim, write=write)
                 flush_ai_usage()
                 continue
             if not pending and waiting:
@@ -4194,10 +4277,20 @@ def gen_worker_main(api_key: str, sb_url: str, sb_key: str):
                 j["current"] = ""
                 j["current_model"] = ""
                 claim(j)
-            _job_update(sb, finish)
+            write(finish)
             flush_ai_usage()
+            last_err = ""
         except Exception as e:
             # DB 연결이 잠깐 끊기는 등 예상 못 한 오류: 1분 쉬었다가 같은 지점부터 다시
+            #   예전엔 오류가 어디에도 안 남아 '지금 처리 중'에서 멈춘 것처럼만 보였음 → 서버 기록과 작업 기록에 남김 (같은 오류는 한 번만)
+            msg = f"{type(e).__name__}: {str(e)[:160]}"
+            print(f"[gen-worker] {msg}", flush=True)
+            if msg != last_err:
+                try:
+                    _job_update(sb, lambda j, m=msg: _job_log(j, f"⚠️ 작업 처리 중 예상 못 한 오류 · 1분 뒤 같은 지점부터 다시 시도: {m}"))
+                    last_err = msg  # 기록에 남긴 뒤에만 (못 남겼으면 다음에 다시 시도)
+                except Exception:
+                    pass
             time.sleep(60)
 
 @st.cache_resource
@@ -4269,11 +4362,11 @@ def enqueue_generation(rows: List[Dict], types_list: List[str], text_model: str,
 
 def reload_libraries_from_db():
     """교재 목록 다시 불러오기 (DB에서 바뀐 교재만 실제로 내려받고, 그대로인 교재는 서버에 기억해 둔 것을 씀)"""
-    st.session_state.saved_v = load_from_file(VICTORY_FILE)
-    st.session_state.saved_a = load_from_file(ANATOMY_FILE)
-    st.session_state.saved_c = load_from_file(CORE_FILE)
-    st.session_state.saved_w = load_from_file(VOCA_FILE)
-    st.session_state.saved_mock = load_from_file(MOCK_FILE)
+    st.session_state.saved_v = load_from_file(VICTORY_FILE, keep=st.session_state.get("saved_v"))
+    st.session_state.saved_a = load_from_file(ANATOMY_FILE, keep=st.session_state.get("saved_a"))
+    st.session_state.saved_c = load_from_file(CORE_FILE, keep=st.session_state.get("saved_c"))
+    st.session_state.saved_w = load_from_file(VOCA_FILE, keep=st.session_state.get("saved_w"))
+    st.session_state.saved_mock = load_from_file(MOCK_FILE, keep=st.session_state.get("saved_mock"))
 
 def _gen_job_counts(job: Dict) -> Dict:
     items = job.get("items", [])
@@ -4928,7 +5021,7 @@ def qb_norm_answer(a: str) -> str:
     m = re.search(r"[①②③④⑤]", s)
     if m:
         return m.group(0)
-    m = re.search(r"\b([1-5])\b", s)
+    m = re.search(r"(?<!\d)([1-5])(?!\d)", s)  # '3번'도 읽음 (\b는 한글 앞에서 끊기지 않아 '3번'을 못 읽었음)
     return CIRCLED[int(m.group(1)) - 1] if m else ""
 
 # 순서 유형 선택지는 수능과 같은 고정 배열 ((A)로 시작하는 선지는 ① 하나, (A)-(B)-(C)는 없음)
@@ -4940,7 +5033,7 @@ def qb_fix_order(q: Dict, rnd=None, only_if_needed: bool = False) -> bool:
     only_if_needed=True면 이미 고정 배열인 문항은 그대로 둠. 형식을 못 읽으면 바꾸지 않고 False."""
     seqs = ["".join(re.findall(r"\(([ABC])\)", str(c))) for c in (q.get("choices") or [])]
     ans = str(q.get("answer", ""))
-    if len(seqs) != 5 or len(set(seqs)) != 5 or any(sorted(s) != ["A", "B", "C"] for s in seqs) or ans not in CIRCLED:
+    if len(seqs) != 5 or len(set(seqs)) != 5 or any(sorted(s) != ["A", "B", "C"] for s in seqs) or len(ans) != 1 or ans not in CIRCLED:
         return False
     if only_if_needed and seqs == QB_ORDER_CANON:
         return True
@@ -5272,7 +5365,9 @@ def qb_verify(gclient, model: str, text: str, questions: List[Dict], logs: List[
                                 "각 문제 번호(index)와 정답(①~⑤ 중 하나), 아래 기준의 난이도 판정(level, why)을 반환하라.\n" + QB_LEVEL_JUDGE)
     out = _qb_call(gclient, model, prompt, SCHEMA_QB_SOLVE_LEVEL if judge else SCHEMA_QB_SOLVE, 0.0, logs, "정답 검증")
     if out is None:
-        return [True] * len(questions)  # 검증 호출 실패는 탈락시키지 않음 (verified=False로 저장)
+        for q in questions:
+            q["_unverified"] = True  # 검증 호출 실패는 탈락시키지 않고 '검증 안 됨'으로 저장 (예전엔 ✅ 검증됨으로 저장됐음)
+        return [True] * len(questions)
     solved = {int(a.get("index", 0)): qb_norm_answer(a.get("answer")) for a in out.get("answers", [])}
     judged = {int(a.get("index", 0)): (a.get("level"), str(a.get("why", ""))[:80]) for a in out.get("answers", []) if a.get("level") in QB_LEVEL_ORDER}
     ok = [True] * len(questions)
@@ -5369,7 +5464,7 @@ def qb_save_questions(sb, gclient, model: str, item: Dict, questions: List[Dict]
     for q, ok in zip(questions, checks):
         if not ok:
             continue
-        q["verified"] = bool(item.get("verify", True))
+        q["verified"] = bool(item.get("verify", True)) and not q.pop("_unverified", False)
         qt = q.pop("_q_type", q_type)
         lv = level
         jl, why = q.pop("_judged", (None, ""))
@@ -5393,7 +5488,7 @@ QB_BATCH_POLL_SEC = 120      # 반값 결과만 기다릴 때 확인 간격
 QB_BATCH_POLL_BUSY_SEC = 600 # 일반 작업을 하는 중일 때 확인 간격
 QB_BATCH_GIVEUP_SEC = 30 * 3600  # 이만큼 지나도 안 끝나면 실패로 (회사 약속은 24시간)
 
-def qb_batch_submit(sb, items: List[Dict], opts: Dict, dna_rules: str, essay_rules: str, claim, yt_points: List[Dict] = None):
+def qb_batch_submit(sb, items: List[Dict], opts: Dict, dna_rules: str, essay_rules: str, claim, yt_points: List[Dict] = None, write=None):
     """반값 모드 건들의 프롬프트를 만들어 모델별로 한 번에 제출 → 'waiting'. 제출이 안 되면 그 건들은 일반 모드로 바로 생성"""
     groups, upd, new_batches, notes = {}, {}, [], []
     for it in items:
@@ -5410,9 +5505,10 @@ def qb_batch_submit(sb, items: List[Dict], opts: Dict, dna_rules: str, essay_rul
     for m, lst in groups.items():
         try:
             bid = llm_batch_submit(m, [(it["id"], (shared, task)) for it, shared, task, _ in lst], SCHEMA_QBANK, 0.7)
-            new_batches.append({"id": bid, "model": m, "ts": time.time(), "n": len(lst)})
+            now = time.time()
+            new_batches.append({"id": bid, "model": m, "ts": now, "n": len(lst)})
             for it, _, _, plans in lst:
-                upd[it["id"]] = {"state": "waiting", "batch_id": bid, "batch_model": m, "plans": plans}
+                upd[it["id"]] = {"state": "waiting", "batch_id": bid, "batch_model": m, "batch_ts": now, "plans": plans}
             notes.append(f"💸 반값 모드로 {len(lst)}건 제출 · {ai_model_label(m)} (보통 몇 분~몇 시간, 길면 24시간)")
         except Exception as e:
             for it, *_ in lst:
@@ -5423,29 +5519,42 @@ def qb_batch_submit(sb, items: List[Dict], opts: Dict, dna_rules: str, essay_rul
         for it in j.get("items", []):
             if it.get("id") in upd and it.get("state") == "pending":
                 it.update(upd[it["id"]])
-        j.setdefault("batches", []).extend(new_batches)
+        have = {b.get("id") for b in j.get("batches", [])}
+        j.setdefault("batches", []).extend(b for b in new_batches if b["id"] not in have)
         for n in notes:
             _job_log(j, n)
         claim(j)
-    _job_update(sb, apply)
+    (write or (lambda fn: _job_update_retry(sb, fn)))(apply)
 
-def qb_batch_poll(sb, gclient, job: Dict, claim):
+def qb_batch_poll(sb, gclient, job: Dict, claim, write=None):
     """기다리는 반값 묶음마다 끝났는지 확인 → 끝난 묶음은 결과를 받아 건마다 정답 검증·저장"""
     waiting = [job_item_full(job, it) for it in job.get("items", []) if it.get("state") == "waiting"]
     by_batch = {}
     for it in waiting:
         by_batch.setdefault(it.get("batch_id", ""), []).append(it)
+    write = write or (lambda fn: _job_update_retry(sb, fn))
     recs = {b.get("id"): b for b in job.get("batches", [])}
     for bid, its in by_batch.items():
         rec = recs.get(bid, {})
         model = its[0].get("batch_model") or rec.get("model", "")
+        ts = float(rec.get("ts") or its[0].get("batch_ts") or 0)
+        if not ts:
+            # 제출 시각 기록이 없는 예전 묶음 → 지금부터 30시간을 셈 (기록이 없으면 영원히 기다렸음)
+            ts = time.time()
+            def add_rec(j, bid=bid, model=model, n=len(its), ts=ts):
+                if not any(b.get("id") == bid for b in j.get("batches", [])):
+                    j.setdefault("batches", []).append({"id": bid, "model": model, "ts": ts, "n": n})
+                claim(j)
+            write(add_rec)
         try:
             finished, res, note = llm_batch_collect(model, bid, [it["id"] for it in its], log_usage=not rec.get("logged"))
         except Exception as e:
-            _job_update(sb, lambda j, e=e: (_job_log(j, f"⚠️ 반값 결과 확인 실패 (다음에 다시): {str(e)[:120]}"), claim(j)))
-            continue
+            if time.time() - ts < QB_BATCH_GIVEUP_SEC:
+                write(lambda j, e=e: (_job_log(j, f"⚠️ 반값 결과 확인 실패 (다음에 다시): {str(e)[:120]}"), claim(j)))
+                continue
+            finished, res, note = True, {}, f"30시간 동안 결과를 받지 못함 ({str(e)[:80]})"
         if not finished:
-            if time.time() - float(rec.get("ts", time.time())) < QB_BATCH_GIVEUP_SEC:
+            if time.time() - ts < QB_BATCH_GIVEUP_SEC:
                 continue
             res, note = {}, "30시간이 지나도 끝나지 않음"
 
@@ -5454,7 +5563,7 @@ def qb_batch_poll(sb, gclient, job: Dict, claim):
                 if b.get("id") == bid:
                     b["logged"] = True
             claim(j)
-        _job_update(sb, mark_logged)
+        write(mark_logged)
         for it in its:
             logs = []
             out = res.get(it["id"])
@@ -5476,12 +5585,12 @@ def qb_batch_poll(sb, gclient, job: Dict, claim):
                 if not ok:
                     _job_log(j, f"❌ {it['label']}: {err} (나중에 '실패한 지문 다시 시도'로 재시도할 수 있어요)")
                 claim(j)
-            _job_update(sb, finish)
+            write(finish)
 
         def drop(j, bid=bid):
             if not any(x.get("state") == "waiting" and x.get("batch_id") == bid for x in j.get("items", [])):
                 j["batches"] = [b for b in j.get("batches", []) if b.get("id") != bid]
-        _job_update(sb, drop)
+        write(drop)
 
 # ---- 연결 지문: 실제 내신처럼 지문 여러 개를 묶어 한 문제로 ----
 #   이어 붙이기: 교과서의 짧은 단락 2~4개를 한 지문으로 (예: 운양 25-2 기말 5·6번 = 4-1+4-2, 8·10번 = 4-3~4-5)
@@ -5757,7 +5866,11 @@ def gichul_norm_meta(school: str, grade: str, exam_name: str, file_name: str = "
     """학교·학년·시험 이름을 '운양고' '고2' '25년 2학기 기말' 형태로 통일 (파일명 '[운양2] 25년 2학기 기말.pdf'를 우선)"""
     src = f"{file_name} {school}"
     school = "운양고" if "운양" in src else ("제일고" if "제일" in src else str(school).strip())
-    m = re.search(r"(운양|제일)\s*(?:고)?\s*(\d)", file_name) or re.search(r"고\s*(\d)|(\d)\s*학년", str(grade))
+    # '[운양2]'·'운양고1'·'… 고1.pdf'에서 학년을 읽음. '운양고 25년'·'제일고 2026'·'운양고 2학기'의 숫자는 학년이 아님
+    #   (예전엔 '운양고 25년 2학기 기말 고1'을 고2로 읽었음)
+    m = (re.search(r"(운양|제일)\s*(?:고)?\s*([1-3])(?![\d년]|\s*학기)", file_name)
+         or re.search(r"고\s*([1-3])(?![\d년]|\s*학기)", file_name)
+         or re.search(r"고\s*(\d)|(\d)\s*학년", str(grade)))
     g = next((x for x in (m.groups() if m else ()) if x and x.isdigit()), "")
     grade = f"고{g}" if g else str(grade).strip()
     def parse(t):
@@ -5801,7 +5914,7 @@ def gichul_bank_rows(gclient, model: str, exam_id: str, res: Dict, mock_by_label
         checks = qb_verify(gclient, model, mock_by_label[lbl].get("body_text", ""), qs, logs)
         for q, ok in zip(qs, checks):
             content = {k: q.get(k, "") for k in ("stem", "given", "passage", "box", "choices", "answer", "explanation")}
-            content.update({"focus": f"실제 기출 {ex['display']} {q.get('no', '')}번", "verified": bool(ok),
+            content.update({"focus": f"실제 기출 {ex['display']} {q.get('no', '')}번", "verified": bool(ok) and not q.pop("_unverified", False),
                             "source": {"exam_id": exam_id, "exam": ex["display"], "short": gichul_short(ex), "no": str(q.get("no", "")), "points": q.get("points", "")}})
             if not ok:
                 content["answer_note"] = "AI가 다시 푼 답과 달라요 — 정답 확인 필요"
@@ -5889,7 +6002,10 @@ def qb_pick(rows: List[Dict], labels: List[str], total: int, seed: int) -> (List
     notes = [f"조건에 맞는 문제가 없는 지문 {len(empty)}개: " + ", ".join(empty[:8]) + (" 외" if len(empty) > 8 else "")] if empty else []
     if not active:
         return [], notes
-    quota = {l: total // len(active) + (1 if i < total % len(active) else 0) for i, l in enumerate(active)}
+    # 나머지 몫(+1)은 무작위 지문에 → 문제 수가 지문 수보다 적어도 '다시 뽑기'마다 다른 지문이 들어감
+    #   (예전엔 늘 목록 앞쪽 지문에만 줘서 뒤쪽 지문은 한 번도 안 뽑혔음)
+    extra = set(rnd.sample(active, total % len(active)))
+    quota = {l: total // len(active) + (1 if l in extra else 0) for l in active}
     taken = {l: pools[l][:quota[l]] for l in active}
     short = sum(quota[l] - len(taken[l]) for l in active)
     lacking = [l for l in active if len(taken[l]) < quota[l]]
@@ -5897,7 +6013,7 @@ def qb_pick(rows: List[Dict], labels: List[str], total: int, seed: int) -> (List
         spare = [l for l in active if len(taken[l]) < len(pools[l])]
         if not spare:
             break
-        for l in sorted(spare, key=lambda x: len(taken[x])):
+        for l in sorted(spare, key=lambda x: (len(taken[x]), rnd.random())):
             if short <= 0:
                 break
             taken[l].append(pools[l][len(taken[l])])
@@ -6769,6 +6885,8 @@ def qb_clinic_pick(rows: List[Dict], labels: List[str], mix: Dict[str, int], see
 def qb_clinic_plan(summary: List[Dict], passages: List[Dict], short: Dict[str, int], school: str, types: List[str], seed: int) -> List[tuple]:
     """모자란 난이도만큼 새로 만들 (지문, 유형, 난이도, 문제 수): 그 난이도 문제가 적은 지문부터, 지문 안에서는 적게 쌓인 유형부터"""
     rnd = random.Random(seed)
+    if not passages or not types:
+        return []
     mine = [r for r in summary if r.get("school") == school and r["difficulty"] != QB_GICHUL_LEVEL]
     plan = {}
     for lv, k in short.items():
@@ -6835,6 +6953,10 @@ def render_weekly_clinic(sb, mock_lib: List[Dict], by_label: Dict, summary: List
     labels = sorted(w.get("labels", []), key=lambda l: natural_sort_key({"label": l}))
     labels = [l for l in labels if l in by_label]
     passages = [by_label[l] for l in labels]
+    if not passages:
+        # 저장된 주차 지문이 원문 라이브러리에서 모두 지워졌거나 이름이 바뀐 경우 (예전엔 여기서 오류가 나 아래 탭까지 멈췄음)
+        st.warning("이 주차에 저장된 지문이 지금 원문 라이브러리에 하나도 없어요 (지워졌거나 이름이 바뀜). 위에서 지문을 다시 골라 저장해 주세요.")
+        return
     # 이 주차 지문을 묶어 만든 문제(이어 붙이기·(A)(B))도 함께 · 모자란 문제는 짧은 교과서 단락을 자동으로 묶어 만듦
     links_w = [l for l in qb_link_labels(sb) if set(qb_link_parts(l)[1]) <= set(labels)]
     labels_all = sorted(labels + links_w, key=lambda l: natural_sort_key({"label": l}))
@@ -7611,6 +7733,11 @@ def default_style_reference_files(limit: int = 2) -> List[str]:
             break
     return files
 
+def image_cost_krw(model_name: str, n_refs: int = 0) -> float:
+    """이미지 1장 예상 비용(원): 1K 이미지 출력 1120토큰 + 프롬프트(지문 포함 약 900토큰) + 참고 이미지 장당 560토큰"""
+    p_in, _, p_out = ai_price(model_name)
+    return (1120 * p_out + (900 + 560 * n_refs) * p_in) / 1_000_000 * 1400
+
 def generate_passage_image(passage: str, style_refs: List[bytes], model_name: str, style: str = "") -> (bytes, str):
     """(이미지 bytes, 오류 메시지) 반환. 동시 생성 스레드에서 호출되므로 st.* 를 쓰지 않는다.
     참고 이미지는 직접 올린 경우에만 보냄 (입력이 줄어 비용도 적음)."""
@@ -7630,6 +7757,12 @@ def generate_passage_image(passage: str, style_refs: List[bytes], model_name: st
                     image_config=types.ImageConfig(aspect_ratio="16:9")
                 )
             )
+            u = getattr(res, "usage_metadata", None)
+            if u:
+                # 'AI 사용 금액'에 이미지 비용도 넣음 (예전엔 빠졌음). 생각 토큰은 글 출력 단가(이미지 단가의 1/20·1/10)라 그만큼 환산
+                ratio = 0.1 if "pro" in model_name else 0.05
+                _log_usage("gemini", model_name, u.prompt_token_count, u.cached_content_token_count,
+                           round((u.candidates_token_count or 0) + (u.thoughts_token_count or 0) * ratio))
             for cand in (res.candidates or []):
                 for part in (cand.content.parts if cand.content else []) or []:
                     if part.inline_data and part.inline_data.data:
@@ -7714,6 +7847,9 @@ def render_mock_image_section(selected: List[Dict]):
 
         targets = [p for p in selected if redo or not p.get("image_path")]
         styles_for = dict(zip([p["id"] for p in targets], pick_image_styles(len(targets), img_style)))
+        if targets:
+            per = image_cost_krw(img_model, len(style_refs))
+            st.caption(f"🧾 예상 비용 약 {per * len(targets):,.0f}원 (이미지 {len(targets)}장 · 장당 약 {per:,.0f}원 · {img_model} · 대략)")
         if st.button(f"🎨 이미지 생성 ({len(targets)}개, {IMAGE_PARALLEL}장씩 동시 생성)", type="primary", use_container_width=True, disabled=not targets, key="mock_img_gen_btn"):
             from concurrent.futures import ThreadPoolExecutor, as_completed
             prog = st.progress(0)
@@ -7729,11 +7865,12 @@ def render_mock_image_section(selected: List[Dict]):
                     if img_path:
                         set_mock_image(p, img_path)
                         done += 1
+                        # 한 장 만들 때마다 바로 저장 (예전엔 다 끝난 뒤에만 저장해서 중간에 끊기면 비용을 낸 그림 연결이 사라졌음)
+                        save_to_file(MOCK_FILE, st.session_state.saved_mock)
                     else:
                         errors.append(f"{p['label']}: {err or '이미지 저장 실패'}")
                     prog.progress(n / len(targets))
                     status.info(f"⏳ {n}/{len(targets)} 완료: {p['label']}")
-            save_to_file(MOCK_FILE, st.session_state.saved_mock)
             prog.empty()
             status.success(f"✅ 이미지 {done}개를 만들었습니다.")
             for e in errors:
@@ -7944,6 +8081,16 @@ def render_mock_exam_tab(text_model: str, api_delay: int, academy_name: str, sch
                             rec.update({"label": f"{ekey} {num}번", "source_type": "mock",
                                         "year": y, "month": m, "grade": g, "answer": str(r.get("정답", "") or "")})
                         new_records.append(rec)
+                    # 같은 지문을 다시 저장할 때: 예전 기록의 id와 만들어 둔 그림(image_*)은 그대로 이어받음
+                    #   (예전엔 새 기록으로 통째로 바꿔서 비용을 내고 만든 지문 그림 연결이 빠졌음)
+                    old_by_label = {p.get("label"): p for p in st.session_state.saved_mock if isinstance(p, dict)}
+                    for rec in new_records:
+                        old = old_by_label.get(rec["label"])
+                        if old:
+                            rec["id"] = old.get("id") or rec["id"]
+                            for k, v in old.items():
+                                if k.startswith("image_") and v and not rec.get(k):
+                                    rec[k] = v
                     new_labels = {p["label"] for p in new_records}
                     st.session_state.saved_mock = [p for p in st.session_state.saved_mock if p.get("label") not in new_labels] + new_records
                     save_to_file(MOCK_FILE, st.session_state.saved_mock)
@@ -9155,7 +9302,7 @@ def page_excel():
         up_names = {i.name for i in (imgs or [])}
         n_pic = sum(1 for r in xl_preview if r["img"] not in up_names) if xl_gen_image and set(x_types) & {"victory", "anatomy"} else 0
         st.caption(f"📄 엑셀 지문 {len(xl_preview)}개 · " + book_cost_line(text_model, book_new_counts([r["label"] for r in xl_preview], x_types),
-                                                                       f" + AI 이미지 최대 {n_pic}장(별도)" if n_pic else ""))
+                                                                       f" + AI 이미지 최대 {n_pic}장 약 {image_cost_krw(xl_img_model) * n_pic:,.0f}원" if n_pic else ""))
 
     if xlsx and st.button("🚀 올인원 통합 생성 시작", type="primary"):
         if not (do_v or do_a or do_c or do_w):
@@ -9273,17 +9420,22 @@ def page_dna():
                     }
                     contents_payload.append(dna_prompt)
                     parsed_dna = llm_json(text_model, contents_payload, dna_schema, 0.2)
-                    st.session_state.exam_dna["rules_text"] = parsed_dna["updated_rules_text"]
-                    if parsed_dna.get("updated_essay_rules_text", "").strip():
-                        st.session_state.exam_dna["essay_rules_text"] = parsed_dna["updated_essay_rules_text"].strip()
-                    st.session_state.exam_dna["updated_at"] = time.strftime("%Y-%m-%d %H:%M")
-                    st.session_state.exam_dna.setdefault("history", []).append({
-                        "title": school_tag.strip() if school_tag.strip() else ", ".join([u.name for u in uploaded_pdfs]),
-                        "summary": parsed_dna["analysis_summary"]
-                    })
-                    save_exam_dna(st.session_state.exam_dna)
-                    st.success("✅ 기출 PDF 출제DNA 분석 및 클라우드 DB 반영 완료!")
-                    st.rerun()
+                    dna_title = school_tag.strip() if school_tag.strip() else ", ".join([u.name for u in uploaded_pdfs])
+
+                    def _apply_dna(d, parsed=parsed_dna, title=dna_title):
+                        d["rules_text"] = parsed["updated_rules_text"]
+                        if parsed.get("updated_essay_rules_text", "").strip():
+                            d["essay_rules_text"] = parsed["updated_essay_rules_text"].strip()
+                        d["updated_at"] = time.strftime("%Y-%m-%d %H:%M")
+                        d.setdefault("history", []).append({"title": title, "summary": parsed["analysis_summary"]})
+                    st.session_state.pop("essay_dna_editor", None)  # 서술형 편집 칸이 예전 글을 붙잡고 있지 않게
+                    if exam_dna_update(_apply_dna):
+                        st.success("✅ 기출 PDF 출제DNA 분석 및 클라우드 DB 반영 완료!")
+                        st.rerun()
+                    else:
+                        # 비용을 낸 분석 결과는 이 창에 남겨 둠 → 아래 '수동 저장'·'서술형 저장'으로 다시 저장 가능
+                        _apply_dna(st.session_state.exam_dna)
+                        st.warning("분석 결과는 이 창에 보관했어요. 잠시 뒤 아래 '💾 출제 DNA 규칙 수동 저장'과 '💾 서술형 출제 DNA 저장'을 눌러 저장해 주세요.")
                 except Exception as e:
                     st.error(f"❌ PDF 분석 중 오류 발생: {e}")
 
@@ -9300,16 +9452,17 @@ def page_dna():
         )
         dc1, dc2 = st.columns(2)
         if dc1.button("💾 출제 DNA 규칙 수동 저장", type="primary", use_container_width=True):
-            st.session_state.exam_dna["rules_text"] = edited_rules
-            save_exam_dna(st.session_state.exam_dna)
-            st.success("✅ 출제 DNA 규칙이 저장되었습니다!")
-        if dc2.button("🔄 운양고·제일고 기본값으로 초기화", use_container_width=True):
-            essay_keep = st.session_state.exam_dna.get("essay_rules_text", "")  # 서술형 DNA는 따로 관리하므로 유지
-            st.session_state.exam_dna = dict(DEFAULT_EXAM_DNA)
-            if essay_keep:
-                st.session_state.exam_dna["essay_rules_text"] = essay_keep
-            save_exam_dna(st.session_state.exam_dna)
-            st.rerun()
+            if exam_dna_update(lambda d, t=edited_rules: d.__setitem__("rules_text", t)):
+                st.success("✅ 출제 DNA 규칙이 저장되었습니다!")
+        with dc2.popover("🔄 운양고·제일고 기본값으로 초기화", use_container_width=True):
+            # 한 번 잘못 눌러도 사라지지 않게 확인을 한 번 더 받음. 바뀌는 것은 위 '출제 DNA 규칙' 글뿐
+            st.caption("위 '출제 DNA 규칙' 글만 처음 기본값으로 되돌려요. 서술형 출제 DNA · 🎣 영쌤 출제 포인트 · 학습 기록은 그대로 둬요. 되돌린 뒤에는 지금 규칙 글을 다시 볼 수 없어요.")
+            if st.button("기본값으로 되돌리기 확정", type="primary", use_container_width=True, key="dna_reset_ok"):
+                def _reset_rules(d):
+                    d["rules_text"] = DEFAULT_EXAM_DNA["rules_text"]
+                    d["updated_at"] = DEFAULT_EXAM_DNA["updated_at"]
+                if exam_dna_update(_reset_rules):
+                    st.rerun()
 
         st.markdown("#### ✍️ 서술형 출제 DNA (한판승 '서술형 출제 가능' 표시 기준)")
         st.caption("운양고·제일고 기출 서술형·논술형 문항을 분석한 기준입니다. 한판승을 만들 때 이 기준에 맞는 문장만 지문당 1개(긴 지문 2개) 표시합니다.")
@@ -9321,9 +9474,8 @@ def page_dna():
             key="essay_dna_editor"
         )
         if st.button("💾 서술형 출제 DNA 저장", use_container_width=True, key="essay_dna_save"):
-            st.session_state.exam_dna["essay_rules_text"] = edited_essay.strip()
-            save_exam_dna(st.session_state.exam_dna)
-            st.success("✅ 서술형 출제 DNA가 저장되었습니다!")
+            if exam_dna_update(lambda d, t=edited_essay.strip(): d.__setitem__("essay_rules_text", t)):
+                st.success("✅ 서술형 출제 DNA가 저장되었습니다!")
 
     render_yt_points_editor()
 
@@ -9360,9 +9512,8 @@ def render_yt_points_editor():
         changed = [i for i, r in enumerate(rows) if r["text"] not in have]
         if not changed:
             # 글은 그대로이고 사용·유형·교과서만만 바꾼 경우는 정리할 것이 없으니 바로 저장
-            st.session_state.exam_dna["yt_points"] = rows
-            save_exam_dna(st.session_state.exam_dna)
-            st.success(f"✅ 영쌤 출제 포인트 {len(rows)}개를 저장했어요. 다음에 시작하는 변형문제 작업부터 반영돼요.")
+            if exam_dna_update(lambda d, r=rows: d.__setitem__("yt_points", r)):
+                st.success(f"✅ 영쌤 출제 포인트 {len(rows)}개를 저장했어요. 다음에 시작하는 변형문제 작업부터 반영돼요.")
         else:
             with st.spinner(f"새로 쓰거나 고친 포인트 {len(changed)}개를 정리하는 중..."):
                 tidy = yt_tidy_points([rows[i] for i in changed], text_model)
@@ -9376,11 +9527,13 @@ def render_yt_points_editor():
                 st.rerun()
     if y2.button("↩️ 기본 포인트 다시 넣기", use_container_width=True, key="yt_points_reset",
                  help="지금 목록 뒤에 처음 넣어 둔 기본 포인트 중 빠진 것만 다시 붙여요 (직접 쓴 포인트는 그대로)"):
-        have = {str(p.get("text", "")).strip() for p in pts}
-        st.session_state.exam_dna["yt_points"] = pts + [dict(p) for p in DEFAULT_YT_POINTS if p["text"].strip() not in have]
-        save_exam_dna(st.session_state.exam_dna)
-        st.session_state.pop("yt_points_editor", None)
-        st.rerun()
+        def _add_defaults(d):
+            cur = qb_yt_points(d)  # DB 최신 목록 뒤에 빠진 기본 포인트만 붙임
+            have = {str(p.get("text", "")).strip() for p in cur}
+            d["yt_points"] = cur + [dict(p) for p in DEFAULT_YT_POINTS if p["text"].strip() not in have]
+        if exam_dna_update(_add_defaults):
+            st.session_state.pop("yt_points_editor", None)
+            st.rerun()
 
     draft = st.session_state.get("yt_draft")
     if draft:
@@ -9401,12 +9554,11 @@ def render_yt_points_editor():
             k1, k2 = st.columns(2)
             if k1.button("✅ 확정해서 저장", type="primary", use_container_width=True, key="yt_draft_ok"):
                 out = yt_merge_draft(draft["rows"], draft["tidy"], ded.to_dict("records"))
-                st.session_state.exam_dna["yt_points"] = out
-                save_exam_dna(st.session_state.exam_dna)
-                for k in ("yt_draft", "yt_points_editor", "yt_draft_editor"):
-                    st.session_state.pop(k, None)
-                st.session_state.yt_saved_msg = f"✅ 영쌤 출제 포인트 {len(out)}개를 저장했어요. 다음에 시작하는 변형문제 작업부터 반영돼요."
-                st.rerun()
+                if exam_dna_update(lambda d, o=out: d.__setitem__("yt_points", o)):
+                    for k in ("yt_draft", "yt_points_editor", "yt_draft_editor"):
+                        st.session_state.pop(k, None)
+                    st.session_state.yt_saved_msg = f"✅ 영쌤 출제 포인트 {len(out)}개를 저장했어요. 다음에 시작하는 변형문제 작업부터 반영돼요."
+                    st.rerun()
             if k2.button("✖️ 취소 (저장 안 함)", use_container_width=True, key="yt_draft_cancel"):
                 st.session_state.pop("yt_draft", None)
                 st.session_state.pop("yt_draft_editor", None)
