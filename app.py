@@ -6451,6 +6451,74 @@ def qb_pick(rows: List[Dict], labels: List[str], total: int, seed: int) -> (List
                 picked[i] = {**q, "q_type": fx, "content": c}
     return picked, notes
 
+# 시험지 난이도 비율 (2026-11-09 선생님 요청: 최상·상·중 비중을 직접 정하기) — '비율 정하기'를 처음 켤 때 기본값(%)
+QB_LEVEL_RATIO_DEFAULT = {"최상": 30, "상": 40, "중": 30, "하": 0, QB_GICHUL_LEVEL: 10}
+
+def qb_level_name(lv: str) -> str:
+    return "실제 기출" if lv == QB_GICHUL_LEVEL else lv
+
+def qb_level_counts(total: int, weights: Dict[str, float]) -> Dict[str, int]:
+    """난이도 비율 → 난이도별 문제 수 (합이 total, 반올림 나머지는 소수점이 큰 난이도부터). 비율 합이 100이 아니어도 비율로 나눔"""
+    w = {k: max(0.0, float(v or 0)) for k, v in weights.items()}
+    s = sum(w.values())
+    if s <= 0 or total <= 0:
+        return {k: 0 for k in w}
+    raw = {k: total * v / s for k, v in w.items()}
+    out = {k: int(raw[k]) for k in w}
+    for k in sorted(w, key=lambda x: -(raw[x] - out[x])):
+        if sum(out.values()) >= total:
+            break
+        out[k] += 1
+    return out
+
+def qb_pick_levels(rows: List[Dict], labels: List[str], total: int, seed: int, weights: Dict[str, float]) -> (List[Dict], List[str]):
+    """난이도 비율대로 나눠 뽑음 (난이도마다 qb_pick으로 지문 골고루·유형 돌아가며).
+    모자란 난이도 몫은 비율을 준 다른 난이도에서 채우고 알려 줌. 지문 순서로 합치고, 한 지문 안에서는 난이도를 번갈아 놓음"""
+    rows = qb_dedupe_rows(rows)  # 난이도 이름만 다르게 두 번 저장된 문제가 두 난이도에서 함께 뽑히지 않게
+    want = qb_level_counts(total, weights)
+    keep_note = lambda nt: [x for x in nt if x.startswith("실제 기출에서 한 지문에")]
+    picked, notes, lack = [], [], []
+    for i, (lv, n) in enumerate(want.items()):
+        if n <= 0:
+            continue
+        got, nt = qb_pick([r for r in rows if r.get("difficulty") == lv], labels, n, seed + i)
+        picked += got
+        notes += keep_note(nt)
+        if len(got) < n:
+            lack.append(f"{qb_level_name(lv)} {n - len(got)}문제")
+    filled = 0
+    if len(picked) < total:
+        have = {r.get("id") for r in picked}
+        rest = [r for r in rows if r.get("id") not in have and float(weights.get(r.get("difficulty"), 0) or 0) > 0]
+        extra, nt = qb_pick(rest, labels, total - len(picked), seed + 97)
+        picked += extra
+        notes += keep_note(nt)
+        filled = len(extra)
+    while len(picked) > total:  # 실제 기출 묶음이 함께 들어와 넘친 만큼, 가장 많이 들어간 난이도의 변형문제를 뒤에서부터 뺌
+        var = [i for i, r in enumerate(picked) if r.get("difficulty") != QB_GICHUL_LEVEL]
+        if not var:
+            break
+        cnt = {}
+        for i in var:
+            cnt[picked[i]["difficulty"]] = cnt.get(picked[i]["difficulty"], 0) + 1
+        top = max(cnt, key=lambda lv: cnt[lv] - want.get(lv, 0))
+        picked.pop(max(i for i in var if picked[i]["difficulty"] == top))
+    if lack:
+        notes.append("난이도 비율대로 뽑기에 " + " · ".join(lack) + "가 모자랐어요"
+                     + (f" → 비율을 준 다른 난이도에서 {filled}문제를 채웠어요." if filled else ".")
+                     + (" '문제 만들기'에서 그 난이도를 더 만들어 주세요." if any(not x.startswith("실제 기출") for x in lack) else ""))
+    if len(picked) < total:
+        notes.append(f"조건에 맞는 문제가 모자라 {len(picked)}문제로 만들었습니다 ({total - len(picked)}문제 부족).")
+    pos = {l: i for i, l in enumerate(labels)}
+    lv_pos = {lv: i for i, lv in enumerate(want)}
+    turn, keys = {}, []
+    for r in picked:  # 한 지문 안 난이도 번갈아: 최상·상·중·최상… (실제 기출 묶음은 시험 번호순 그대로 붙여 둠)
+        k = (r["passage_label"], r.get("difficulty"))
+        turn[k] = turn.get(k, -1) + (0 if r.get("difficulty") == QB_GICHUL_LEVEL and k in turn else 1)
+        keys.append((pos.get(r["passage_label"], 0), turn[k], lv_pos.get(r.get("difficulty"), 0)))
+    order = sorted(range(len(picked)), key=lambda i: keys[i])
+    return [picked[i] for i in order], notes
+
 def qb_html(s) -> str:
     """AI가 쓴 글에서 <u>, <b>만 살리고 나머지는 글자로 표시"""
     s = html.escape(html.unescape(str(s or "")))
@@ -7560,9 +7628,19 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
             levels = _qb_row("난이도").pills("난이도", QB_LEVELS, selection_mode="multi", default=["상", "중"], key="qb_gen_levels", label_visibility="collapsed") or []
             school = _qb_row("학교 스타일").segmented_control("학교 스타일", QB_SCHOOLS, default=QB_SCHOOLS[0], key="qb_gen_school",
                                                           label_visibility="collapsed") or QB_SCHOOLS[0]
-            n1, n2 = _qb_row("조합당").columns([1.3, 6], vertical_alignment="center")
-            count = n1.number_input("조합당 문제 수", 1, 5, 2, key="qb_gen_count", label_visibility="collapsed")
-            verify = n2.checkbox("정답 검증 (AI가 한 번 더 풀어서 정답이 다르면 버림)", value=True, key="qb_gen_verify")
+            # 난이도마다 만들 문제 수 (지문 × 유형마다) = 난이도 비중 (예: 최상 3 · 상 2 · 중 1 → 50% · 33% · 17%)
+            lv_n = {}
+            levels = [lv for lv in QB_LEVELS if lv in levels]  # 누른 순서와 관계없이 최상·상·중·하 순서로
+            if levels:
+                n_cols = _qb_row("난이도별 개수").columns([1.1] * len(levels) + [max(1.0, 8 - 1.1 * len(levels))], vertical_alignment="bottom")
+                for i, lv in enumerate(levels):
+                    lv_n[lv] = int(n_cols[i].number_input(f"{lv} (문제)", 0, 5, 2, key=f"qb_gen_n_{lv}",
+                                                          help="지문 하나 · 유형 하나마다 이 난이도로 만들 문제 수 (0이면 안 만듦)"))
+                tot_n = sum(lv_n.values())
+                n_cols[-1].markdown(f"<div class='qb-note' style='margin-top:0'>지문·유형마다 <b>{tot_n}문제</b>"
+                                    + (" · 비중 " + " · ".join(f"{lv} <b>{round(100 * n / tot_n)}%</b>" for lv, n in lv_n.items() if n) if tot_n else "")
+                                    + "</div>", unsafe_allow_html=True)
+            verify = _qb_row("정답 검증").checkbox("AI가 한 번 더 풀어서 정답이 다르면 버림", value=True, key="qb_gen_verify")
             underline = "mix"
             if set(q_types) & (QB_GRAMMAR_TYPES - {"서술형 (조건 영작)"}):
                 underline = _qb_row("어법 밑줄").segmented_control("어법 밑줄", list(QB_UNDERLINE_OPTS), format_func=QB_UNDERLINE_OPTS.get, default="mix",
@@ -7616,21 +7694,24 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
             if link != "따로" and gen_ps:
                 st.markdown(f"<div class='qb-note'>묶은 지문 <b>{html.escape(gen_ps[0]['label'])}</b> · "
                             f"{len(gen_ps[0]['body_text'].split())}단어 · 시험지를 만들 때 묶은 지문을 모두 고르면 함께 뽑혀요</div>", unsafe_allow_html=True)
-        n_jobs = len(gen_ps) * len({("어법 (조합형)" if (t == "어법 (단일)" and lv == "최상") else t, lv) for t in q_types for lv in levels})
+        combos = list(dict.fromkeys(("어법 (조합형)" if (t == "어법 (단일)" and lv == "최상") else t, lv)
+                                    for t in q_types for lv in levels if lv_n.get(lv, 0) > 0))
+        n_jobs = len(gen_ps) * len(combos)
         if "어법 (단일)" in q_types and "최상" in levels:
             st.caption("💡 어법 최상은 실제 내신처럼 '옳은/틀린 것만을 있는 대로 고른 것'(ⓐ~ⓗ 조합형)으로 만듭니다.")
-        n_q = n_jobs * count
+        n_q = len(gen_ps) * sum(lv_n[lv] for _, lv in combos)
         if n_jobs:
-            combos = {("어법 (조합형)" if (t == "어법 (단일)" and lv == "최상") else t, lv) for t in q_types for lv in levels}
-            cost = len(gen_ps) * sum(qb_job_cost_krw(light_model_for(text_model) if (light_easy and lv in ("하", "중")) else text_model, int(count), verify, batch)
+            cost = len(gen_ps) * sum(qb_job_cost_krw(light_model_for(text_model) if (light_easy and lv in ("하", "중")) else text_model, lv_n[lv], verify, batch)
                                   for _, lv in combos)
             when = "결과는 보통 몇 분~몇 시간, 길면 24시간 뒤" if batch else f"예상 시간 약 {max(1, n_jobs * 40 // 60)}분"
             st.caption(f"📦 작업 {n_jobs}건 · 문제 약 {n_q}개 · 예상 비용 약 {cost:,.0f}원 (문제당 약 {cost / max(1, n_q):,.0f}원){' · 💸 반값' if batch else ''} · "
                        f"{when} (창을 닫아도 서버에서 계속)")
-            st.caption("💡 조합당 문제 수를 늘리면 지문·규칙을 읽는 고정 비용을 함께 나눠 문제당 값이 내려가요 (1개 → 2개 → 3개로 갈수록 싸지고, 그 뒤로는 차이가 작아요).")
+            st.caption("💡 난이도별 개수를 늘리면 지문·규칙을 읽는 고정 비용을 함께 나눠 문제당 값이 내려가요 (1개 → 2개 → 3개로 갈수록 싸지고, 그 뒤로는 차이가 작아요).")
         if st.button("🚀 변형문제 생성 시작", type="primary", disabled=not n_jobs, key="qb_gen_btn"):
-            n = enqueue_qbank(gen_ps, q_types, levels, school, int(count), verify, text_model, api_delay, academy_name, school_name, light_easy, underline, batch,
-                              yt_focus)
+            used_lv = [lv for lv in levels if lv_n.get(lv, 0) > 0]
+            n = enqueue_qbank(gen_ps, q_types, used_lv, school, max(lv_n.values()), verify, text_model, api_delay, academy_name, school_name, light_easy, underline,
+                              batch, yt_focus, plan=[(p, t, lv, lv_n[lv]) for p in gen_ps for t, lv in combos],
+                              note=f"{school} · " + " · ".join(f"{lv} {lv_n[lv]}" for lv in used_lv) + "문제씩")
             st.session_state.gen_flash = f"✅ 변형문제 {n}건을 생성 작업에 추가했습니다. 위 작업 칸에서 진행 상황을 볼 수 있어요."
             st.rerun()
 
@@ -7719,6 +7800,24 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
                 n1, n2 = _qb_row("문제 수").columns([1.3, 6], vertical_alignment="center")
                 total = n1.number_input("총 문제 수", 1, 300, 30, key="qb_exam_total", label_visibility="collapsed")
                 n2.markdown(f"<div class='qb-note' style='margin-top:0'>지금 조건으로 뽑을 수 있는 문제 <b>{avail}개</b></div>", unsafe_allow_html=True)
+            # 난이도 비율: 자동(쌓인 문제에서 섞어 뽑음) / 비율 정하기(최상·상·중 … % → 그 비율대로 뽑음)
+            lv_mix = None
+            has_real = any(r["difficulty"] == QB_GICHUL_LEVEL for r in pool)  # 고른 지문에 실제 기출이 있을 때만 '실제 기출' 비율 칸
+            lv_keys = ([lv for lv in QB_LEVELS if lv in e_levels] if e_real != "기출만" else []) + ([QB_GICHUL_LEVEL] if e_real == "함께 섞기" and has_real else [])
+            if e_real != "기출만" and lv_keys:
+                lv_mode = _qb_row("난이도 비율").segmented_control("난이도 비율", ["자동으로 섞기", "비율 정하기"], default="자동으로 섞기", key="qb_exam_lvmode",
+                                                               label_visibility="collapsed",
+                                                               help="비율 정하기: 예) 최상 30 · 상 40 · 중 30 → 30문제면 최상 9 · 상 12 · 중 9문제. 합이 100이 아니어도 비율로 나눠요") or "자동으로 섞기"
+                if lv_mode == "비율 정하기":
+                    r_cols = _qb_row("비율 (%)").columns([1.1] * len(lv_keys) + [max(1.0, 8 - 1.1 * len(lv_keys))], vertical_alignment="bottom")
+                    lv_mix = {lv: int(r_cols[i].number_input(qb_level_name(lv), 0, 100, QB_LEVEL_RATIO_DEFAULT.get(lv, 0), step=5, key=f"qb_exam_ratio_{lv}"))
+                              for i, lv in enumerate(lv_keys)}
+                    plan_n = qb_level_counts(int(total), lv_mix)
+                    have_n = {lv: sum(1 for r in pool if r["difficulty"] == lv and r["q_type"] in e_types) for lv in lv_keys}
+                    r_cols[-1].markdown("<div class='qb-note' style='margin-top:0'>" + (
+                        f"{int(total)}문제 → " + " · ".join(
+                            f"{qb_level_name(lv)} <b>{n}</b>" + (f" <span style='color:#d33'>(쌓인 {have_n[lv]}개뿐)</span>" if n > have_n[lv] else "")
+                            for lv, n in plan_n.items() if n) if sum(lv_mix.values()) else "비율을 하나 이상 넣어 주세요") + "</div>", unsafe_allow_html=True)
             _qb_hr()
             default_title = (" · ".join(sel_e[:3]) + (" 외" if len(sel_e) > 3 else "")) if sel_e else ""
             title = _qb_row("제목").text_input("시험지 제목", value="", placeholder=default_title or "예: 고1 26년 6월 19·20·21번 변형문제", key="qb_exam_title",
@@ -7734,8 +7833,8 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
             as_book = o4.checkbox("ANATOMY VISION 책으로", value=True, key="qb_exam_book",
                                   help="앞표지·사용법·제작 소개 2쪽을 앞에, 저작권·뒤표지를 뒤에 붙여 양면 인쇄하면 한 권의 책처럼 나와요")
         b1, b2 = st.columns([2, 1])
-        make = b1.button("📄 시험지 만들기", type="primary", disabled=not sel_e or not e_types or (not e_levels and e_real != "기출만") or total < 1,
-                         use_container_width=True, key="qb_exam_btn")
+        make = b1.button("📄 시험지 만들기", type="primary", disabled=not sel_e or not e_types or (not e_levels and e_real != "기출만") or total < 1
+                         or (lv_mix is not None and not sum(lv_mix.values())), use_container_width=True, key="qb_exam_btn")
         reshuffle = b2.button("🔀 다른 조합으로 다시 뽑기", disabled="qb_exam_html" not in st.session_state, use_container_width=True, key="qb_exam_shuffle")
         if make or reshuffle:
             seed = random.randint(1, 10**9)
@@ -7754,20 +7853,30 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
                 for sc, n in split.items():
                     if n <= 0:
                         continue
-                    got, _ = qb_pick([r for r in rows if r.get("school") == sc], labels_ordered, n, seed)
+                    sc_rows = [r for r in rows if r.get("school") == sc]
+                    if lv_mix:
+                        got, nt = qb_pick_levels(sc_rows, labels_ordered, n, seed, lv_mix)
+                        notes += [f"{sc} 스타일 · {x}" for x in nt if not x.startswith("조건에 맞는 문제가 모자라")]
+                    else:
+                        got, _ = qb_pick(sc_rows, labels_ordered, n, seed)
                     picked += got
                     if len(got) < n:
                         notes.append(f"{sc} 스타일은 조건에 맞는 문제가 {len(got)}개뿐이라 {n}문제 중 {len(got)}문제만 넣었습니다. '문제 만들기'에서 더 생성해 주세요.")
                 pos = {l: i for i, l in enumerate(labels_ordered)}
                 picked.sort(key=lambda r: pos.get(r["passage_label"], 0))
+            elif lv_mix:
+                picked, notes = qb_pick_levels(rows, labels_ordered, int(total), seed, lv_mix)
             else:
                 picked, notes = qb_pick(rows, labels_ordered, int(total), seed)
             if picked:
                 labels_all = set(by_label)
+                lv_got = _qb_chip_counts(picked, "difficulty")
                 meta = {"brand": "변형문제 TEST", "kind": kind, "title": title or default_title,
                         "sub": " · ".join(x for x in [
                             f"실제 기출 {sum(1 for r in picked if r['difficulty'] == QB_GICHUL_LEVEL)}" if e_real != "빼기" else "",
-                            f"변형 {sum(1 for r in picked if r['difficulty'] != QB_GICHUL_LEVEL)} ({', '.join(e_levels)})" if e_real != "기출만" else "",
+                            f"변형 {sum(1 for r in picked if r['difficulty'] != QB_GICHUL_LEVEL)} ("
+                            + (" · ".join(f"{lv} {lv_got[lv]}" for lv in QB_LEVELS if lv_got.get(lv)) if lv_mix else ", ".join(e_levels))
+                            + ")" if e_real != "기출만" else "",
                             f"총 {len(picked)}문항"] if x), "show_tag": show_tag, "show_gichul": show_gichul, "with_answers": with_answers,
                         "academy": academy_name, "show_style": show_style, "show_time": show_time}
                 gmap = load_gichul_map()
@@ -8776,7 +8885,7 @@ APP_HELP = {
 
 **🛠️ 문제 만들기 (누적) — 비용 발생**
 - 위 칩에서 **시험·번호**를 골라 지문을 정해요.
-- **유형 × 난이도**마다 **조합당 문제 수**만큼 만들어요. 예를 들어 지문 3개 × 유형 2개 × 난이도 2개 × 2문제면 24문제예요. 버튼 위에 예상 개수·비용·시간이 나와요.
+- **유형 × 난이도**마다 **난이도별 개수**만큼 만들어요. 난이도마다 개수를 따로 정해 비중을 맞춰요 (예: 최상 3 · 상 2 · 중 1 → 지문·유형마다 6문제, 비중 50% · 33% · 17%, 0이면 그 난이도는 안 만듦). 지문 3개 × 유형 2개 × (최상 3 + 상 2 + 중 1)이면 36문제예요. 버튼 위에 예상 개수·비용·시간이 나와요.
 - **학교 스타일**: 운양고 / 제일고 중 어느 학교 출제 방식으로 만들지 정해요 (🎯 출제DNA가 반영돼요).
 - **정답 검증**: AI가 만든 문제를 한 번 더 풀어 보고, 정답이 다르면 버려요 (비용 약 10~20% 추가, 품질↑).
   상·최상은 같은 검증에서 **난이도도 판정**해요. 학생이 원문을 외우고 온다고 보고, 원문 기억만으로 풀리거나 지문을 안 읽고 지울 수 있는 오답이 있으면 **상·중으로 낮춰 저장**해요(최상은 상위권도 실제로 고민할 구조일 때만). 그래서 '최상'으로 요청해도 상·중으로 쌓일 수 있어요.
@@ -8800,6 +8909,7 @@ APP_HELP = {
 **📄 시험지 만들기 — 무료**
 - 지문을 고르고 **학교·실제 기출 포함 여부·난이도·유형·순서·문제 수**를 정해요. 칩 아래에 '지금 뽑을 수 있는 문제 수'가 나와요.
 - **학교 비율 → 학교별 문제 수 정하기**: 예) 운양고 스타일 20 + 제일고 스타일 10. 한쪽이 모자라면 다른 학교로 채우지 않고 알려 줘요.
+- **난이도 비율 → 비율 정하기**: 최상·상·중·하(고른 지문에 실제 기출이 있으면 실제 기출도) 비율(%)을 넣으면 그 비율대로 뽑아요. 예) 최상 30 · 상 40 · 중 30, 30문제 → 최상 9 · 상 12 · 중 9. 합이 100이 아니어도 비율로 나눠요. 쌓인 문제가 모자란 난이도는 빨간 글씨로 알려 주고, 모자란 만큼은 비율을 준 다른 난이도에서 채워요. 학교별 문제 수와 함께 쓰면 학교마다 이 비율로 뽑아요.
 - **이미 낸 문항**: 전에 '문항 기록 저장'한 시험지를 고르면 **그 문항을 빼고** 뽑아요 (추가로 풀 학생에게 새 문제만 줄 때).
 - 뽑는 원리: 고른 지문에서 **같은 개수씩 골고루**, 지문 안에서는 **유형을 돌아가며** 뽑아요. 모자란 지문 몫은 문제가 많은 지문이 채워요.
 - **실제 기출 묶음**: 실제 시험에서 한 지문에 여러 문제가 나온 경우(예: 5·6번), 하나가 뽑히면 같은 지문 문제도 함께 넣고 '[5~6] 다음 글을 읽고 물음에 답하시오.' 아래에 지문을 한 번만 실어요. 유형을 골라 뽑으면 고른 유형만 따라오고, 늘어난 만큼 변형문제를 빼서 문항 수는 그대로예요.
