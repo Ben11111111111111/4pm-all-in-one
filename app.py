@@ -3447,15 +3447,54 @@ def ppt_header_label(label: str) -> str:
     m = re.match(r"^\[([^\]]+)\]\s*(.*)$", str(label))
     return f"{m.group(1)} {m.group(2)}".strip() if m else str(label).strip()
 
-def build_class_ppt(passages: List[Dict], anatomy_list: List[Dict], voca_list: List[Dict], school: str, test_name: str):
+def ppt_key_tag(row: Dict) -> str:
+    """한판승 문장이 핵심 문장(서술형 후보로 표시된 문장)이면 흰 띠 위에 붙일 이름표, 아니면 빈 글"""
+    if not row.get("essay_candidate"):
+        return ""
+    role = str(row.get("essay_reason", "")).split("·")[0].strip()
+    return "★ 핵심 문장" + (f" · {role}" if role else "")
+
+def ppt_core_summary_parts(ps: Dict, reveal: bool, seed_key: str) -> list:
+    """Core 요약문 한 개 → PPT 문단 조각 [(글, 굵게, 밑줄)]
+    reveal=False: (A) [ 정답 / 함정 ] 고르기, True: (A) 정답. 고르는 순서는 Core 교재와 같음 (같은 seed)"""
+    eng = re.sub(r"\s+", " ", str(ps.get("eng", ""))).strip()
+    if not eng:
+        return []
+    rng = random.Random(seed_key)
+    spans = []
+    for tag, default_trap in (("A", "superficial"), ("B", "passivity")):
+        ans = str(ps.get(f"blank_{tag.lower()}", "")).strip()
+        if not ans:
+            continue
+        trap = str(ps.get(f"distractor_{tag.lower()}") or extract_trap_word_fallback(ps.get(f"synonyms_{tag.lower()}", ""), default_trap)).strip() or "opposite"
+        opts = [ans, trap]
+        rng.shuffle(opts)
+        m = (re.search(r"\(\s*" + tag + r"\s*\)\s*" + re.escape(ans), eng, flags=re.IGNORECASE)
+             or re.search(r"\(\s*" + tag + r"\s*\)", eng))
+        if m:
+            spans.append((m.start(), m.end(), f"({tag}) {ans}" if reveal else f"({tag}) [ {opts[0]} / {opts[1]} ]"))
+    spans.sort()
+    if not spans or any(a[1] > b[0] for a, b in zip(spans, spans[1:])):
+        return []
+    parts, pos = [], 0
+    for s, e, txt in spans:
+        parts += [(eng[pos:s], False, False), (txt, True, True)]
+        pos = e
+    parts.append((eng[pos:], False, False))
+    return [p for p in parts if p[0]]
+
+def build_class_ppt(passages: List[Dict], anatomy_list: List[Dict], voca_list: List[Dict], school: str, test_name: str, core_list: List[Dict] = None):
     """선택한 한판승 지문으로 수업용 PPT를 만들어 (파일 bytes, 슬라이드 수)를 돌려줌"""
     from pptx import Presentation  # PPT를 만들 때만 불러와 앱 시작을 느리게 하지 않음
     from pptx.util import Pt, Inches
     from pptx.enum.text import MSO_AUTO_SIZE, PP_ALIGN
     from pptx.dml.color import RGBColor
+    from pptx.oxml.ns import qn
+    from pptx.oxml.xmlchemy import OxmlElement
 
     YELLOW_TITLE, YELLOW_VOCAB = RGBColor(255, 215, 0), RGBColor(255, 255, 102)
     WHITE, NOTE_GRAY, HEAD_GRAY = RGBColor(255, 255, 255), RGBColor(150, 150, 150), RGBColor(200, 200, 200)
+    BLACK = RGBColor(0, 0, 0)
 
     def new_slide():
         slide = prs.slides.add_slide(layout)
@@ -3479,7 +3518,41 @@ def build_class_ppt(passages: List[Dict], anatomy_list: List[Dict], voca_list: L
         tf.margin_top = tf.margin_bottom = 0
         return tf
 
-    def paragraph(tf, text, size, color, first=False, spacing=1.85, before=0, bold=True, align=None):
+    def white_marker(run):
+        """형광펜처럼 글자 줄에만 흰색을 칠함 (PowerPoint 2019·365의 '텍스트 강조 색').
+        강조 색을 못 그리는 옛 프로그램에서도 글자가 보이도록 흰 테두리를 함께 넣음 (흰 형광펜 위에서는 티 안 남)"""
+        rPr = run._r.get_or_add_rPr()
+        ln = OxmlElement("a:ln")
+        ln.set("w", "9525")
+        ln_fill = OxmlElement("a:solidFill")
+        ln_clr = OxmlElement("a:srgbClr")
+        ln_clr.set("val", "FFFFFF")
+        ln_fill.append(ln_clr)
+        ln.append(ln_fill)
+        rPr.insert(0, ln)  # a:ln은 rPr의 맨 앞이어야 함
+        hl = OxmlElement("a:highlight")
+        hl_clr = OxmlElement("a:srgbClr")
+        hl_clr.set("val", "FFFFFF")
+        hl.append(hl_clr)
+        rPr.find(qn("a:solidFill")).addnext(hl)  # a:highlight는 글자 색(solidFill) 바로 뒤
+
+    def rich_paragraph(tf, parts, size, color, first=False, spacing=1.6, before=0):
+        """한 문단 안에 굵게·밑줄을 섞어 씀. parts = [(글, 굵게, 밑줄)]"""
+        p = tf.paragraphs[0] if first else tf.add_paragraph()
+        p.line_spacing = spacing
+        if before > 0:
+            p.space_before = Pt(before)
+        for text, bold, underline in parts:
+            if not text:
+                continue
+            run = p.add_run()
+            run.text = text
+            run.font.size = Pt(size)
+            run.font.bold = bold
+            run.font.underline = underline
+            run.font.color.rgb = color
+
+    def paragraph(tf, text, size, color, first=False, spacing=1.85, before=0, bold=True, align=None, marker=False):
         # 글자 색을 글자마다 직접 넣어 PowerPoint에서 검정으로 풀리지 않게 함
         lines = [ln.strip() for ln in str(text).split("\n") if ln.strip()] or [""]
         for i, line in enumerate(lines):
@@ -3494,6 +3567,8 @@ def build_class_ppt(passages: List[Dict], anatomy_list: List[Dict], voca_list: L
             run.font.size = Pt(size)
             run.font.bold = bold
             run.font.color.rgb = color
+            if marker:
+                white_marker(run)
 
     def header(slide, label):
         text_left = PPT_MARGIN_X
@@ -3525,10 +3600,13 @@ def build_class_ppt(passages: List[Dict], anatomy_list: List[Dict], voca_list: L
         if has_img:
             picture(slide, PPT_IMG_TITLE, PPT_SLIDE_W - PPT_MARGIN_X - 1.1, 1.4, 1.1)
 
-    def sentence_slide(label, sent, trans, vocabs, note_terms):
+    def sentence_slide(label, sent, trans, vocabs, note_terms, key_tag=""):
+        """key_tag가 있으면 핵심 문장: 영어 문장에 흰 형광펜을 긋고 글씨는 검게 (배경은 그대로 검정)"""
         slide = new_slide()
         header(slide, label)
         left, width, top0, bottom = PPT_MARGIN_X, PPT_CONTENT_W, 0.8, PPT_SLIDE_H - 0.1
+        tag_pt = 14
+        band_extra = ppt_text_height_in(key_tag, width, tag_pt, True, 1.2) if key_tag else 0.0
 
         # 오른쪽 아래 10pt 단어·유의어 (최대 3줄, 넘치는 단어는 발표자 노트에만)
         note_w, note_text, note_h = 4.2, "", 0.0
@@ -3553,7 +3631,7 @@ def build_class_ppt(passages: List[Dict], anatomy_list: List[Dict], voca_list: L
         # 본문 32pt를 지키고 단어 17pt → 10pt, 해석 → 9pt를 먼저 줄임. 그래도 안 들어가면 본문을 줄임
         plan = None
         for body_pt in range(PPT_BODY_MAX_PT, 13, -1):
-            body_h = ppt_text_height_in(sent, width, body_pt, True, 1.85)
+            body_h = ppt_text_height_in(sent, width, body_pt, True, 1.85) + band_extra
             for vocab_pt in range(17, 9, -1):
                 v_h = vocab_height(vocab_pt) if vocab_lines else 0.0
                 for trans_pt in range(vocab_pt, 8, -1):
@@ -3567,11 +3645,16 @@ def build_class_ppt(passages: List[Dict], anatomy_list: List[Dict], voca_list: L
                 break
         if plan is None:  # 아주 긴 문장: 단어를 빼서라도 본문·해석을 지킴 (단어는 발표자 노트에 남음)
             vocab_lines, cols = [], [[]]
-            plan = (14, ppt_text_height_in(sent, width, 14, True, 1.85), 12, 0.0, 9,
+            plan = (14, ppt_text_height_in(sent, width, 14, True, 1.85) + band_extra, 12, 0.0, 9,
                     ppt_text_height_in(trans, width, 9, False, 1.2) if trans else 0.0)
         body_pt, body_h, vocab_pt, v_h, trans_pt, t_h = plan
 
-        paragraph(textbox(slide, left, top0, width, body_h), sent, body_pt, WHITE, first=True, spacing=1.85)
+        if key_tag:
+            b_tf = textbox(slide, left, top0, width, body_h)
+            paragraph(b_tf, key_tag, tag_pt, WHITE, first=True, spacing=1.2)
+            paragraph(b_tf, sent, body_pt, BLACK, spacing=1.85, marker=True)
+        else:
+            paragraph(textbox(slide, left, top0, width, body_h), sent, body_pt, WHITE, first=True, spacing=1.85)
         y = top0 + body_h
         if vocab_lines and v_h:
             # 단어는 가능하면 4.4인치 아래부터 (자리가 모자라면 본문 바로 아래)
@@ -3592,6 +3675,8 @@ def build_class_ppt(passages: List[Dict], anatomy_list: List[Dict], voca_list: L
 
         # 발표자 노트: 단어·유의어 전체와 해석 (슬라이드 쇼 발표자 보기에서만 보임)
         notes = []
+        if key_tag:
+            notes.append("[핵심 문장] " + key_tag)
         if vocabs:
             notes.append("[문장 단어] " + " / ".join(vocabs))
         if note_terms:
@@ -3618,11 +3703,57 @@ def build_class_ppt(passages: List[Dict], anatomy_list: List[Dict], voca_list: L
         paragraph(tf, head, chosen, YELLOW_TITLE, first=True, spacing=1.5)
         paragraph(tf, summary_text, chosen, WHITE, spacing=1.7, before=20)
 
+    def fit_parts(blocks, width, box_h, max_pt, min_pt):
+        """blocks = [(글, 크기 차이, 굵게, 줄간격, 위 여백pt)] 이 box_h에 다 들어가는 가장 큰 기준 크기"""
+        for pt in range(max_pt, min_pt - 1, -1):
+            if sum(ppt_text_height_in(t, width, max(10, pt + d), b, sp, bf) for t, d, b, sp, bf in blocks if t) <= box_h:
+                return pt
+        return min_pt
+
+    def core_summary_slides(label, ps, seed_key):
+        """Core 요약문 하나로 (A)·(B) 단어 고르기 슬라이드 + 정답 슬라이드. 흰색·검은색만 써서 빔 색반전에도 잘 보이게"""
+        q = ppt_core_summary_parts(ps, False, seed_key)
+        a = ppt_core_summary_parts(ps, True, seed_key)
+        if not q:
+            return
+        width, top, box_h = PPT_CONTENT_W, 0.95, PPT_SLIDE_H - 0.95 - 0.35
+        ask, kor = "(A), (B)에 들어갈 알맞은 말을 고르세요.", ppt_clean_kor(ps.get("kor", ""))
+        q_text = "".join(t for t, _, _ in q)
+
+        slide = new_slide()
+        header(slide, label)
+        head = "📝 요약문 완성 · 알맞은 말 고르기"
+        pt = fit_parts([(head, -4, True, 1.3, 0), (ask, -10, False, 1.2, 8), (q_text, 0, True, 1.7, 22)], width, box_h, 30, 14)
+        tf = textbox(slide, PPT_MARGIN_X, top, width, box_h)
+        paragraph(tf, head, max(10, pt - 4), WHITE, first=True, spacing=1.3)
+        paragraph(tf, ask, max(10, pt - 10), WHITE, spacing=1.2, before=8, bold=False)
+        rich_paragraph(tf, q, pt, WHITE, spacing=1.7, before=22)
+        slide.notes_slide.notes_text_frame.text = (f"[정답] (A) {ps.get('blank_a', '')}  (B) {ps.get('blank_b', '')}"
+                                                   + (f"\n[해석] {kor}" if kor else ""))
+
+        slide = new_slide()
+        header(slide, label)
+        head = "✅ 정답 확인"
+        ans_line = f"(A) {str(ps.get('blank_a', '')).strip()}    (B) {str(ps.get('blank_b', '')).strip()}"
+        a_text = "".join(t for t, _, _ in a)
+        pt = fit_parts([(head, -4, True, 1.3, 0), (a_text, 0, False, 1.7, 18), (ans_line, 0, True, 1.3, 14), (kor, -8, False, 1.3, 14)],
+                       width, box_h, 30, 12)
+        tf = textbox(slide, PPT_MARGIN_X, top, width, box_h)
+        paragraph(tf, head, max(10, pt - 4), WHITE, first=True, spacing=1.3)
+        rich_paragraph(tf, a, pt, WHITE, spacing=1.7, before=18)
+        paragraph(tf, ans_line, pt, WHITE, spacing=1.3, before=14)
+        if kor:
+            paragraph(tf, kor, max(10, pt - 8), WHITE, spacing=1.3, before=14, bold=False)
+        syn = [f"({k}) {ppt_clean_kor(ps.get(f'synonyms_{k.lower()}', ''))}" for k in ("A", "B") if ps.get(f"synonyms_{k.lower()}")]
+        if syn:
+            slide.notes_slide.notes_text_frame.text = "[유의어·함정] " + "\n".join(syn)
+
     prs = Presentation()
     prs.slide_width, prs.slide_height = Inches(PPT_SLIDE_W), Inches(PPT_SLIDE_H)
     layout = prs.slide_layouts[6]
     anatomy = {p["label"]: p for p in anatomy_list}
     voca = {p["label"]: p for p in voca_list}
+    core = {p["label"]: p for p in (core_list or [])}
     for v in passages:
         label = v.get("label", "")
         vdata, adata = v.get("data", {}), anatomy.get(label, {}).get("data", {})
@@ -3633,8 +3764,17 @@ def build_class_ppt(passages: List[Dict], anatomy_list: List[Dict], voca_list: L
             if not sent:
                 continue
             vocabs = [f"{str(x.get('word', '')).strip()}: {str(x.get('meaning', '')).strip()}" for x in (row.get("sentence_vocab") or []) if x.get("word")]
-            sentence_slide(label, sent, ppt_clean_kor(row.get("kor", "")), vocabs, ppt_note_terms(sent, voca_items, vdata.get("keywords", [])))
+            sentence_slide(label, sent, ppt_clean_kor(row.get("kor", "")), vocabs, ppt_note_terms(sent, voca_items, vdata.get("keywords", [])),
+                           key_tag=ppt_key_tag(row))
         summary_slide(label, str(vdata.get("summary", "")).strip())
+        cp = core.get(label)
+        if cp:
+            # Core 요약문 중 (A)·(B) 빈칸이 제대로 있는 첫 번째 것 하나로 고르기 슬라이드 (seed는 Core 교재와 같게)
+            pid = esc(cp.get("id", esc(label)))
+            for i, ps in enumerate((cp.get("data") or {}).get("summaries") or [], start=1):
+                if isinstance(ps, dict) and ppt_core_summary_parts(ps, False, f"{pid}_sum_{i}"):
+                    core_summary_slides(label, ps, f"{pid}_sum_{i}")
+                    break
     stream = io.BytesIO()
     prs.save(stream)
     return stream.getvalue(), len(prs.slides)
@@ -3643,13 +3783,15 @@ def render_class_ppt_section(sel_passages: List[Dict], school_name: str):
     """한판승 탭: 고른 지문으로 수업용 PPT 만들기"""
     with st.expander(f"🎬 선택한 {len(sel_passages)}개 지문으로 수업용 PPT 만들기 (AI 사용 안 함 · 토큰 0)"):
         st.caption("검은 배경 4:3 슬라이드 · 영어 문장 32pt(긴 문장만 줄어듦) · 제목은 Self-Note, 요점 정리는 한판승에서 가져옵니다. "
-                   "오른쪽 아래 10pt 유의어와 발표자 노트도 함께 들어갑니다.")
+                   "오른쪽 아래 10pt 유의어와 발표자 노트도 함께 들어갑니다. "
+                   "핵심 문장은 흰 띠 위 검은 글씨로 표시하고, 끝에 Core 요약문 (A)·(B) 고르기와 정답 슬라이드가 붙습니다.")
         p_col1, p_col2, p_col3 = st.columns([2, 2, 1.6])
         ppt_school = p_col1.text_input("🏫 머리말 학교명", value=school_name, key="ppt_school")
         ppt_test = p_col2.text_input("📝 머리말 시험명", value="", placeholder="예: 고1 10모", key="ppt_test")
         if p_col3.button("🎬 PPT 만들기", type="primary", use_container_width=True, key="ppt_make_btn"):
             with st.spinner("PPT를 만드는 중입니다..."):
-                data, n_slides = build_class_ppt(sel_passages, st.session_state.saved_a, st.session_state.saved_w, ppt_school.strip(), ppt_test.strip())
+                data, n_slides = build_class_ppt(sel_passages, st.session_state.saved_a, st.session_state.saved_w, ppt_school.strip(), ppt_test.strip(),
+                                                 st.session_state.get("saved_c") or [])
             # 파일 이름은 머리말 시험명 그대로 (파일 이름에 못 쓰는 글자만 지움, 비어 있으면 날짜로)
             file_stem = re.sub(r'[\\/:*?"<>|]', "", ppt_test).strip() or f"수업용_PPT_{time.strftime('%m%d_%H%M')}"
             st.session_state.ppt_file = (data, n_slides, len(sel_passages), f"{file_stem}.pptx")
