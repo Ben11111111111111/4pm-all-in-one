@@ -3407,11 +3407,20 @@ def ppt_fit_pt(text: str, width_in: float, height_in: float, max_pt: int, min_pt
     return None, ppt_text_height_in(text, width_in, min_pt, bold, spacing)
 
 def ppt_clean_eng(s: str) -> str:
-    """한판승 문장에서 [어구](S) 표시, {1:어법} 표시, 끊어 읽기 / 를 지운 깨끗한 원문"""
-    s = re.sub(r"\{\d{1,2}:(.*?)\}", r"\1", str(s or ""), flags=re.S)
-    s = re.sub(r"\[(.*?)\]\s*\(([SVOCM])\)", r"\1", s, flags=re.S)
+    """한판승 문장에서 [어구](S) 표시, {1:어법} 표시, 끊어 읽기 / 를 지운 깨끗한 원문
+    괄호 안 괄호([[it](S) ...](M)), S·V·O·C·M 밖의 이름(V1, O2, IO, S+V …), 이름 없는 [ ], 번호 없는 { }까지 모두 지움"""
+    s = str(s or "")
+    prev = None
+    while prev != s:  # {1:...} 안에 {2:...}가 든 경우: 안쪽부터
+        prev, s = s, re.sub(r"\{\d{1,2}:([^{}]*)\}", r"\1", s)
+    s = re.sub(r"\{\d{1,2}:|[{}]", "", s)
+    s = re.sub(r"\]\s*\(\s*(?:[A-Z][A-Za-z0-9+_/'’\-]{0,9}|conj)\s*\)", "]", s)  # ](S) ](V1) ](S+V) ](IO) …
+    s = re.sub(r"(?<=[A-Za-z])\((?:[SVOCM][0-9]?|IO|DO)\)", "", s)  # 괄호 없이 붙은 이름: us(O)
+    s = re.sub(r"[\[\]]", "", s)
     s = re.sub(r"\s*/\s*", " ", s)
-    s = re.sub(r"\s+([,.;:!?’'\"”)])", r"\1", s)
+    s = re.sub(r"\s+([,.;:!?’”)])", r"\1", s)
+    s = re.sub(r"\s+([\"'])(?=\s|$|[,.;:!?])", r"\1", s)  # 닫는 따옴표 앞 띄어쓰기만 지움 (여는 따옴표는 앞 낱말과 띄움)
+    s = re.sub(r"\s+((?:['’](?:s|re|ve|d|ll|m|t)|n['’]t)\b)", r"\1", s)  # it 's → it's
     return re.sub(r"\s{2,}", " ", s).strip()
 
 def ppt_clean_kor(s: str) -> str:
@@ -7445,6 +7454,13 @@ def _qb_passage_picker(key: str, mock_lib: List[Dict], counts: Dict[str, int]) -
     order = {p["label"]: i for i, p in enumerate(lib)}
     by_lbl = {p["label"]: p for p in lib}
     st.session_state[key] = [l for l in st.session_state.get(key, []) if l in order]
+    # 이어 붙인(연결) 지문 문제: 짧은 교과서 단락은 '4-3 + 4-4'처럼 묶은 지문으로만 만들어짐
+    #   칩 숫자 = 그 지문이 들어간 문제 모두, 고른 지문 합계 = 시험지에 실제로 뽑힐 수 있는 문제 (묶인 지문을 모두 골랐을 때만)
+    link_parts = {l: set(qb_link_parts(l)[1]) for l, n in counts.items() if n and qb_link_parts(l)[0]}
+    chip_n = dict(counts)
+    for l, parts in link_parts.items():
+        for x in parts:
+            chip_n[x] = chip_n.get(x, 0) + counts[l]
 
     def set_chosen(labels):
         st.session_state[key] = sorted(set(labels), key=order.get)
@@ -7454,7 +7470,7 @@ def _qb_passage_picker(key: str, mock_lib: List[Dict], counts: Dict[str, int]) -
 
     with st.container(key=f"qb_card_{key}"):
         srcs = [s for s in ("모의고사", "교과서·부교재") if any(_qb_is_mock(ps[0]) == (s == "모의고사") for ps in groups.values())]
-        st.markdown("<div class='qb-title'>지문 고르기<span>번호 옆 작은 숫자 = 쌓인 문제 수</span></div>", unsafe_allow_html=True)
+        st.markdown("<div class='qb-title'>지문 고르기<span>번호 옆 작은 숫자 = 쌓인 문제 수 (이어 붙인 지문 문제 포함)</span></div>", unsafe_allow_html=True)
         src = _qb_row("출처").segmented_control("출처", srcs, default=srcs[0], key=f"{key}_src", label_visibility="collapsed") or srcs[0]
         gks = [g for g, ps in groups.items() if _qb_is_mock(ps[0]) == (src == "모의고사")]
         grade = ""
@@ -7476,7 +7492,7 @@ def _qb_passage_picker(key: str, mock_lib: List[Dict], counts: Dict[str, int]) -
             rows = [r for r in rows if r[1]] + ([("기타", rest)] if rest else [])
         else:
             rows = [("번호", ps)]
-        fmt = lambda l: str(by_lbl[l].get("number") or extract_question_number(l) or l) + _qb_sup(counts.get(l))
+        fmt = lambda l: str(by_lbl[l].get("number") or extract_question_number(l) or l) + _qb_sup(chip_n.get(l))
         nums_box = st.container(key=f"qbsep_{key}")
         for i, (row_name, row_ps) in enumerate(rows):
             opts = [p["label"] for p in row_ps]
@@ -7495,7 +7511,13 @@ def _qb_passage_picker(key: str, mock_lib: List[Dict], counts: Dict[str, int]) -
             body = " &nbsp;·&nbsp; ".join(
                 f"<b>{html.escape(_qb_group_name(groups[g]) + ((' ' + str(groups[g][0].get('grade'))) if _qb_is_mock(groups[g][0]) else ''))}</b> "
                 f"{html.escape(', '.join(nums))}" for g, nums in lines.items())
-            f1.markdown(f"<div class='qb-basket'>고른 지문 <b>{len(chosen)}개</b> <span class='muted'>· 쌓인 문제 {sum(counts.get(l, 0) for l in chosen)}개</span>"
+            cs = set(chosen)
+            n_link = sum(counts[l] for l, parts in link_parts.items() if parts <= cs)
+            n_part = sum(counts[l] for l, parts in link_parts.items() if parts & cs and not parts <= cs)
+            extra = (f" (이어 붙인 지문 문제 {n_link}개 포함)" if n_link else "") + (
+                f" · 묶인 지문을 다 고르지 않아 빠지는 문제 {n_part}개" if n_part else "")
+            f1.markdown(f"<div class='qb-basket'>고른 지문 <b>{len(chosen)}개</b> <span class='muted'>· 쌓인 문제 "
+                        f"{sum(counts.get(l, 0) for l in chosen) + n_link}개{extra}</span>"
                         f"<br>{body}</div>", unsafe_allow_html=True)
         else:
             f1.markdown("<div class='qb-basket'><span class='muted'>번호를 눌러 지문을 고르세요. 다른 시험으로 바꿔도 고른 번호는 그대로 남아요.</span></div>",
