@@ -3447,12 +3447,167 @@ def ppt_header_label(label: str) -> str:
     m = re.match(r"^\[([^\]]+)\]\s*(.*)$", str(label))
     return f"{m.group(1)} {m.group(2)}".strip() if m else str(label).strip()
 
-def ppt_key_tag(row: Dict) -> str:
-    """한판승 문장이 핵심 문장(서술형 후보로 표시된 문장)이면 흰 띠 위에 붙일 이름표, 아니면 빈 글"""
-    if not row.get("essay_candidate"):
-        return ""
-    role = str(row.get("essay_reason", "")).split("·")[0].strip()
-    return "★ 핵심 문장" + (f" · {role}" if role else "")
+def ppt_norm_sent(s) -> str:
+    """문장 비교용: 표시·문장부호·대소문자를 뺀 글"""
+    return re.sub(r"[^a-z0-9]+", " ", ppt_clean_eng(s).lower()).strip()
+
+def ppt_key_tag(row: Dict, topic: Dict = None) -> str:
+    """한판승 문장이 핵심 문장이면 형광펜 위에 붙일 이름표, 아니면 빈 글
+    핵심 문장 = 서술형 후보로 표시된 문장, 또는 AI가 고른 주제문(data['topic_sentence'], 문장 글로 찾음)"""
+    if row.get("essay_candidate"):
+        role = str(row.get("essay_reason", "")).split("·")[0].strip()
+        return "★ 핵심 문장" + (f" · {role}" if role else "")
+    if topic and topic.get("eng") and ppt_norm_sent(row.get("eng", "")) == ppt_norm_sent(topic["eng"]):
+        return f"★ 핵심 문장 · {str(topic.get('role') or '주제문').strip()}"
+    return ""
+
+def ppt_needs_topic(vdata: Dict) -> bool:
+    """서술형 후보 표시도, AI가 고른 주제문도 없는 한판승 지문"""
+    rows = vdata.get("analysis") or []
+    return bool(rows) and not any(r.get("essay_candidate") for r in rows) and not (vdata.get("topic_sentence") or {}).get("eng")
+
+def ppt_core_summary_pick(cp: Dict):
+    """PPT에 넣을 Core 요약문: (A)·(B) 빈칸이 제대로 있는 첫 번째 것 → (seed, 요약문) 또는 ("", None)
+    seed는 Core 교재와 같게 해서 고르는 단어 순서가 교재와 같음"""
+    pid = esc(cp.get("id", esc(cp.get("label", ""))))
+    for i, ps in enumerate((cp.get("data") or {}).get("summaries") or [], start=1):
+        if isinstance(ps, dict) and ppt_core_summary_parts(ps, False, f"{pid}_sum_{i}"):
+            return f"{pid}_sum_{i}", ps
+    return "", None
+
+def ppt_needs_glossary(cp: Dict) -> bool:
+    """PPT 요약문의 단어 뜻(data['summary_glossary'])이 없거나, 요약문이 바뀌어 다시 만들어야 하는 Core 지문"""
+    _, ps = ppt_core_summary_pick(cp)
+    if ps is None:
+        return False
+    g = (cp.get("data") or {}).get("summary_glossary") or {}
+    return not g.get("words") or ppt_norm_sent(g.get("eng", "")) != ppt_norm_sent(ps.get("eng", ""))
+
+def ppt_summary_vocab(cdata: Dict, ps: Dict):
+    """요약문 단어 뜻 → (정답 [(A, 단어, 뜻)], 그 밖의 단어 [(단어, 뜻)])
+    그 밖의 단어에서는 정답·함정 단어를 뺌 (고르기 슬라이드에서 답이 드러나지 않게). 요약문에 실제로 있는 단어만"""
+    eng = " " + re.sub(r"[^a-z'-]+", " ", str(ps.get("eng", "")).lower()) + " "
+    words = [w for w in ((cdata.get("summary_glossary") or {}).get("words") or []) if isinstance(w, dict)]
+    dic = {}
+    for w in words + [v for v in (cdata.get("core_vocab") or []) if isinstance(v, dict)]:
+        k = str(w.get("word", "")).strip().lower()
+        if k and str(w.get("meaning", "")).strip():
+            dic.setdefault(k, str(w["meaning"]).strip())
+    choice = {str(ps.get(k, "")).strip().lower() for k in ("blank_a", "blank_b", "distractor_a", "distractor_b")}
+    answers = [(t, str(ps.get(f"blank_{t.lower()}", "")).strip(), dic.get(str(ps.get(f"blank_{t.lower()}", "")).strip().lower(), ""))
+               for t in ("A", "B") if str(ps.get(f"blank_{t.lower()}", "")).strip()]
+    others, seen = [], set()
+    for w in words:
+        k = str(w.get("word", "")).strip().lower()
+        m = str(w.get("meaning", "")).strip()
+        if not k or not m or k in choice or k in seen or (" " + re.sub(r"[^a-z'-]+", " ", k).strip() + " ") not in eng:
+            continue
+        seen.add(k)
+        others.append((str(w["word"]).strip(), m))
+    return answers, others
+
+# ---- 수업용 PPT 빈칸 채우기 (AI): 핵심 문장 표시가 없는 지문의 주제문, PPT 요약문의 단어 뜻 ----
+#   PPT 만들기 자체는 AI를 쓰지 않음. 이 버튼으로 한 번 채워 저장해 두면 그다음부터는 토큰 0
+SCHEMA_PPT_TOPIC = {
+    "type": "object",
+    "properties": {"results": {"type": "array", "items": {"type": "object", "properties": {
+        "id": {"type": "string"}, "no": {"type": "integer"}, "role": {"type": "string"}}, "required": ["id", "no", "role"]}}},
+    "required": ["results"]
+}
+SCHEMA_PPT_GLOSSARY = {
+    "type": "object",
+    "properties": {"results": {"type": "array", "items": {"type": "object", "properties": {
+        "id": {"type": "string"},
+        "words": {"type": "array", "items": {"type": "object", "properties": {"word": {"type": "string"}, "meaning": {"type": "string"}}, "required": ["word", "meaning"]}}},
+        "required": ["id", "words"]}}},
+    "required": ["results"]
+}
+PPT_TOPIC_PROMPT = """너는 고등 영어 내신 강사다. 아래 지문마다 글의 주제문을 한 문장 골라 번호(no)로 답하라.
+- 주제문: 글의 주제·요지를 가장 직접 드러내는 문장. 드러난 주제문이 없으면 요지·결론·주장에 가장 가까운 문장.
+- role: 고른 문장의 역할을 한국어 2~6자로 (예: 주제문, 요지, 결론/주장, 핵심 주장).
+- id는 지문 앞 [ ] 안의 값을 그대로 쓴다. 지문마다 하나씩 빠짐없이 답한다."""
+PPT_GLOSSARY_PROMPT = """너는 고등 영어 내신 강사다. 아래 영어 요약문마다 고등학생이 모르거나 헷갈릴 만한 단어·숙어를 골라 문맥에 맞는 한국어 뜻을 달아라.
+- '보기'에 있는 (A)·(B) 정답 단어와 함정 단어는 반드시 넣는다.
+- 그 밖에 요약문에서 어려운 단어·숙어 4~10개. a, the, people, school처럼 쉬운 단어는 뺀다.
+- word는 요약문에 나온 철자·형태 그대로 (예: solicits, amplified). meaning은 문맥에 맞는 짧은 한국어 뜻 (예: 요청하다, 증폭된).
+- id는 요약문 앞 [ ] 안의 값을 그대로 쓴다. 요약문마다 하나씩 빠짐없이 답한다."""
+PPT_FILL_CHUNK = 8  # 한 번에 보내는 지문 수
+
+def ppt_fill_cost_krw(model_spec: str, n_topic: int, n_gloss: int) -> float:
+    """AI로 채우기 예상 비용(원). 생각(추론) 토큰까지 넉넉히 잡은 대략값"""
+    _, model = split_model_spec(model_spec)
+    calls = math.ceil(n_topic / PPT_FILL_CHUNK) + math.ceil(n_gloss / PPT_FILL_CHUNK)
+    inp = n_topic * 450 + n_gloss * 150 + calls * 350
+    out = n_topic * 120 + n_gloss * 350 + calls * 1500
+    return ai_cost_usd(model, inp, 0, 0, out) * 1400
+
+def ppt_fill_missing(model_spec: str, vic_items: List[Dict], core_items: List[Dict], logs: List[str]) -> (int, int):
+    """vic_items 중 핵심 문장이 없는 지문에 주제문(data['topic_sentence']),
+    core_items 중 단어 뜻이 없는 지문에 PPT 요약문 단어 뜻(data['summary_glossary'])을 채움 (받은 dict를 바로 고침, 저장은 부르는 쪽)
+    → (주제문 채운 수, 단어 뜻 채운 수)"""
+    from concurrent.futures import ThreadPoolExecutor
+    tp = [v for v in vic_items if ppt_needs_topic(v.get("data") or {})]
+    gl = [c for c in core_items if ppt_needs_glossary(c)]
+
+    def run_topic(chunk):
+        body, numbered = [], []
+        for k, v in enumerate(chunk):
+            rows = v["data"].get("analysis") or []
+            lines = [(i, ppt_clean_eng(r.get("eng", ""))) for i, r in enumerate(rows, start=1)]
+            numbered.append({i: s for i, s in lines if s})
+            body.append(f"[{k}]\n" + "\n".join(f"{i}. {s}" for i, s in lines if s))
+        res = llm_json(model_spec, [PPT_TOPIC_PROMPT, "\n\n".join(body)], SCHEMA_PPT_TOPIC, cache_first=True)
+        n = 0
+        for r in res.get("results") or []:
+            try:
+                k, no = int(str(r.get("id", "")).strip("[] ")), int(r.get("no"))
+            except (TypeError, ValueError):
+                continue
+            if 0 <= k < len(chunk) and no in numbered[k]:
+                chunk[k]["data"]["topic_sentence"] = {"eng": numbered[k][no], "role": str(r.get("role") or "주제문").strip()[:12] or "주제문"}
+                n += 1
+        return n
+
+    def run_gloss(chunk):
+        body, picked = [], []
+        for k, c in enumerate(chunk):
+            _, ps = ppt_core_summary_pick(c)
+            picked.append(ps)
+            opts = "  ".join(f"({t}) {ps.get(f'blank_{t.lower()}', '')} / {ps.get(f'distractor_{t.lower()}', '')}" for t in ("A", "B"))
+            one_line = " ".join(str(ps.get("eng", "")).split())
+            body.append(f"[{k}] {one_line}\n보기: {opts}")
+        res = llm_json(model_spec, [PPT_GLOSSARY_PROMPT, "\n\n".join(body)], SCHEMA_PPT_GLOSSARY, cache_first=True)
+        n = 0
+        for r in res.get("results") or []:
+            try:
+                k = int(str(r.get("id", "")).strip("[] "))
+            except (TypeError, ValueError):
+                continue
+            words = [{"word": str(w.get("word", "")).strip(), "meaning": str(w.get("meaning", "")).strip()}
+                     for w in (r.get("words") or []) if isinstance(w, dict) and str(w.get("word", "")).strip() and str(w.get("meaning", "")).strip()]
+            if 0 <= k < len(chunk) and words:
+                chunk[k].setdefault("data", {})["summary_glossary"] = {"eng": str(picked[k].get("eng", "")), "words": words}
+                n += 1
+        return n
+
+    jobs = [(run_topic, tp[i:i + PPT_FILL_CHUNK]) for i in range(0, len(tp), PPT_FILL_CHUNK)]
+    jobs += [(run_gloss, gl[i:i + PPT_FILL_CHUNK]) for i in range(0, len(gl), PPT_FILL_CHUNK)]
+    n_topic = n_gloss = 0
+    if not jobs:
+        return 0, 0
+    with ThreadPoolExecutor(max_workers=min(4, len(jobs))) as pool:
+        futs = [(fn, chunk, pool.submit(fn, chunk)) for fn, chunk in jobs]
+        for fn, chunk, f in futs:
+            try:
+                n = f.result()
+            except Exception as e:
+                logs.append(f"⚠️ {'주제문' if fn is run_topic else '단어 뜻'} {len(chunk)}개 묶음 실패: {e}")
+                continue
+            if fn is run_topic:
+                n_topic += n
+            else:
+                n_gloss += n
+    return n_topic, n_gloss
 
 def ppt_core_summary_parts(ps: Dict, reveal: bool, seed_key: str) -> list:
     """Core 요약문 한 개 → PPT 문단 조각 [(글, 굵게, 밑줄)]
@@ -3476,11 +3631,11 @@ def ppt_core_summary_parts(ps: Dict, reveal: bool, seed_key: str) -> list:
     spans.sort()
     if not spans or any(a[1] > b[0] for a, b in zip(spans, spans[1:])):
         return []
-    parts, pos = [], 0
+    parts, pos = [], 0  # 글은 모두 굵게 (빔에서 잘 보이게), 고르는 자리·정답은 밑줄까지
     for s, e, txt in spans:
-        parts += [(eng[pos:s], False, False), (txt, True, True)]
+        parts += [(eng[pos:s], True, False), (txt, True, True)]
         pos = e
-    parts.append((eng[pos:], False, False))
+    parts.append((eng[pos:], True, False))
     return [p for p in parts if p[0]]
 
 def build_class_ppt(passages: List[Dict], anatomy_list: List[Dict], voca_list: List[Dict], school: str, test_name: str, core_list: List[Dict] = None):
@@ -3703,47 +3858,72 @@ def build_class_ppt(passages: List[Dict], anatomy_list: List[Dict], voca_list: L
         paragraph(tf, head, chosen, YELLOW_TITLE, first=True, spacing=1.5)
         paragraph(tf, summary_text, chosen, WHITE, spacing=1.7, before=20)
 
-    def fit_parts(blocks, width, box_h, max_pt, min_pt):
-        """blocks = [(글, 크기 차이, 굵게, 줄간격, 위 여백pt)] 이 box_h에 다 들어가는 가장 큰 기준 크기"""
+    def summary_layout(blocks, vocab_lines, width, box_h, max_pt, min_pt):
+        """blocks = [(글, 크기 차이, 줄간격, 위 여백pt)] (모두 굵게) + 그 아래 단어 목록(4개 이상이면 두 줄로)이
+        box_h에 다 들어가는 가장 큰 기준 크기 → (기준 크기, 글 높이, 단어 크기, 단어 높이, 단어 칸들, 칸 폭)"""
+        two = len(vocab_lines) >= 4
+        half = math.ceil(len(vocab_lines) / 2)
+        cols = [vocab_lines[:half], vocab_lines[half:]] if two else [vocab_lines]
+        col_w = (width - 0.2) / 2 if two else width
+        plan = None
         for pt in range(max_pt, min_pt - 1, -1):
-            if sum(ppt_text_height_in(t, width, max(10, pt + d), b, sp, bf) for t, d, b, sp, bf in blocks if t) <= box_h:
-                return pt
-        return min_pt
+            h = sum(ppt_text_height_in(t, width, max(10, pt + d), True, sp, bf) for t, d, sp, bf in blocks if t)
+            v_pt = max(12, min(20, pt - 8))
+            v_h = max((ppt_text_height_in("\n".join(c), col_w, v_pt, True, 1.2) for c in cols if c), default=0.0)
+            plan = (pt, h, v_pt, v_h, cols, col_w)
+            if h + (0.15 + v_h if vocab_lines else 0) <= box_h:
+                break
+        return plan
 
-    def core_summary_slides(label, ps, seed_key):
-        """Core 요약문 하나로 (A)·(B) 단어 고르기 슬라이드 + 정답 슬라이드. 흰색·검은색만 써서 빔 색반전에도 잘 보이게"""
+    def vocab_columns(slide, cols, col_w, top, v_pt, v_h):
+        for c_i, col in enumerate(cols):
+            if col:
+                v_tf = textbox(slide, PPT_MARGIN_X + c_i * (col_w + 0.2), top, col_w, v_h)
+                for i, line in enumerate(col):
+                    paragraph(v_tf, line, v_pt, YELLOW_VOCAB, first=(i == 0), spacing=1.2)
+
+    def core_summary_slides(label, cdata, ps, seed_key):
+        """Core 요약문 하나로 (A)·(B) 단어 고르기 슬라이드 + 정답 슬라이드. 글은 모두 굵게 (빔에서 잘 보이게)
+        고르기: 정답·함정을 뺀 나머지 단어 뜻 · 정답: 정답 단어 뜻 + 나머지 단어 뜻"""
         q = ppt_core_summary_parts(ps, False, seed_key)
         a = ppt_core_summary_parts(ps, True, seed_key)
         if not q:
             return
-        width, top, box_h = PPT_CONTENT_W, 0.95, PPT_SLIDE_H - 0.95 - 0.35
+        answers, others = ppt_summary_vocab(cdata, ps)
+        other_lines = [f"• {w}: {m}" for w, m in others]
+        width, top, box_h = PPT_CONTENT_W, 0.95, PPT_SLIDE_H - 0.95 - 0.3
         ask, kor = "(A), (B)에 들어갈 알맞은 말을 고르세요.", ppt_clean_kor(ps.get("kor", ""))
-        q_text = "".join(t for t, _, _ in q)
 
         slide = new_slide()
         header(slide, label)
         head = "📝 요약문 완성 · 알맞은 말 고르기"
-        pt = fit_parts([(head, -4, True, 1.3, 0), (ask, -10, False, 1.2, 8), (q_text, 0, True, 1.7, 22)], width, box_h, 30, 14)
-        tf = textbox(slide, PPT_MARGIN_X, top, width, box_h)
+        q_text = "".join(t for t, _, _ in q)
+        pt, h, v_pt, v_h, cols, col_w = summary_layout([(head, -4, 1.3, 0), (ask, -10, 1.2, 8), (q_text, 0, 1.7, 22)],
+                                                       other_lines, width, box_h, 30, 14)
+        tf = textbox(slide, PPT_MARGIN_X, top, width, h)
         paragraph(tf, head, max(10, pt - 4), WHITE, first=True, spacing=1.3)
-        paragraph(tf, ask, max(10, pt - 10), WHITE, spacing=1.2, before=8, bold=False)
+        paragraph(tf, ask, max(10, pt - 10), WHITE, spacing=1.2, before=8)
         rich_paragraph(tf, q, pt, WHITE, spacing=1.7, before=22)
+        if other_lines:
+            vocab_columns(slide, cols, col_w, top + h + 0.15, v_pt, v_h)
         slide.notes_slide.notes_text_frame.text = (f"[정답] (A) {ps.get('blank_a', '')}  (B) {ps.get('blank_b', '')}"
                                                    + (f"\n[해석] {kor}" if kor else ""))
 
         slide = new_slide()
         header(slide, label)
         head = "✅ 정답 확인"
-        ans_line = f"(A) {str(ps.get('blank_a', '')).strip()}    (B) {str(ps.get('blank_b', '')).strip()}"
+        ans_text = "\n".join(f"({t}) {w}" + (f": {m}" if m else "") for t, w, m in answers)
         a_text = "".join(t for t, _, _ in a)
-        pt = fit_parts([(head, -4, True, 1.3, 0), (a_text, 0, False, 1.7, 18), (ans_line, 0, True, 1.3, 14), (kor, -8, False, 1.3, 14)],
-                       width, box_h, 30, 12)
-        tf = textbox(slide, PPT_MARGIN_X, top, width, box_h)
+        pt, h, v_pt, v_h, cols, col_w = summary_layout([(head, -4, 1.3, 0), (a_text, 0, 1.7, 18), (ans_text, -2, 1.3, 14), (kor, -8, 1.3, 14)],
+                                                       other_lines, width, box_h, 30, 12)
+        tf = textbox(slide, PPT_MARGIN_X, top, width, h)
         paragraph(tf, head, max(10, pt - 4), WHITE, first=True, spacing=1.3)
         rich_paragraph(tf, a, pt, WHITE, spacing=1.7, before=18)
-        paragraph(tf, ans_line, pt, WHITE, spacing=1.3, before=14)
+        paragraph(tf, ans_text, max(10, pt - 2), WHITE, spacing=1.3, before=14)
         if kor:
-            paragraph(tf, kor, max(10, pt - 8), WHITE, spacing=1.3, before=14, bold=False)
+            paragraph(tf, kor, max(10, pt - 8), WHITE, spacing=1.3, before=14)
+        if other_lines:
+            vocab_columns(slide, cols, col_w, top + h + 0.15, v_pt, v_h)
         syn = [f"({k}) {ppt_clean_kor(ps.get(f'synonyms_{k.lower()}', ''))}" for k in ("A", "B") if ps.get(f"synonyms_{k.lower()}")]
         if syn:
             slide.notes_slide.notes_text_frame.text = "[유의어·함정] " + "\n".join(syn)
@@ -3759,32 +3939,51 @@ def build_class_ppt(passages: List[Dict], anatomy_list: List[Dict], voca_list: L
         vdata, adata = v.get("data", {}), anatomy.get(label, {}).get("data", {})
         title_slide(label, str(adata.get("english_title") or "Reading Comprehension").strip(), str(adata.get("korean_title") or "").strip())
         voca_items = voca.get(label, {}).get("data", {}).get("voca_list", [])
+        topic = vdata.get("topic_sentence") if isinstance(vdata.get("topic_sentence"), dict) else None
         for row in vdata.get("analysis", []):
             sent = ppt_clean_eng(row.get("eng", ""))
             if not sent:
                 continue
             vocabs = [f"{str(x.get('word', '')).strip()}: {str(x.get('meaning', '')).strip()}" for x in (row.get("sentence_vocab") or []) if x.get("word")]
             sentence_slide(label, sent, ppt_clean_kor(row.get("kor", "")), vocabs, ppt_note_terms(sent, voca_items, vdata.get("keywords", [])),
-                           key_tag=ppt_key_tag(row))
+                           key_tag=ppt_key_tag(row, topic))
         summary_slide(label, str(vdata.get("summary", "")).strip())
         cp = core.get(label)
         if cp:
-            # Core 요약문 중 (A)·(B) 빈칸이 제대로 있는 첫 번째 것 하나로 고르기 슬라이드 (seed는 Core 교재와 같게)
-            pid = esc(cp.get("id", esc(label)))
-            for i, ps in enumerate((cp.get("data") or {}).get("summaries") or [], start=1):
-                if isinstance(ps, dict) and ppt_core_summary_parts(ps, False, f"{pid}_sum_{i}"):
-                    core_summary_slides(label, ps, f"{pid}_sum_{i}")
-                    break
+            seed_key, ps = ppt_core_summary_pick(cp)
+            if ps:
+                core_summary_slides(label, cp.get("data") or {}, ps, seed_key)
     stream = io.BytesIO()
     prs.save(stream)
     return stream.getvalue(), len(prs.slides)
 
-def render_class_ppt_section(sel_passages: List[Dict], school_name: str):
+def render_class_ppt_section(sel_passages: List[Dict], school_name: str, text_model: str = ""):
     """한판승 탭: 고른 지문으로 수업용 PPT 만들기"""
     with st.expander(f"🎬 선택한 {len(sel_passages)}개 지문으로 수업용 PPT 만들기 (AI 사용 안 함 · 토큰 0)"):
         st.caption("검은 배경 4:3 슬라이드 · 영어 문장 32pt(긴 문장만 줄어듦) · 제목은 Self-Note, 요점 정리는 한판승에서 가져옵니다. "
                    "오른쪽 아래 10pt 유의어와 발표자 노트도 함께 들어갑니다. "
-                   "핵심 문장은 흰 띠 위 검은 글씨로 표시하고, 끝에 Core 요약문 (A)·(B) 고르기와 정답 슬라이드가 붙습니다.")
+                   "핵심 문장(주제문)은 흰 형광펜에 검은 글씨로 표시하고, 끝에 Core 요약문 (A)·(B) 고르기와 정답 슬라이드가 붙습니다.")
+
+        # 핵심 문장 표시가 없는 지문 · 요약문 단어 뜻이 없는 지문은 AI로 한 번 채워 저장 (그다음부터는 토큰 0)
+        core_by = {p["label"]: p for p in (st.session_state.get("saved_c") or [])}
+        need_t = [p for p in sel_passages if ppt_needs_topic(p.get("data") or {})]
+        need_g = [core_by[p["label"]] for p in sel_passages if p.get("label") in core_by and ppt_needs_glossary(core_by[p["label"]])]
+        if (need_t or need_g) and text_model:
+            parts = ([f"핵심 문장 표시가 없는 지문 {len(need_t)}개"] if need_t else []) + ([f"요약문 단어 뜻이 없는 지문 {len(need_g)}개"] if need_g else [])
+            st.info(f"🖍️ {' · '.join(parts)}가 있어요. AI로 한 번 채워 저장하면 PPT에 형광펜과 단어 뜻이 들어가요.")
+            won = ppt_fill_cost_krw(text_model, len(need_t), len(need_g))
+            if st.button(f"🤖 AI로 채워 저장 (예상 약 {won:,.0f}원 · {ai_model_label(text_model)})", key="ppt_fill_btn"):
+                logs = []
+                with st.spinner("주제문과 요약문 단어 뜻을 고르는 중이에요..."):
+                    n_t, n_g = ppt_fill_missing(text_model, need_t, need_g, logs)
+                if n_t:
+                    save_to_file(VICTORY_FILE, st.session_state.saved_v)
+                if n_g:
+                    save_to_file(CORE_FILE, st.session_state.saved_c)
+                st.session_state.pop("ppt_file", None)  # 예전에 만든 PPT는 새 내용이 없으니 지움
+                for line in logs:
+                    st.warning(line)
+                st.success(f"✅ 주제문 {n_t}개 · 요약문 단어 뜻 {n_g}개를 채워 저장했어요. PPT를 다시 만들어 주세요.")
         p_col1, p_col2, p_col3 = st.columns([2, 2, 1.6])
         ppt_school = p_col1.text_input("🏫 머리말 학교명", value=school_name, key="ppt_school")
         ppt_test = p_col2.text_input("📝 머리말 시험명", value="", placeholder="예: 고1 10모", key="ppt_test")
@@ -4015,7 +4214,7 @@ def render_library_manager(prefix: str, title_name: str, file_path: str, css_str
         render_permanent_json_editor(prefix, target_type, file_path, sel_passages, saved_list)
 
         if target_type == "victory":
-            render_class_ppt_section(sel_passages, school_name)
+            render_class_ppt_section(sel_passages, school_name, text_model)
 
         if target_type == "voca":
             sel_passages = render_voca_choice_option(prefix, sel_passages, text_model)
