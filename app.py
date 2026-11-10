@@ -5644,8 +5644,8 @@ QB_RULES_HISTORY = [
 
 def qb_ver(r: Dict) -> str:
     """문제의 출제 규칙 버전 ('1.0'·'1.1' …, 실제 기출은 빈 문자열)"""
-    if r.get("difficulty") == QB_GICHUL_LEVEL:
-        return ""
+    if r.get("difficulty") == QB_GICHUL_LEVEL or (r.get("content") or {}).get("import"):
+        return ""  # 실제 기출·가져온 TEST 문제는 버전 없음
     return str((r.get("content") or {}).get("ver") or "1.0")
 
 def qb_ver_mix(qs: List[Dict]) -> str:
@@ -6431,8 +6431,13 @@ def gichul_bank_rows(gclient, model: str, exam_id: str, res: Dict, mock_by_label
     return rows
 
 def qb_existing_gichul_keys(rows: List[Dict]) -> set:
-    return {(r["content"]["source"]["exam_id"], r["content"]["source"]["no"]) for r in rows
-            if r.get("difficulty") == QB_GICHUL_LEVEL and (r.get("content") or {}).get("source")}
+    """이미 수록한 실제 기출 (시험지 번호, 문항 번호). 파일로 가져온 기출처럼 시험지 번호가 없는 것은 건너뜀"""
+    out = set()
+    for r in rows:
+        src = (r.get("content") or {}).get("source") or {}
+        if r.get("difficulty") == QB_GICHUL_LEVEL and src.get("exam_id"):
+            out.add((src["exam_id"], str(src.get("no", ""))))
+    return out
 
 # ---- 시험지 구성 ----
 def qb_set_key(r: Dict):
@@ -7281,10 +7286,15 @@ def render_qbank_exam(qs: List[Dict], meta: Dict, gidx: Dict[str, List[Dict]]) -
         src = c.get("source") if r["difficulty"] == QB_GICHUL_LEVEL else None
         if src:
             badge = (f"<span class='bd real'>실제 기출</span> {html.escape(src.get('exam', ''))} {html.escape(src.get('no', ''))}번"
-                     + (f" · {html.escape(re.sub(r'\s*점\s*$', '', str(src['points'])))}점" if src.get("points") else ""))
+                     + (f" · {html.escape(re.sub(r'\s*점\s*$', '', str(src['points'])))}점" if src.get("points") else "")
+                     + (" <span class='hist'>· TEST 수록</span>" if c.get("import") else ""))
         else:
-            style = f"{html.escape(r.get('school') or '')} 스타일 · " if meta.get("show_style", True) else ""
-            badge = f"<span class='bd var'>변형 · {style}{html.escape(r['difficulty'])} · v{html.escape(qb_ver(r))}</span>"  # 🎣 표시는 학생이 알아채지 않게 해설 쪽에만
+            style = f"{html.escape(r.get('school') or '')} 스타일 · " if (meta.get("show_style", True) and r.get("school")) else ""
+            imp = c.get("import")
+            if imp:
+                badge = f"<span class='bd var'>TEST 수록 · {style}{html.escape(r['difficulty'])}</span> <span class='hist'>{html.escape(imp.get('set', ''))}</span>"
+            else:
+                badge = f"<span class='bd var'>변형 · {style}{html.escape(r['difficulty'])} · v{html.escape(qb_ver(r))}</span>"  # 🎣 표시는 학생이 알아채지 않게 해설 쪽에만
         t = f"▶ {html.escape(r['passage_label'])} · {html.escape(r['q_type'])} {badge}"
         if meta.get("show_gichul"):
             groups = {}
@@ -7432,10 +7442,37 @@ QB_PICKER_CSS = """<style>
 [class*="st-key-qb_card_"] [data-testid="stBaseButton-tertiary"]:disabled { color: rgba(128,128,128,.6) !important; }
 </style>"""
 
+# 문제 은행 개수표 (지문 칩 숫자·쌓인 문제 수·주간 클리닉 모자란 문제 계산에 씀)
+#   2026-11-10: 예전엔 1분마다 은행 전체 목록(6,900문항에 약 1.1MB)을 다시 읽었음 → 문항이 늘수록 DB 전송량이 커짐
+#   이제 1분마다 '문항 수 + 가장 최근 저장 시각'(몇백 바이트)만 보고, 바뀌었을 때만 목록을 다시 읽음
+#   은행의 지문·유형·난이도·학교 칸은 문제를 넣거나 지울 때만 바뀌므로(나중에 고치는 곳은 선지 해석 content뿐) 이 확인으로 빠짐없이 알 수 있음
+#   → 새 숫자가 나오는 시점은 예전과 같은 1분 안. 확인이 실패하면 예전처럼 1분마다 목록을 다시 읽음
 @st.cache_data(ttl=60, show_spinner=False)
-def qb_bank_summary(_sb, labels: tuple) -> List[Dict]:
-    """지문별·유형별 개수 표시용 (가벼운 열만, 1분마다 새로 읽음)"""
+def _qb_bank_version(_sb) -> str:
+    if _sb is None:
+        return str(os.path.getmtime(QB_FILE)) if os.path.exists(QB_FILE) else "0"
+    n = _sb.table(QB_TABLE).select("id", count="exact").limit(1).execute().count
+    last = _sb.table(QB_TABLE).select("created_at").order("created_at", desc=True).limit(1).execute().data or []
+    return f"{n}|{last[0].get('created_at', '') if last else ''}"
+
+@st.cache_data(ttl=600, max_entries=4, show_spinner=False)
+def _qb_bank_summary_at(_sb, labels: tuple, ver: str) -> List[Dict]:
     return qb_fetch(_sb, list(labels), "id,passage_label,q_type,difficulty,school")
+
+def qb_bank_summary(_sb, labels: tuple) -> List[Dict]:
+    """지문별·유형별 개수 표시용 (가벼운 열만). 은행이 바뀌었을 때만 다시 읽음"""
+    try:
+        ver = _qb_bank_version(_sb)
+    except Exception:
+        ver = f"t{int(time.time() // 60)}"  # 확인이 실패하면 예전처럼 1분마다 다시 읽음
+    return _qb_bank_summary_at(_sb, labels, ver)
+
+def _qb_bank_summary_clear():
+    """문제를 넣거나 지운 화면에서 바로 새 숫자를 보이게 (예전 qb_bank_summary.clear()와 같은 역할)"""
+    _qb_bank_version.clear()
+    _qb_bank_summary_at.clear()
+
+qb_bank_summary.clear = _qb_bank_summary_clear
 
 # 저장한 시험지 기록: 시험지마다 넣은 문항 id → 다음 시험지에서 '이미 낸 문항 빼기' (app_storage 문서 하나, 읽기는 1분 캐시)
 QB_EXAM_LOG_FILE = os.path.join(BASE_DIR, "qb_exam_log.json")
@@ -7539,6 +7576,376 @@ def render_exam_archive(sb, labels_all: set, text_model: str, academy_name: str,
             render_choice_trans_ui(sb, "qb_arch_tr", qids, title, text_model, academy_name, school_name)
             with st.expander("미리 보기", expanded=False):
                 components.html(page, height=850, scrolling=True)
+
+# =============================
+# 📥 TEST 문제 가져오기 (2026-11-10): 따로 만든 TEST의 문제 파일(CSV·엑셀)을 문제 은행에 넣음 — AI 비용 없음
+#   - 형식: 번호·구분·학교·학년·지문 출처·원 시험·원 문항번호·배점·유형·난이도·발문·보기·요약문·지문·선택지·정답·해설·헷갈리는 포인트·출제 장치·수록 시험지·제작일·문항ID
+#   - 지문은 원문 라이브러리 본문과 4단어 묶음을 비교해 그 지문(여러 단락이면 '4-3 + 4-4' 이어 붙인 지문)에 넣음.
+#     많이 바꿔 쓴 지문은 '지문 출처'(예: 2024 고1 10월 학평 33번)로 찾고, 원문 라이브러리에 없으면 넣지 않고 알려 줌
+#   - 중복은 넣지 않음 (기존 문제는 지우지 않음): 같은 문항ID(같은 파일을 또 올림) · 내용이 같은 문제 · 발문·선지가 거의 같은 문제 · 은행에 이미 있는 같은 실제 기출
+#   - 넣은 문제는 content['import']에 수록 시험지·문항ID 등을 남겨 시험지에 'TEST 수록'으로 따로 표시, 시험지 만들기에서 섞기·빼기·이것만 고름
+#   - 파일 하나로 넣은 문제는 한 번에 되돌릴 수 있게 qb_import_log 문서에 문제 id를 남김
+# =============================
+QB_IMPORT_LOG_FILE = os.path.join(BASE_DIR, "qb_import_log.json")
+QB_IMPORT_FILTER = ["함께 섞기", "빼기", "이것만"]
+QB_IMPORT_TYPE_RULES = [  # 위에서부터 먼저 맞는 것 (파일의 '유형' 이름 → 문제 은행 유형)
+    (r"서술형.*(어법|고쳐)", "서술형 (어법 수정)"), (r"서술형", "서술형 (조건 영작)"),
+    (r"어법.*조합|어법.*것만", "어법 (조합형)"), (r"어법", "어법 (단일)"),
+    (r"낱말|어휘", "낱말 (문맥상)"), (r"삽입", "삽입"), (r"순서", "순서"), (r"무관", "무관한 문장"),
+    (r"요약", "요약문 (A)(B)"), (r"일치\s*조합|불일치\s*조합|보기.*(일치|고른)|(일치|고른).*보기", "<보기> 일치 조합형"),
+    (r"소제목|빈칸|연결어|영작|영어\s*표현", "빈칸"),  # '빈칸 추론'은 빈칸 (추론보다 먼저)
+    (r"함축|밑줄\s*의미|지칭", "함축 의미"), (r"제목", "제목"), (r"주제", "주제"), (r"요지|주장", "요지·주장"),
+    (r"추론", "추론 (추론 가능·불가)"),  # '주제 추론'·'함축 의미 추론'은 위에서 그 유형으로
+    (r"일치|답할\s*수\s*없|알\s*수\s*없", "내용 일치·불일치"),
+]
+
+def qb_import_type(t: str, stem: str = "") -> str:
+    for pat, qt in QB_IMPORT_TYPE_RULES:
+        if re.search(pat, str(t)):
+            return qt
+    for pat, qt in QB_IMPORT_TYPE_RULES:  # 유형 이름으로 못 정하면 발문으로
+        if re.search(pat, str(stem)):
+            return qt
+    return ""
+
+def _imp_u(t) -> str:
+    """【…】 표시 → <u>…</u>"""
+    return re.sub(r"【\s*(.*?)\s*】", r"<u>\1</u>", str(t or "")).strip()
+
+def _imp_choices(t) -> List[str]:
+    parts = [x.strip() for x in re.split(r"\s*[①②③④⑤]\s*", str(t or "").strip())]
+    return parts[1:] if parts and not parts[0] else [x for x in parts if x]
+
+def _imp_words(t) -> List[str]:
+    return re.findall(r"[a-z]+", re.sub(r"【[^】]*[가-힣][^】]*】|[가-힣]+|<[^>]+>", " ", str(t or "")).lower())
+
+def _imp_norm(t) -> str:
+    return re.sub(r"[^a-z0-9가-힣]", "", re.sub(r"<[^>]+>", "", str(t or "")).lower())
+
+def _imp_key(t) -> str:
+    """지문 이름 비교용: 띄어쓰기·'NE' 없애고 괄호 속 이름은 첫 글자만 ('NE능률(오선영)' = '능률(오)')"""
+    return re.sub(r"\(([가-힣])[가-힣]*\)", r"(\1)", re.sub(r"\s+|NE", "", str(t)))
+
+def _imp_hint_label(src: str, labels: List[str]) -> str:
+    """'2024 고1 10월 학평 33번' → '[2024년 10월 고1] 33번' · '공통영어2 능률(오) 4과 4-6' → '[공통영어2 NE능률(오선영) 4과] 4-6' (원문 라이브러리에 있을 때만)"""
+    src = str(src)
+    m = re.search(r"(20\d{2})\s*년?\s*(고\s*[123])\s*(\d{1,2})\s*월.*?(\d{2}(?:\s*[~\-]\s*\d{2})?)\s*번", src) or \
+        re.search(r"(20\d{2})\s*년?\s*(\d{1,2})\s*월\s*(고\s*[123]).*?(\d{2}(?:\s*[~\-]\s*\d{2})?)\s*번", src)
+    if m:
+        y, a, b, n = m.groups()
+        g, mo = (a, b) if a.startswith("고") else (b, a)
+        cand = f"[{y}년 {int(mo)}월 {g.replace(' ', '')}] {re.sub(r'\s*[~\-]\s*', '~', n)}번"
+        if cand in labels:
+            return cand
+    m = re.search(r"(\d+-\d+(?:-\d+)?)\s*$", src)
+    if m:
+        key = _imp_key(src[:m.start()])
+        for l in labels:
+            mm = re.match(r"\[([^\]]+)\]\s*(\S+)$", l)
+            if mm and mm.group(2) == m.group(1) and _imp_key(mm.group(1)) in key:
+                return l
+    return ""
+
+def _imp_exam_key(text: str) -> str:
+    """'운양고 2025학년도 1학년 2학기 2차(기말)' · '운양고 25년 2학기 기말 고1' → '운양|25|2|기말|1'"""
+    t = str(text)
+    sc = "운양" if "운양" in t else ("제일" if "제일" in t else "")
+    y = re.search(r"(?:20)?(\d{2})\s*(?:년|학년도)", t)
+    term = re.search(r"(\d)\s*학기", t)
+    kind = "중간" if re.search(r"중간|1\s*차", t) else ("기말" if re.search(r"기말|2\s*차", t) else "")
+    g = re.search(r"고\s*([123])(?!\d)|([123])\s*학년", t)
+    return "|".join([sc, y.group(1) if y else "", term.group(1) if term else "", kind, next((x for x in (g.groups() if g else ()) if x), "")])
+
+def _imp_dup_text(c: Dict, qt: str) -> str:
+    """거의 같은 문제인지 비교할 글 — 유형마다 문제를 가르는 부분 (순서 선지·어법 조합 선지처럼 모든 문제가 같은 부분만으로 비교하지 않음)"""
+    u = " ".join(re.findall(r"<u>(.*?)</u>", str(c.get("passage", "")), flags=re.S))
+    ch = "".join(map(str, c.get("choices") or []))
+    if qt in ("어법 (단일)", "어법 (조합형)", "낱말 (문맥상)", "무관한 문장", "서술형 (어법 수정)"):
+        body = u + ch
+    elif qt == "삽입":
+        body = str(c.get("given", "")) or str(c.get("passage", ""))
+    elif qt == "순서":
+        body = str(c.get("given", "")) + str(c.get("passage", ""))
+    else:
+        body = str(c.get("stem", "")) + str(c.get("box", "")) + ch
+    return _imp_norm(body)
+
+def _imp_no(no) -> str:
+    """문항 번호 비교용: '서술형 1'과 '1'을 다르게"""
+    s_ = str(no or "")
+    return ("서" if re.search(r"서|논", s_) else "") + re.sub(r"\D", "", s_)
+
+def qb_import_read(data: bytes, fname: str) -> List[Dict]:
+    """CSV(UTF-8·CP949)·엑셀 → 줄 목록 (칸 이름은 첫 줄)"""
+    if str(fname).lower().endswith((".xlsx", ".xls")):
+        df = pd.read_excel(io.BytesIO(data), dtype=str).fillna("")
+    else:
+        txt = None
+        for enc in ("utf-8-sig", "cp949", "utf-8"):
+            try:
+                txt = data.decode(enc)
+                break
+            except Exception:
+                continue
+        df = pd.read_csv(io.StringIO(txt or ""), dtype=str).fillna("")
+    df.columns = [str(c).strip() for c in df.columns]
+    return df.to_dict("records")
+
+def qb_import_parse(sb, data: bytes, fname: str, mock_lib: List[Dict]) -> Dict:
+    """파일 → 넣을 문제 행 + 건너뛴 문항(이유) · AI 호출 없음"""
+    recs = qb_import_read(data, fname)
+    labels = [p["label"] for p in mock_lib]
+    by_label = {p["label"]: p for p in mock_lib}
+    lib = []
+    for pp in mock_lib:
+        ws = _imp_words(pp.get("body_text", ""))
+        if len(ws) > 20:
+            lib.append((pp["label"], set(zip(ws, ws[1:], ws[2:], ws[3:])), {w for w in ws if len(w) >= 5}))
+    out, skipped, memo, pending = [], [], {}, []
+
+    def match(text, src):
+        ws = _imp_words(text)
+        g, cw = set(zip(ws, ws[1:], ws[2:], ws[3:])), {w for w in ws if len(w) >= 5}
+        sc = []
+        for lab, lg, lc in lib:
+            inter = len(g & lg)
+            sc.append((inter / max(1, len(g)), inter / max(1, len(lg)), len(cw & lc) / max(1, len(cw | lc)), lab))
+        sc.sort(reverse=True)
+        full = [x for x in sc if x[1] >= 0.6]
+        if full:
+            grp = {}
+            for x in full:
+                m_ = re.match(r"(\[[^\]]+\])\s*(.+)$", x[3])
+                grp.setdefault(m_.group(1) if m_ else "", []).append(x[3])
+            best_g = max(grp.values(), key=len)
+            if len(best_g) >= 2 and all(re.match(r"\[[^\]]+\]\s*\S+$", l) for l in best_g):
+                parts = sorted(best_g, key=lambda l: natural_sort_key({"label": l}))
+                pre = re.match(r"(\[[^\]]+\]\s*)", parts[0]).group(1)
+                return parts[0] + "".join(QB_LINK_JOIN + l[len(pre):] for l in parts[1:]), "이어 붙인 지문"
+            return best_g[0], "지문 같음"
+        if sc and sc[0][0] >= 0.5:
+            return sc[0][3], "지문 같음"
+        h = _imp_hint_label(src, labels)
+        if h:
+            return h, "재진술 지문 · 출처로 찾음"
+        return "", ""
+
+    for i, r in enumerate(recs, 1):
+        text = str(r.get("지문", "")).strip()
+        if not text:
+            skipped.append((r, "지문이 비어 있음"))
+            continue
+        lab, how = match(text, r.get("지문 출처", ""))
+        if lab:
+            memo.setdefault(str(r.get("지문 출처", "")).strip(), lab)
+        pending.append((r, lab, how))
+    rows_in = []
+    for r, lab, how in pending:
+        if not lab:
+            m_lab = memo.get(str(r.get("지문 출처", "")).strip())
+            if m_lab:  # 같은 '지문 출처'의 다른 문항이 찾은 지문 (단어가 어느 정도는 겹칠 때만)
+                ws = {w for w in _imp_words(r.get("지문", "")) if len(w) >= 5}
+                lw = {w for w in _imp_words(by_label.get(qb_link_parts(m_lab)[1][0], {}).get("body_text", "")) if len(w) >= 5}
+                if len(ws & lw) / max(1, len(ws | lw)) >= 0.25:
+                    lab, how = m_lab, "재진술 지문 · 같은 출처로 찾음"
+        if not lab:
+            skipped.append((r, f"원문 라이브러리에 없는 지문 ({r.get('지문 출처', '')})"))
+            continue
+        rows_in.append((r, lab, how))
+
+    # 이미 은행에 있는 문제 (같은 지문들만 읽음)
+    want_labels = sorted({x for _, lab, _ in rows_in for x in [lab] + qb_link_parts(lab)[1]})  # 이어 붙인 지문의 각 단락도 (그쪽에 저장된 실제 기출과 비교)
+    exist = qb_fetch(sb, want_labels) if rows_in else []
+    exist_ids = {str((x.get("content") or {}).get("import", {}).get("id", "")) for x in exist if (x.get("content") or {}).get("import")}
+    exist_sig = {(x["passage_label"], qb_content_sig(x.get("content"))) for x in exist}
+    exist_real = {(_imp_exam_key(((x.get("content") or {}).get("source") or {}).get("exam", "")),
+                   _imp_no(((x.get("content") or {}).get("source") or {}).get("no", "")))
+                  for x in exist if x.get("difficulty") == QB_GICHUL_LEVEL}
+    by_lab_exist = {}
+    for x in exist:
+        by_lab_exist.setdefault(x["passage_label"], []).append(x)
+    import difflib
+    batch = uuid.uuid4().hex[:8]
+    seen_sig = set()
+    for r, lab, how in rows_in:
+        qt = qb_import_type(r.get("유형", ""), r.get("발문", ""))
+        if not qt:
+            skipped.append((r, f"유형을 알 수 없음 ({r.get('유형', '')})"))
+            continue
+        imp_id = str(r.get("문항ID", "")).strip()
+        if imp_id and imp_id in exist_ids:
+            skipped.append((r, "이미 넣은 문항 (같은 문항ID)"))
+            continue
+        kind = str(r.get("구분", "")).strip()
+        stem = _imp_u(r.get("발문", ""))
+        box = str(r.get("보기·요약문", "") or r.get("보기", "")).strip()
+        if box and "<보기>" not in stem and re.search(r"것만을\s*에서|만을\s*에서", stem):
+            stem = re.sub(r"(것만을|만을)\s*에서", r"\1 <보기>에서", stem)
+        passage, given = _imp_u(r.get("지문", "")), ""
+        choices = _imp_choices(r.get("선택지", ""))
+        if qt == "순서" and "(A)" in passage:
+            k = passage.index("(A)")
+            given, passage = passage[:k].strip(), re.sub(r"\s*\((B|C|D)\)\s*", lambda m_: f"\n({m_.group(1)}) ", passage[k:]).strip()
+        if qt == "삽입" and re.search(r"\(\s*①\s*\)", passage):
+            m_ = re.match(r"(.+?[.!?][\"”’']?)\s+(?=[A-Z“\"‘'(])", passage)  # 지문 맨 앞 문장 = 주어진 문장
+            if m_ and not re.search(r"\(\s*[①-⑤]\s*\)", m_.group(1)):
+                given, passage = m_.group(1).strip(), passage[m_.end():].strip()
+        if qt == "<보기> 일치 조합형" and box:
+            box = re.sub(r"\s+(?=[ⓑⓒⓓⓔⓕⓖⓗ]\s)", "\n", box)
+        if qt in QB_MARK_TYPES:
+            if [c.strip() for c in choices] == list("ⓐⓑⓒⓓⓔ"):  # '① ⓐ ② ⓑ …' → 지문 속 ⓐ~ⓔ를 ①~⑤로
+                for a, b in zip("ⓐⓑⓒⓓⓔ", "①②③④⑤"):
+                    passage, stem = passage.replace(a, b), stem.replace(a, b)
+            choices = [""] * 5
+        elif qt in QB_ESSAY_TYPES:
+            choices = []
+        if qt not in QB_ESSAY_TYPES and qt not in QB_MARK_TYPES and len(choices) != 5:
+            skipped.append((r, f"선택지가 5개가 아님 ({len(choices)}개)"))
+            continue
+        ans_raw = str(r.get("정답", "")).strip()
+        answer = (ans_raw if ans_raw and ans_raw != "서술형" else str(r.get("해설", "")).strip()) if qt in QB_ESSAY_TYPES else qb_norm_answer(ans_raw)
+        if qt not in QB_ESSAY_TYPES and not answer:
+            skipped.append((r, f"정답을 읽을 수 없음 ({ans_raw})"))
+            continue
+        lv = str(r.get("난이도", "")).strip()
+        diff = QB_GICHUL_LEVEL if (kind == "기출" or lv == "기출") else (lv if lv in QB_LEVELS else "상")
+        focus = " / ".join(x for x in (str(r.get("헷갈리는 포인트", "")).strip(), str(r.get("출제 장치", "")).strip()) if x)
+        content = {"stem": stem, "given": given, "passage": passage, "box": box, "choices": choices, "answer": answer,
+                   "explanation": [x for x in str(r.get("해설", "")).split("\n") if x.strip()], "focus": focus,
+                   "import": {"set": str(r.get("수록 시험지", "")).strip(), "kind": kind, "id": imp_id, "date": str(r.get("제작일", "")).strip(),
+                              "file": fname, "batch": batch, "orig_type": str(r.get("유형", "")).strip(), "points": str(r.get("배점", "")).strip(),
+                              "grade": str(r.get("학년", "")).strip(), "match": how}}
+        if not qb_shape_ok(content, qt):
+            skipped.append((r, "문제 형식이 맞지 않음 (지문 속 ①~⑤·선택지를 확인해 주세요)"))
+            continue
+        if diff == QB_GICHUL_LEVEL:
+            content["source"] = {"exam": str(r.get("원 시험", "")).strip(), "no": str(r.get("원 문항번호", "")).strip(),
+                                 "points": str(r.get("배점", "")).strip(), "exam_id": ""}
+            key = (_imp_exam_key(r.get("원 시험", "")), _imp_no(r.get("원 문항번호", "")))
+            if key[1] and key in exist_real:
+                skipped.append((r, "은행에 이미 있는 같은 실제 기출"))
+                continue
+        sig = (lab, qb_content_sig(content))
+        if sig in exist_sig or sig in seen_sig:
+            skipped.append((r, "내용이 같은 문제가 이미 있음"))
+            continue
+        near = None
+        a_txt = _imp_dup_text(content, qt)
+        for x in by_lab_exist.get(lab, []):
+            c = x.get("content") or {}
+            if x["q_type"] != qt or str(c.get("answer", "")) != answer:
+                continue
+            b_txt = _imp_dup_text(c, qt)
+            if a_txt and b_txt and difflib.SequenceMatcher(None, a_txt, b_txt).ratio() >= 0.92:
+                near = x
+                break
+        if near:
+            skipped.append((r, "발문·선지가 거의 같은 문제가 이미 있음"))
+            continue
+        seen_sig.add(sig)
+        if imp_id:
+            exist_ids.add(imp_id)
+        first = by_label.get(qb_link_parts(lab)[1][0], {})
+        school = str(r.get("학교", "")).strip()
+        if diff == QB_GICHUL_LEVEL:  # 실제 기출은 TEST의 학교가 아니라 원래 시험의 학교
+            orig = str(r.get("원 시험", ""))
+            school = "운양고" if "운양" in orig else ("제일고" if "제일" in orig else school)
+        row = {"id": str(uuid.uuid4()), "passage_label": lab, "exam_key": first.get("exam_key", ""), "number": str(first.get("number", "")),
+               "q_type": qt, "difficulty": diff, "school": school if school in QB_SCHOOLS else "", "content": content}
+        out.append(row)
+        by_lab_exist.setdefault(lab, []).append(row)  # 같은 파일 안에서 두 시험지에 같은 문제가 들어간 경우도 하나만
+    return {"rows": out, "skipped": skipped, "batch": batch, "total": len(recs)}
+
+@st.cache_data(ttl=60, show_spinner=False)
+def qb_import_log(_sb) -> List[Dict]:
+    return (_store_get(_sb, QB_IMPORT_LOG_FILE, {}) or {}).get("batches", [])
+
+def qb_import_log_put(sb, batches: List[Dict]):
+    _store_put(sb, QB_IMPORT_LOG_FILE, {"batches": batches})
+    qb_import_log.clear()
+
+def qb_imported_ids(sb) -> set:
+    """파일로 가져온 TEST 문제 id (가벼운 개수표에는 내용이 없어서 이것으로 구분)"""
+    return {i for b in qb_import_log(sb) for i in b.get("ids", [])}
+
+def qb_import_sets(sb) -> List[str]:
+    """가져온 TEST 시험지 이름들 (최근 것 먼저)"""
+    out = []
+    for b in qb_import_log(sb):
+        for x in b.get("sets", []):
+            if x not in out:
+                out.append(x)
+    return out
+
+def render_qb_import(sb, mock_lib: List[Dict]):
+    """🗂️ 문제 보기·삭제 탭 위: TEST 문제 파일 가져오기 + 되돌리기"""
+    if st.session_state.get("qb_imp_flash"):  # 넣은 뒤에는 칸이 접히므로 알림은 칸 밖에
+        st.success(st.session_state.pop("qb_imp_flash"))
+    with st.expander("📥 TEST 문제 파일 가져오기 (CSV·엑셀 · AI 비용 없음)", expanded=bool(st.session_state.get("qb_imp_parsed"))):
+        st.caption("따로 만든 TEST의 문제 파일을 올리면 원문 라이브러리의 그 지문 번호에 넣어요. 같은 파일을 다시 올리거나 이미 있는 문제와 같으면 건너뛰고(기존 문제는 지우지 않음), "
+                   "넣은 문제는 시험지에 'TEST 수록'으로 따로 표시돼요. 시험지 만들기에서 '가져온 TEST 문제'를 섞기·빼기·이것만으로 고를 수 있어요.")
+        up = st.file_uploader("문제 파일 (번호·구분·학교·학년·지문 출처·유형·난이도·발문·보기·요약문·지문·선택지·정답·해설·수록 시험지·문항ID 칸)",
+                              type=["csv", "xlsx"], key="qb_imp_file")
+        up_key = hashlib.md5(up.getvalue()).hexdigest() if up is not None else ""
+        if up is not None and st.button("🔎 파일 확인하기 (넣기 전에 결과만 보여 줘요)", key="qb_imp_check"):
+            try:
+                st.session_state.qb_imp_parsed = (up_key, up.name, qb_import_parse(sb, up.getvalue(), up.name, mock_lib))
+            except Exception as e:
+                st.error(f"파일을 읽지 못했어요: {str(e)[:200]}")
+        got = st.session_state.get("qb_imp_parsed")
+        if got and up is not None and got[0] == up_key:
+            _, name, res = got
+            rows, skipped = res["rows"], res["skipped"]
+            by_why = {}
+            for r, why in skipped:
+                by_why.setdefault(re.sub(r"\s*\(.*\)$", "", why), []).append((r, why))
+            st.markdown(f"**{res['total']}문항 중 넣을 문항 {len(rows)}개** · 건너뜀 {len(skipped)}개"
+                        + ("" if not by_why else " (" + " · ".join(f"{k} {len(v)}" for k, v in by_why.items()) + ")"))
+            if rows:
+                cnt = {}
+                for x in rows:
+                    cnt[x["q_type"]] = cnt.get(x["q_type"], 0) + 1
+                st.caption("유형별: " + " · ".join(f"{k} {v}" for k, v in sorted(cnt.items(), key=lambda x: -x[1]))
+                           + " · 이어 붙인 지문 " + str(sum(1 for x in rows if QB_LINK_JOIN in x["passage_label"])) + "문항"
+                           + " · 재진술 지문(출처로 찾음) " + str(sum(1 for x in rows if "출처" in x["content"]["import"]["match"])) + "문항")
+                st.dataframe(pd.DataFrame([{"번호": i + 1, "수록 시험지": x["content"]["import"]["set"], "넣을 지문": x["passage_label"],
+                                            "유형": f"{x['content']['import']['orig_type']} → {x['q_type']}", "난이도": x["difficulty"],
+                                            "학교": x["school"], "찾은 방법": x["content"]["import"]["match"]} for i, x in enumerate(rows)]),
+                             hide_index=True, use_container_width=True, height=min(360, 38 + 35 * len(rows)))
+            if skipped:
+                with st.expander(f"건너뛸 {len(skipped)}문항 보기"):
+                    st.dataframe(pd.DataFrame([{"번호": r.get("번호", ""), "수록 시험지": r.get("수록 시험지", ""), "지문 출처": r.get("지문 출처", ""),
+                                                "유형": r.get("유형", ""), "이유": why} for r, why in skipped]), hide_index=True, use_container_width=True)
+                    if "원문 라이브러리에 없는 지문" in by_why:
+                        st.caption("원문 라이브러리에 없는 지문은 '📝 원문 라이브러리'에 먼저 올린 뒤 같은 파일을 다시 올리면, 이미 넣은 문항은 건너뛰고 그 문항만 들어가요.")
+            if rows and st.button(f"📥 {len(rows)}문항 문제 은행에 넣기", type="primary", key="qb_imp_go"):
+                for k in range(0, len(rows), 200):
+                    qb_insert(sb, rows[k:k + 200])
+                from datetime import datetime, timedelta, timezone
+                rec = {"id": res["batch"], "file": name, "date": datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:%M"),
+                       "n": len(rows), "ids": [x["id"] for x in rows], "sets": list(dict.fromkeys(x["content"]["import"]["set"] for x in rows))}
+                qb_import_log.clear()
+                qb_import_log_put(sb, [rec] + qb_import_log(sb)[:49])
+                qb_bank_summary.clear()
+                st.session_state.pop("qb_imp_parsed", None)
+                st.session_state.qb_imp_flash = f"✅ {len(rows)}문항을 넣었어요 ({name}). 시험지 만들기에서 '가져온 TEST 문제'로 골라 쓸 수 있어요."
+                st.rerun()
+        log = qb_import_log(sb)
+        if log:
+            st.markdown("###### 가져온 기록")
+            for b in log[:8]:
+                c1, c2 = st.columns([4, 1.2], vertical_alignment="center")
+                c1.caption(f"{b['date']} · {b['file']} · {b['n']}문항 · " + ", ".join(b.get("sets", [])[:3]) + (" 외" if len(b.get("sets", [])) > 3 else ""))
+                with c2.popover("되돌리기", use_container_width=True):
+                    st.warning(f"이 파일로 넣은 {b['n']}문항을 문제 은행에서 지울까요? 되돌릴 수 없어요. (다른 문제는 그대로예요)")
+                    if st.button("네, 지울게요", type="primary", key=f"qb_imp_undo_{b['id']}"):
+                        qb_delete(sb, b.get("ids", []))
+                        qb_import_log.clear()
+                        qb_import_log_put(sb, [x for x in qb_import_log(sb) if x.get("id") != b["id"]])
+                        qb_bank_summary.clear()
+                        st.session_state.qb_imp_flash = f"🗑️ {b['file']}로 넣은 {b['n']}문항을 지웠어요."
+                        st.rerun()
+
 
 def _qb_is_mock(p: Dict) -> bool:
     return bool(p.get("year") and p.get("month"))
@@ -7712,8 +8119,14 @@ def render_weekly_clinic(sb, mock_lib: List[Dict], by_label: Dict, summary: List
         c_yt = _qb_row("영쌤 포인트").segmented_control("영쌤 포인트", QB_YT_FILTER, default=QB_YT_FILTER[0], key="qb_clinic_ytf",
                                                      label_visibility="collapsed") or QB_YT_FILTER[0]
         skip_used = _qb_row("이미 낸 문항").checkbox(f"이 주차 클리닉에 이미 넣은 문항은 빼기 ({len(w.get('used', []))}개)", value=True, key="qb_clinic_skip")
+        imp_ids = qb_imported_ids(sb)
+        use_imp = bool(imp_ids) and _qb_row("가져온 TEST 문제").checkbox(
+            "파일로 가져온 TEST 문제도 넣기", value=False, key="qb_clinic_imp",
+            help="끄면 이 앱에서 만든 변형문제만 써요 (학생이 이미 푼 TEST 문제가 클리닉에 다시 나오지 않게). 켜면 쌓인 문제 수·모자란 문제 계산에도 함께 들어가요.")
+        if imp_ids and not use_imp:
+            summary = [r for r in summary if r["id"] not in imp_ids]
         # 영쌤 포인트로 거를 때는 문제 내용이 있어야 알 수 있어서 이 주차 문제만 내용까지 읽음
-        src_rows = summary if c_yt == QB_YT_FILTER[0] else [r for r in qb_fetch(sb, labels_all) if qb_yt_keep(r, c_yt)]
+        src_rows = summary if c_yt == QB_YT_FILTER[0] else [r for r in qb_fetch(sb, labels_all) if qb_yt_keep(r, c_yt) and (use_imp or r["id"] not in imp_ids)]
         mine = [r for r in src_rows if r["passage_label"] in set(labels_all) and r.get("school") == school and r["difficulty"] != QB_GICHUL_LEVEL
                 and r["q_type"] in types and not (skip_used and r["id"] in set(w.get("used", [])))]
         have = {lv: sum(1 for r in mine if r["difficulty"] == lv) for lv in mix}
@@ -7739,7 +8152,8 @@ def render_weekly_clinic(sb, mock_lib: List[Dict], by_label: Dict, summary: List
     again = b2.button("🔀 다른 조합으로", use_container_width=True, key="qb_clinic_again", disabled="qb_clinic_html" not in st.session_state)
     if make or again:
         rows = [r for r in qb_fetch(sb, labels_all) if r.get("school") == school and r["difficulty"] in mix and r["q_type"] in types
-                and not (skip_used and r["id"] in set(w.get("used", []))) and qb_yt_keep(r, c_yt)]
+                and not (skip_used and r["id"] in set(w.get("used", []))) and qb_yt_keep(r, c_yt)
+                and (use_imp or not (r.get("content") or {}).get("import"))]
         picked, short2 = qb_clinic_pick(rows, labels_all, mix, random.randint(1, 10**9))
         if not picked:
             st.session_state.pop("qb_clinic_html", None)
@@ -8023,6 +8437,15 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
             e_yt = _qb_row("영쌤 포인트").segmented_control("영쌤 포인트", QB_YT_FILTER, default=QB_YT_FILTER[0], key="qb_exam_yt",
                                                          label_visibility="collapsed",
                                                          help="🎣 영쌤 출제 포인트로 만든 변형문제만 뽑거나 빼요 (위 개수 표시는 이 조건을 빼고 센 수예요)") or QB_YT_FILTER[0]
+            imp_sets_all = qb_import_sets(sb)
+            e_imp, imp_sets = QB_IMPORT_FILTER[0], []
+            if imp_sets_all:
+                i1, i2 = _qb_row("가져온 TEST 문제").columns([2.6, 5.4], vertical_alignment="center")
+                e_imp = i1.segmented_control("가져온 TEST 문제", QB_IMPORT_FILTER, default=QB_IMPORT_FILTER[0], key="qb_exam_imp", label_visibility="collapsed",
+                                             help="'🗂️ 문제 보기·삭제'에서 파일로 가져온 TEST 문제를 다른 문제와 섞을지, 뺄지, 그것만 뽑을지") or QB_IMPORT_FILTER[0]
+                if e_imp == "이것만":
+                    imp_sets = i2.multiselect("TEST 시험지", imp_sets_all, default=[], key="qb_exam_imp_sets", label_visibility="collapsed",
+                                              placeholder="수록 시험지를 고르면 그 시험지 문제만 (비우면 가져온 문제 전부)")
             logs = qb_exam_log(sb)
             excl = set()
             if logs:
@@ -8128,6 +8551,9 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
                     return False
                 if (is_real and e_yt == QB_YT_FILTER[1]) or (not is_real and not qb_yt_keep(r, e_yt)):
                     return False
+                imp = (r.get("content") or {}).get("import")
+                if (e_imp == "빼기" and imp) or (e_imp == "이것만" and (not imp or (imp_sets and imp.get("set") not in imp_sets))):
+                    return False
                 return r["q_type"] in e_types and (e_school == "전체" or r.get("school") == e_school) and r["id"] not in excl
             rows = [r for r in qb_fetch(sb, labels_ordered) if wanted(r)]
             if split:
@@ -8203,6 +8629,7 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
         render_weekly_clinic(sb, mock_lib, by_label, summary, label_counts, text_model, api_delay, academy_name, school_name)
 
     with t_manage:
+        render_qb_import(sb, mock_lib)
         m_label = st.selectbox("📌 지문", sorted([p["label"] for p in mock_lib] + links, key=lambda l: natural_sort_key({"label": l})), key="qb_manage_label")
         rows = qb_fetch(sb, [m_label]) if (m_label and t_manage.open is not False) else []
         if not rows:
@@ -9974,6 +10401,8 @@ def render_final_tab(text_model: str, api_delay: int, academy_name: str, school_
         o1, o2 = _qb_row("문제").columns(2)
         use_real = o1.checkbox("실제 기출 문제도 넣기", value=False, key="final_real", help="끄면 변형문제만 써요 (학생이 이미 본 실제 기출은 빼는 게 보통이에요)")
         other_school = o2.checkbox("다른 학교 스타일 변형도 쓰기", value=False, key="final_other", help="끄면 이 학교 스타일로 만든 변형문제만 써요")
+        use_imp = bool(qb_import_log(sb)) and _qb_row("가져온 TEST 문제").checkbox(
+            "파일로 가져온 TEST 문제도 넣기", value=False, key="final_imp", help="끄면 이 앱에서 만든 문제만 써요 (학생이 이미 푼 TEST 문제가 FINAL에 다시 나오지 않게)")
     used_ids = {x["id"] for r in mine for x in r.get("items", [])}
     st.caption(f"🔁 {school} {grade} FINAL에서 이미 낸 문제 {len(used_ids)}개는 빼고 뽑아요.")
 
@@ -9987,7 +10416,8 @@ def render_final_tab(text_model: str, api_delay: int, academy_name: str, school_
         lab_order = sorted(sel, key=lambda l: natural_sort_key({"label": l}))
         rows = [r for r in qb_fetch(sb, lab_order + sel_links)
                 if r["id"] not in used_ids and (use_real or r["difficulty"] != QB_GICHUL_LEVEL)
-                and (other_school or r.get("school") == school or r["difficulty"] == QB_GICHUL_LEVEL)]
+                and (other_school or r.get("school") == school or r["difficulty"] == QB_GICHUL_LEVEL)
+                and (use_imp or not (r.get("content") or {}).get("import"))]
         picked, notes, pred_raw = final_pick(rows, slots, lab_order, target - delta, (tgt_words or {}).get("passage_words", 0), random.randint(1, 10**9))
         st.session_state.final_built = {"school": school, "grade": grade, "series": series, "round": next_round, "picked": picked, "notes": notes,
                                         "pred_raw": pred_raw, "delta": delta, "target": target, "labels": sel, "template": t_id, "subject": subject, "date": date,
@@ -10044,6 +10474,7 @@ def render_final_tab(text_model: str, api_delay: int, academy_name: str, school_
 
 
 def page_home():
+    backup_reminder()
     st.markdown("#### 무엇을 하시겠어요?")
     st.markdown("<div class='pg-desc'>자주 쓰는 일을 목적별로 모았어요. 왼쪽 메뉴에서도 언제든 바로 갈 수 있어요.</div>", unsafe_allow_html=True)
     st.write("")
@@ -10558,6 +10989,30 @@ LIB_NAMES = {VICTORY_FILE: "One-Shot(한판승)", ANATOMY_FILE: "Self-Note", COR
              MOCK_FILE: "원문 라이브러리", PAST_VOCA_FILE: "기출 어휘"}
 BACKUP_SKIP_DOCS = {"gen_job"}  # 진행 중 작업 상태는 되살리지 않음 (백업에는 넣음)
 
+BACKUP_LOG_FILE = os.path.join(BASE_DIR, "backup_log.json")  # 마지막으로 전체 백업을 받은 날 (2026-11-10, 알림용)
+
+def backup_mark_done(fname: str):
+    """백업 ZIP을 받을 때 날짜를 남김 (실패해도 백업 받기에는 영향 없음)"""
+    try:
+        from datetime import datetime, timedelta, timezone
+        _store_put(supabase if IS_CLOUD_DB else None, BACKUP_LOG_FILE,
+                   {"last": datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d"), "file": fname})
+    except Exception:
+        pass
+
+def backup_reminder():
+    """마지막 전체 백업이 30일 넘었거나 기록이 없으면 알림 한 줄 (읽기 실패하면 아무것도 안 보임)"""
+    try:
+        from datetime import datetime, timedelta, timezone
+        last = (_store_get(supabase if IS_CLOUD_DB else None, BACKUP_LOG_FILE, {}) or {}).get("last", "")
+        today = datetime.now(timezone(timedelta(hours=9))).date()
+        days = (today - datetime.strptime(last, "%Y-%m-%d").date()).days if last else None
+    except Exception:
+        return
+    if days is None or days > 30:
+        st.info(("💾 아직 전체 백업 기록이 없어요." if days is None else f"💾 마지막 전체 백업이 {days}일 전이에요.")
+                + " 왼쪽 메뉴 ⚙️ 설정 → '💾 전체 백업 받기'에서 받아 두세요 (AI 비용 없음, 한 달에 한 번 권장).")
+
 def build_full_backup(with_images: bool = False) -> (bytes, str, str):
     """DB의 모든 문서 + 변형문제 은행 (+ 이미지) → ZIP (파일 내용, 파일 이름, 요약)"""
     buf = io.BytesIO()
@@ -10791,7 +11246,7 @@ def page_settings():
         if st.session_state.get("bk_zip"):
             data, fname, summary = st.session_state["bk_zip"]
             st.download_button(f"📥 {fname} 받기 ({len(data) / 1_000_000:.1f}MB)", data, fname, "application/zip",
-                               type="primary", use_container_width=True, key="bk_dl")
+                               type="primary", use_container_width=True, key="bk_dl", on_click=backup_mark_done, args=(fname,))
             st.caption(summary)
 
         st.divider()
