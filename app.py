@@ -5008,10 +5008,10 @@ QB_TYPE_LEVEL = {
     "요약문 (A)(B)": {
         "하": "(A)(B) 정답이 지문 단어 그대로(요약문 문장 자체는 재진술).",
         "중": "(A)(B) 중 하나는 재진술.",
-        "상": "(A)(B) 모두 재진술, 오답 쌍은 하나만 틀린 것이 섞임.",
-        "최상": "(A)(B) 모두 지문에 없는 상위 개념어, 오답 쌍 대부분이 한쪽만 틀려 끝까지 따져야 함.",
+        "상": "(A)(B) 모두 재진술, 한 칸만 맞는 듯한 오답 쌍이 섞임(맞는 듯한 칸도 정답 단어를 반복하지 않고 비슷한 뜻의 다른 단어로).",
+        "최상": "(A)(B) 모두 지문에 없는 상위 개념어, 오답 쌍 대부분이 한쪽만 맞는 듯해(비슷한 뜻의 다른 단어) 끝까지 따져야 함.",
     },
-    "주제": {"하": "정답에 지문 핵심어 포함.", "중": "정답은 재진술, 오답은 지문 단어를 쓴 함정.", "상": "너무 넓은/좁은 오답 포함, 정답은 상위 개념어.", "최상": "모든 선택지가 지문 소재를 다루며, 범위·초점만 다른 오답들 사이에서 정답을 골라야 함."},
+    "주제": {"하": "정답에 지문 핵심어 포함.", "중": "정답은 재진술, 오답 일부는 지문 단어를 쓴 함정이고 일부는 정답처럼 재진술한 오답.", "상": "너무 넓은/좁은 오답 포함, 정답은 상위 개념어.", "최상": "모든 선택지가 지문 소재를 다루며, 범위·초점만 다른 오답들 사이에서 정답을 골라야 함."},
     "제목": {"하": "정답에 지문 핵심어 포함.", "중": "비유적 제목 하나 포함.", "상": "비유·의문형 정답, 지문 단어를 쓴 함정 오답.", "최상": "비유적 정답을 글 전체 논지로 해석해야 하고, 오답은 지문 일부만 반영."},
     "요지·주장": {"하": "필자 주장이 직접 드러난 문장 기준.", "중": "예시 뒤에 숨은 주장.", "상": "통념 제시 후 반박 구조에서 진짜 주장을 고르게.", "최상": "통념·예시·반박이 섞여 있고, 오답이 통념이나 예시를 그대로 옮긴 것."},
     "내용 일치·불일치": {"하": "원문 내용을 쉬운 말로 짧게 바꿔 씀.", "중": "한두 단어만 바꾼 함정.", "상": "숫자·비교·원인/결과 뒤바꾸기 함정.", "최상": "모든 선택지를 재진술하고, 부분 부정·시간 순서·주체 바꾸기 함정을 섞음."},
@@ -5040,6 +5040,7 @@ QB_EN_CHOICE_RULE = {
 # ---- 문항별 출제 계획 (파이썬이 문항마다 무작위로 정해 프롬프트 뒤쪽에 붙임 · AI 호출 추가 없음, 공통 앞부분 캐시 그대로) ----
 # 2026-11-04 실제 기출 54문항(올바르게 연결된 것) 재측정: 영어 선택지·<보기>·요약문 문장은 두 학교 모두 원문 4단어 묶음이 0~6%만 남음
 QB_CHOICE_TYPES = {"주제", "제목", "요지·주장", "내용 일치·불일치", "<보기> 일치 조합형", "빈칸", "요약문 (A)(B)", "함축 의미", "추론 (추론 가능·불가)"}
+QB_COMBO_TYPES = {"어법 (조합형)", "<보기> 일치 조합형"}  # 선택지가 'ⓐ, ⓒ, ⓔ' 같은 조합 5개인 유형 (v1.3: 프로그램이 조합을 정함)
 # 영어 선택지 하나의 단어 수 (2026-11-10 측정: 운양고·제일고 24~26년 고1·고2 시험지 30개, 'FINAL 단어 수 재기'로 문항마다 잰 영어 선지 단어 ÷ 5)
 #   우리 변형문제는 같은 유형에서 실제보다 1.3~2배 길었고, '중'도 최상만큼 길었음 → 학교·학년·유형별로 이 길이에 맞춤 (난이도와 관계없이)
 #   학년 자료가 모자란 칸(운양고1 함축 등)은 그 학교 24~26년 전체 평균. 추론은 내용 일치와 같게
@@ -5135,7 +5136,9 @@ QB_FEEL_RATE = {"하": 0.0, "중": 0.25, "상": 0.6, "최상": 0.9}
 QB_FEEL_DEVICES = {
     "topic": ["헷갈림 장치(구체어 함정): 오답 하나는 글의 일부(특히 후반)에서 가장 눈에 띄는 구체적 용어 2~3개를 그대로 묶은 '부분 주제'로 써서 정답보다 더 정답처럼 보이게 하고, "
               "정답은 글 앞부분과 뒷부분을 함께 아우르는 상위 표현으로 쓴다(함정 배치 줄이 있으면 이 오답을 그 '낚는 선지' 자리에 둔다). "
-              "실제 예: 조직 문화·갈등 관리 글에서 오답 'Comparing Mechanistic and Organic Structures'(후반 용어 그대로) vs 정답 'Cultural Diversity and Conflict Management within Organizations'."],
+              "실제 예: 조직 문화·갈등 관리 글에서 오답 'Comparing Mechanistic and Organic Structures'(후반 용어 그대로) vs 정답 'Cultural Diversity and Conflict Management within Organizations'.",
+              "헷갈림 장치(주체·강도 바꾸기): 오답 하나는 글의 핵심어를 그대로 쓰되 주체·대상을 바꾸거나(실제 예: 직원의 통제감 글에서 정답 'Employee Agency: A Secret of Increasing Productivity' vs 오답 'Give Employers a Sense of Control for Better Profit') "
+              "주장의 강도를 바꿔(the key → one of several factors, can help → always guarantees) 정답과 거의 같아 보이게 한다."],
     "summary": ["헷갈림 장치(한 칸으로 안 갈림): (A) 선택지에 문맥상 둘 다 그럴듯한 비슷한 뜻의 단어 2개를 넣어 (A)만으로는 고를 수 없게 하고, 그중 하나는 (B)가 틀려 (B)까지 따져야 정답이 정해지게 한다. "
                 "실제 예: 'at a disadvantage' 자리에 vulnerable(정답 쌍)과 disempowered(오답 쌍)를 함께 둠.",
                 "헷갈림 장치(반쪽 지문 단어): 오답 하나는 한 칸은 지문 단어를 그대로 쓰고 다른 칸은 반대 뜻으로 써서, 익숙한 한 칸만 보고 고르게 만든다. 정답 쌍은 두 칸 모두 지문에 없는 동의어로 쓴다. "
@@ -5143,8 +5146,15 @@ QB_FEEL_DEVICES = {
     "tf": ["헷갈림 장치(맞는 선지 낯설게 — 이 유형의 형식은 그대로 지킨다): 내용에 맞는 선택지(<보기> 유형이면 <보기> 진술)는 지문에 없는 상위어·구조 변경으로 바꿔 써서 처음 보면 틀려 보이게 하고, 틀린 것은 지문 단어를 그대로 쓰면서 핵심 한 단어만 뒤집는다"
            "(예: 'very different functions' → 'identical functions', 'When they die' → 'when they are alive'). 익숙한 단어가 보이면 맞다고 넘어가는 학생이 걸리게 한다.",
            "헷갈림 장치(암시만 된 내용 — 이 유형의 형식은 그대로 지킨다): 선택지(<보기> 유형이면 <보기> 진술) 하나는 지문이 암시만 하고 직접 말하지 않은 내용을 지문 단어로 그럴듯하게 써서, 지문에 나온 것처럼 착각하게 만든다"
-           "(예: 산소가 수온 상승보다 빨리 줄었다는 글에서 '다른 원인'을 지문이 밝힌 것처럼 쓴 문장). 일치/불일치 판단 근거는 explanation에 밝힌다."],
-    "blank": ["헷갈림 장치(암시 함정): 오답 하나는 지문이 암시만 하거나 한 예시에만 맞는 내용을 지문 단어로 써서 그럴듯하게 만들고, 정답은 빈칸 앞뒤의 역접·인과 논리를 따라가야만 확정되게 한다."],
+           "(예: 산소가 수온 상승보다 빨리 줄었다는 글에서 '다른 원인'을 지문이 밝힌 것처럼 쓴 문장). 일치/불일치 판단 근거는 explanation에 밝힌다.",
+           "헷갈림 장치(상식 함정 — 이 유형의 형식은 그대로 지킨다): 선택지(<보기> 유형이면 <보기> 진술) 하나는 상식·통념으로는 맞아 보이지만 이 글의 내용과 반대이거나 글이 말하지 않은 내용으로 쓴다"
+           "(실제 예: 데이터 압축 글에서 'Converting digital images or songs into smaller files does not cause data loss'). 일치/불일치 판단 근거는 explanation에 밝힌다.",
+           "헷갈림 장치(정도·시간 한 단어 — 이 유형의 형식은 그대로 지킨다): 틀린 진술 하나는 지문의 some·often·one of·partly를 all·always·the only·completely로(또는 반대로) 바꾸거나 "
+           "기한·순서·주체만 바꿔 한 단어 차이로 틀리게 한다(실제 예: 'completely prohibited children under sixteen', '여름방학 끝까지' → 'until the beginning of the fall semester'). "
+           "나머지는 지문 단어를 섞어 써서 그 한 단어가 눈에 띄지 않게 한다."],
+    "blank": ["헷갈림 장치(암시 함정): 오답 하나는 지문이 암시만 하거나 한 예시에만 맞는 내용을 지문 단어로 써서 그럴듯하게 만들고, 정답은 빈칸 앞뒤의 역접·인과 논리를 따라가야만 확정되게 한다.",
+              "헷갈림 장치(상식 함정): 오답 하나는 상식으로는 자연스러운 결론이지만 글의 논리와 반대인 내용으로 쓴다(실제 예: 시간 개념 글에서 정답 'our artificial concept of time will always remain imperfect' vs "
+              "오답 'improving our timekeeping systems will help us better align with nature'). 정답은 빈칸 앞뒤 논리를 따라가야만 확정되게 한다."],
     "insert": ["헷갈림 장치(가짜 자리): 주어진 문장의 단어가 바로 앞 문장의 단어와 겹쳐 표면적으로 이어져 보이는 가짜 자리를 하나 둔다. 진짜 자리는 주어진 문장 첫머리 연결어(So, This, Such 등)가 받는 내용과 "
                "바로 뒤 문장의 핵심어로만 확정되게 한다. 실제 예: 'So when you start to watch television … see the world as being shaped like television'이 'see things differently' 뒤에도, 'TV teaches you …' 앞에도 들어갈 듯해 보임."],
     "order": ["헷갈림 장치(두 순서 그럴듯): 덩어리 첫머리의 지시어(this, these, such, they)가 두 덩어리에 모두 걸리는 것처럼 보이게 하고, 정답 순서는 내용 논리(일반 → 예시 → 결론, 문제 → 해결)를 따라가야만 확정되게 한다."],
@@ -5169,10 +5179,216 @@ QB_BLANK_RECIPE = ("빈칸 함정(암기 무력화): 정답은 원문에 없는 
                    "오답 2개 이상은 부분적으로 맞게 쓴다(한 예시에만 맞음 · 지문이 암시만 함 · instead of/even though 논리를 거꾸로 따름). "
                    "빈칸은 주제문보다 역접·대조·이유처럼 논리를 따라가야 하는 자리에 우선 둔다.")
 
-# 함정형 문항 비율(난이도별)과 함정형 문항의 정답 번호 가중치 (③·④·⑤ = 45%·40%·15%) — 출제DNA 탭 현황판도 이 값을 그대로 보여 줌
+# 함정형 문항 비율(난이도별) — 출제DNA 탭 현황판도 이 값을 그대로 보여 줌
+# v1.3 (2026-11-10, 실제 기출 52회 vs 이번 달 변형 6,743개): 함정 문항 정답을 ③·④에 몰았더니 선택지형 정답이 ③ 37%(실제 21%)
+#   → 선택지형 정답 번호는 ①~⑤ 고르게, 낚는 선지는 정답보다 앞 번호에 70%(정답이 ①이면 뒤에). 실제로 학생이 고른 오답이 정답보다 앞 번호였던 경우 56%
 QB_TRAP_RATE = {"하": 0.0, "중": 0.4, "상": 0.65, "최상": 0.7}
-QB_TRAP_ANS_POS = [2, 3, 4]
-QB_TRAP_ANS_W = [0.45, 0.4, 0.15]
+QB_TRAP_AHEAD = 0.7
+
+# ---- v1.3 찍기 요령 차단 (지문을 안 읽고 선택지 모양만 보고 찍었을 때 맞히는 비율, 그냥 찍으면 20%) ----
+#   지문 단어가 가장 적은 선지: 실제 16% · 만든 중 63%·상 39%·최상 35% / 조합형 가운데 조합: 실제 23% · 만든 88~93% / 요약문 가장 자주 나온 단어 쌍: 실제 20% · 만든 52~80%
+QB_ANTI_GUESS = ("[찍기 요령 차단 — 실제 기출 측정] 지문을 안 읽고 선택지 모양만 보고 정답을 고를 수 없게 한다: 정답만 유독 지문 단어가 적거나(낯설거나) "
+                 "길거나 짧거나 어려운 단어가 많으면 안 된다. 다섯 선택지의 길이·어휘 수준을 비슷하게 맞추고, 오답 중 1~2개도 정답만큼 지문에 없는 말로 재진술한다"
+                 "(지문 근거로 정답이 아님이 분명하게 — 발문이 '일치하지 않는/추론할 수 없는 것'이면 오답은 지문과 맞는 진술). "
+                 "지문 단어를 그대로 쓴 오답만 있고 정답만 재진술이면 '낯선 선지 = 정답' 요령이 통한다.")
+QB_SUMMARY_WORDS = ("[요약문 선택지 단어 — 실제 기출 측정] 운양고·제일고 실제 요약문은 다섯 선택지의 (A) 단어 5개, (B) 단어 5개를 거의 모두 서로 다르게 쓴다. "
+                    "같은 단어를 두 선택지 이상에 쓰지 않는다(반복하면 '가장 자주 나온 단어 쌍 = 정답' 요령이 통함). "
+                    "한 칸만 맞는 듯한 함정 쌍은 정답 단어를 그대로 쓰지 말고 비슷한 뜻의 다른 단어나 형태가 비슷한 단어로 만들고(실제 예: 정답 nutritious …… smaller vs 함정 healthful …… larger), "
+                    "그 쌍의 다른 칸은 지문 근거로 분명히 틀리게 한다.")
+QB_COMBO_SYM = "ⓐⓑⓒⓓⓔⓕⓖⓗ"
+QB_COMBO_N = {"하": 5, "중": 6, "상": 7, "최상": 8}                 # 밑줄·<보기> 진술 개수 (유형 형식·난이도 기준과 같음)
+QB_COMBO_WRONG = {"하": (1, 2), "중": (2, 3), "상": (2, 4), "최상": (3, 5)}  # 어법 조합형 틀린 밑줄 개수 (난이도 기준과 같음)
+QB_COMBO_LEAK_OK = 0.3  # 실제 기출도 가끔은 정답이 가운데 조합이라(23%) 가끔은 그대로 둠 (아예 없애면 '가운데는 빼고 찍기'가 통함)
+
+
+def qb_combo_fmt(sset) -> str:
+    return ", ".join(QB_COMBO_SYM[i] for i in sorted(sset))
+
+
+def qb_combo_sort(opts):
+    """실제 기출 순서: 기호 개수가 적은 조합부터, 같으면 사전순 (실제 132문항 중 92%)"""
+    return sorted(opts, key=lambda x: (len(x), sorted(x)))
+
+
+def qb_combo_leak(opts, A) -> bool:
+    """지문을 안 읽고 정답 조합이 찍히는지: 가운데 조합(다른 선지와 기호 차이 합이 가장 작음) · 3개 이상 선지에 나온 기호 묶음 · 기호 빈도가 가장 높은 조합"""
+    ia = opts.index(A)
+    d = [sum(len(x ^ y) for y in opts) for x in opts]
+    if d[ia] == min(d) and d.count(min(d)) == 1:
+        return True
+    cnt = {}
+    for x in opts:
+        for e in x:
+            cnt[e] = cnt.get(e, 0) + 1
+    if frozenset(e for e, c in cnt.items() if c >= 3) == A:
+        return True
+    sc = [sum(cnt[e] for e in x) / len(x) for x in opts]
+    if sc[ia] == max(sc) and sc.count(max(sc)) == 1:
+        return True
+    return [len(x) for x in opts].count(len(A)) == 1  # 정답만 기호 개수가 혼자 다름 (실제 기출 9%)
+
+
+def qb_combo_design(n: int, A, pos: int, rnd, tries: int = 400):
+    """정답 조합 A(기호 번호 묶음)에 오답 조합 4개를 실제 기출처럼 붙임 → 정렬한 5개 (A가 pos번째) 또는 None
+    오답: 정답에서 하나만 다른 조합 0~2개(실제 평균 1.3개) + 나머지는 멀리, 크기는 실제 기출처럼 정답과 같은 개수가 가장 많게
+    (실제 오답 크기 - 정답 크기: 0이 48% · ±1이 44% · ±2가 9%), 기호 하나짜리 선지는 한 개까지, 찍기 요령으로 정답이 안 나오게"""
+    A = frozenset(A)
+    k = len(A)
+    if not (1 <= k < n) or not (0 <= pos < 5):
+        return None
+    near = set()
+    for x in range(n):
+        t = set(A) ^ {x}
+        if 0 < len(t) < n:
+            near.add(frozenset(t))
+    for x in A:
+        for y in range(n):
+            if y not in A:
+                near.add(frozenset((set(A) - {x}) | {y}))
+    near = sorted(near, key=lambda x: sorted(x))
+    size_w = {k - 2: 0.5, k - 1: 2.0, k: 5.0, k + 1: 2.5, k + 2: 0.6}
+    sizes = [z for z in size_w if 1 <= z <= n - 1]
+    weights = [size_w[z] for z in sizes]
+    for _ in range(tries):
+        n_near = rnd.choices([0, 1, 2], weights=[1, 6, 3])[0]
+        ds = rnd.sample(near, min(n_near, len(near)))
+        guard = 0
+        while len(ds) < 4 and guard < 60:
+            guard += 1
+            t = frozenset(rnd.sample(range(n), rnd.choices(sizes, weights=weights)[0]))
+            if t != A and t not in ds and t not in near:
+                ds.append(t)
+        if len(ds) < 4:
+            continue
+        opts = qb_combo_sort([A] + ds)
+        if opts.index(A) != pos or sum(1 for x in opts if len(x) == 1) > (2 if k == 1 else 1):
+            continue
+        if qb_combo_leak(opts, A) and rnd.random() > QB_COMBO_LEAK_OK:
+            continue
+        return opts
+    return None
+
+
+def qb_combo_plan_line(q_type: str, level: str, pl: List[str], text: str, pos: int, rnd) -> (str, int):
+    """조합형 문항 하나의 선택지 5개·정답 조합·발문 방향을 정해 출제 계획 한 줄로 → (줄, 정답 위치)"""
+    grammar = q_type == "어법 (조합형)"
+    n = QB_COMBO_N.get(level, 7)
+    sent = any(str(x).startswith("밑줄 단위: 문장") for x in pl)
+    hard_sent = any(str(x).startswith("밑줄 단위: 문장(고난도)") for x in pl)
+    if grammar:
+        if hard_sent:
+            n = rnd.choice([5, 6])
+        if sent:
+            n_s = len(re.findall(r"[.!?](?=[\s\"'”’)]|$)", str(text or "")))
+            n = max(4, min(n, n_s or n))
+        elif len(str(text or "").split()) < 130:
+            n = min(n, 6)
+        right = any("어법상 옳은 것만을" in str(x) for x in pl) or (not hard_sent and level in ("상", "최상")
+                                                                   and rnd.random() < (0.3 if level == "상" else 0.5))
+        lo, hi = QB_COMBO_WRONG.get(level, (2, 4))
+        ks = [k for k in range(1, n) if (lo <= (n - k if right else k) <= hi)]
+        if hard_sent:
+            ks = [k for k in ks if 2 <= (k if right else n - k) <= 4] or ks  # 옳은 문장 2~4개
+        # 정답 기호가 1개·n-1개면 정렬했을 때 자리가 ①·⑤로 굳고 개수로 찍힘 → 2~n-2개 우선 (짧은 지문은 틀린 개수 기준보다 이것을 먼저)
+        ks = [k for k in ks if 2 <= k <= n - 2] or list(range(2, n - 1)) or ks
+    else:
+        right = rnd.random() < 0.7  # True: '일치하는 것만' · False: '일치하지 않는 것만'
+        ks = list(range(2, n - 1))
+    ks = ks or [max(1, min(n - 1, round(n * 0.48)))]
+    kw = [math.exp(-((k - n * 0.48) ** 2) / 1.5) for k in ks]
+    opts, A = None, None
+    for p_try in [pos] * 30 + rnd.sample(range(5), 5):
+        A = frozenset(rnd.sample(range(n), rnd.choices(ks, weights=kw)[0]))
+        opts = qb_combo_design(n, A, p_try, rnd, tries=200)
+        if opts:
+            pos = p_try
+            break
+    if not opts:
+        return "", -1
+    sym = f"{QB_COMBO_SYM[0]}~{QB_COMBO_SYM[n - 1]}"
+    rest = frozenset(range(n)) - A
+    if grammar:
+        unit = "문장" if sent else "밑줄"
+        stem = f"밑줄 친 {sym} 중, 어법상 {'옳은' if right else '틀린'} 것만을 있는 대로 고른 것은?"
+        how = (f"{qb_combo_fmt(A)}만 원문 그대로 옳게 두고 나머지 {qb_combo_fmt(rest)}는 원문을 실제로 틀린 형태로 바꾼다" if right else
+               f"{qb_combo_fmt(A)}만 원문을 실제로 틀린 형태로 바꾸고 나머지 {qb_combo_fmt(rest)}는 원문 그대로 옳게 둔다")
+        head = f"{unit}은 {sym} {n}개(지문 전체에 고르게)"
+    else:
+        stem = f"윗글의 내용과 {'일치하는' if right else '일치하지 않는'} 것만을 <보기>에서 있는 대로 고른 것은?"
+        how = (f"{qb_combo_fmt(A)}만 글의 내용과 일치하고 나머지 {qb_combo_fmt(rest)}는 일치하지 않게 쓴다" if right else
+               f"{qb_combo_fmt(A)}만 글의 내용과 일치하지 않고 나머지 {qb_combo_fmt(rest)}는 일치하게 쓴다")
+        head = f"box의 <보기> 진술은 {sym} {n}개"
+    line = (f"선택지 조합(프로그램이 실제 기출처럼 정함 — 그대로 따름): {head}. 발문은 '{stem}'" + ("" if grammar else "(두 지문이면 '(A)와 (B)의 내용과')") + ". "
+            f"정답 조합은 {qb_combo_fmt(A)} — {how}. choices는 이 5개를 이 순서 그대로 쓴다: "
+            + " | ".join(f"{CIRCLED[i]} {qb_combo_fmt(x)}" for i, x in enumerate(opts)) + f" (정답 {CIRCLED[pos]}). "
+            "explanation과 '헷갈리는 포인트'에는 선택지 번호(①~⑤) 대신 기호(ⓐ~ⓗ)로 쓴다")
+    return line, pos
+
+
+def _qb_planned_combo(plan: List[str]):
+    """출제 계획에 적은 조합 선택지 → (['ⓐ, ⓑ', …], 정답 위치) 또는 None"""
+    for x in plan or []:
+        m = re.search(r"choices는 이 5개를 이 순서 그대로 쓴다: (.*?) \(정답 ([①②③④⑤])\)", str(x))
+        if m:
+            parts = [re.sub(r"^[①②③④⑤]\s*", "", t.strip()) for t in m.group(1).split(" | ")]
+            if len(parts) == 5:
+                return parts, CIRCLED.index(m.group(2))
+    return None
+
+
+def _qb_scrub_choice_nums(expl, ans_txt: str):
+    """선택지를 다시 정했을 때 해설에서 선택지 번호(①~⑤)를 말한 문장은 뺌 (번호가 달라졌으므로)"""
+    lines = expl if isinstance(expl, list) else [str(expl or "")]
+    out = []
+    for ln in lines:
+        keep = [t for t in re.split(r"(?<=[.!?。])\s+", str(ln)) if not re.search("[①②③④⑤]", t)]
+        t = " ".join(keep).strip()
+        if t:
+            out.append(t)
+    if not out:
+        out = [f"정답 조합: {ans_txt}"]
+    return out if isinstance(expl, list) else " ".join(out)
+
+
+def qb_combo_enforce(q: Dict, q_type: str, plan: List[str], rnd) -> None:
+    """조합형 문항의 선택지가 찍기 요령에 걸리지 않게 (AI 호출 없음). 계획대로 나왔으면 그대로,
+    AI가 계획과 다르게 냈으면 AI가 만든 지문·<보기>의 정답 조합은 그대로 두고 오답 조합 4개만 다시 정함 (정답 번호는 계획한 자리)"""
+    stem = re.sub(r"<[^>]+>", "", str(q.get("stem") or ""))
+    if q_type not in QB_COMBO_TYPES or not re.search(r"있는 대로|모두 고른|고른 것", stem) or "개수" in stem:
+        return
+    where = str(q.get("box") or "") if q_type.startswith("<보기>") else str(q.get("passage") or "")
+    syms = sorted(set(re.findall("[ⓐ-ⓗ]", where)))
+    n = len(syms)
+    if n < 4 or "".join(syms) != QB_COMBO_SYM[:n]:
+        return  # 기호가 ⓐ부터 이어지지 않으면 손대지 않음
+    ch = [str(c) for c in q.get("choices") or []]
+    ans = str(q.get("answer") or "")
+    if len(ch) != 5 or ans not in CIRCLED:
+        return
+    A = frozenset(QB_COMBO_SYM.index(e) for e in re.findall("[ⓐ-ⓗ]", ch[CIRCLED.index(ans)]))
+    if not A or max(A) >= n or len(A) >= n:
+        return
+    planned = _qb_planned_combo(plan)
+    now = [", ".join(re.findall("[ⓐ-ⓗ]", c)) for c in ch]
+    sets = [frozenset(QB_COMBO_SYM.index(e) for e in re.findall("[ⓐ-ⓗ]", c)) for c in ch]
+    valid = len(set(sets)) == 5 and all(sets) and max(max(x) for x in sets) < n  # 지문(<보기>)에 있는 기호만 쓴 서로 다른 조합 5개
+    if valid and planned and now == planned[0] and CIRCLED.index(ans) == planned[1]:
+        q["choices"] = list(planned[0])  # 계획대로 나옴 (이미 흩어 놓은 조합) — '① ⓐ, ⓑ'처럼 번호를 붙여 왔어도 계획 모양으로
+        return
+    if valid and not planned and sets == qb_combo_sort(sets) and not qb_combo_leak(sets, A):
+        return  # 계획 없이 나온 조합형(다른 유형에서 정리된 것)도 이미 괜찮으면 그대로
+    want = planned[1] if planned else CIRCLED.index(ans)
+    opts = None
+    for p_try in [want] + rnd.sample(range(5), 5):
+        opts = qb_combo_design(n, A, p_try, rnd)
+        if opts:
+            break
+    if not opts:
+        return
+    q["choices"] = [qb_combo_fmt(x) for x in opts]
+    q["answer"] = CIRCLED[opts.index(A)]
+    q["explanation"] = _qb_scrub_choice_nums(q.get("explanation"), qb_combo_fmt(A))
+    q["combo_fix"] = "선택지 조합 다시 정함"
 
 # 어법 '꼭 묻는 개념'을 학교 전체로 고르게: 목표 비율은 실제 기출 빈도의 제곱근(많이 나온 개념도 자주, 드문 개념도 꾸준히),
 #   지금까지 만든 문제(문제 은행 + 이번 실행에서 뽑은 것)에서 목표보다 덜 나온 개념부터 채움
@@ -5199,7 +5415,8 @@ def _qb_grammar_counter(school: str) -> Dict[str, float]:
         _QB_GRAMMAR_PICKS[school] = cnt
     return _QB_GRAMMAR_PICKS[school]
 
-def qb_question_plans(q_type: str, level: str, school: str, count: int, existing: List[Dict], underline: str = "mix", rnd=None) -> List[List[str]]:
+def qb_question_plans(q_type: str, level: str, school: str, count: int, existing: List[Dict], underline: str = "mix", rnd=None,
+                      text: str = "") -> List[List[str]]:
     """문항마다 다르게 낼 출제 장치를 무작위로 정함 → [[계획 문장, ...], ...] (문항 수만큼)"""
     rnd = rnd or random.Random()
     plans = [[] for _ in range(count)]
@@ -5274,27 +5491,57 @@ def qb_question_plans(q_type: str, level: str, school: str, count: int, existing
                 pl.append(QB_FEEL_EXPLAIN)
     # 정답 번호와 함정 배치 (2026-11-04 측정: 실제 기출은 정답이 ①~⑤에 고르게, 원문 단어를 쓴 가장 그럴듯한 오답이 정답보다 앞 번호인 경우가 운양고 62%·제일고 50%.
     #   AI에 맡기면 정답이 ③에 몰리고(제일고 상 65%) ⑤는 거의 안 나와서 파이썬이 정해 줌)
-    if q_type in QB_CHOICE_TYPES or q_type in QB_POS_TYPES:
+    if q_type in QB_COMBO_TYPES:
+        # v1.3: 조합형은 선택지 5개를 통째로 정함 (실제 기출처럼 흩어 놓고 개수→사전순 정렬, 정답 번호는 ①~⑤ 고르게)
+        used = []
+        for pl in plans:
+            free = [p for p in range(5) if p not in used] or list(range(5))
+            line, pos = qb_combo_plan_line(q_type, level, pl, text, rnd.choice(free), rnd)
+            if line:
+                used.append(pos)
+                pl.append(line)
+    elif q_type in QB_CHOICE_TYPES or q_type in QB_POS_TYPES:
         trap_rate = QB_TRAP_RATE.get(level, 0.5)
         used = []
         for i, pl in enumerate(plans):
             use_trap = q_type in QB_CHOICE_TYPES and rnd.random() < trap_rate
-            if use_trap:
-                # 실제 내신 방식: 낚이는 선지를 앞(①·②)에, 정답은 뒤(③·④, 가끔 ⑤)에 완전히 다른 말로
-                pos = rnd.choices(QB_TRAP_ANS_POS, weights=QB_TRAP_ANS_W)[0]
+            free = [p for p in range(5) if p not in used] or list(range(5))
+            if q_type in QB_CHOICE_TYPES:
+                pos = rnd.choice(free)  # v1.3: 선택지형은 ①~⑤ 고르게
             else:
-                # 함정 문항이 정답을 ③·④에 두므로, 나머지는 ①·②·⑤ 쪽으로 기울여 세트 전체 정답이 고르게
-                free = [p for p in range(5) if p not in used] or list(range(5))
-                pos = rnd.choices(free, weights=[2 if p in (0, 1, 4) else 1 for p in free])[0]
+                pos = rnd.choices(free, weights=[2 if p in (0, 1, 4) else 1 for p in free])[0]  # 지문 속 번호형은 예전 그대로 (실제 기출과 비슷)
             used.append(pos)
             if q_type in QB_CHOICE_TYPES:
                 line = f"정답 번호: {CIRCLED[pos]} (choices에서 정답을 {pos + 1}번째에 둔다)"
                 if use_trap:
-                    tp = rnd.choice([t for t in (0, 1) if t < pos])
+                    ahead, after = list(range(pos)), list(range(pos + 1, 5))
+                    tp = rnd.choice(ahead) if ahead and (not after or rnd.random() < QB_TRAP_AHEAD) else rnd.choice(after)
                     line += (f". 함정 배치(실제 내신 방식): {CIRCLED[tp]}에는 지문의 핵심 단어·표현을 그대로 여러 개 가져와 언뜻 정답처럼 보이지만 "
-                             f"범위·초점·논리(주장 뒤집기·부분만 맞음 등)가 어긋난 '낚는 선지'를 둔다. 정답 {CIRCLED[pos]}는 지문 단어를 거의 쓰지 않고 "
-                             f"완전히 다른 말(상위 개념어·동의어·구조 변경)로 재진술해서, 지문 단어가 보이는 {CIRCLED[tp]}보다 덜 정답처럼 보이게 한다. "
-                             f"앞에서부터 읽던 학생이 {CIRCLED[tp]}에서 멈추고 고르게 만드는 것이 목표다. 단, {CIRCLED[tp]}에도 지문 근거로 분명히 틀린 곳이 있어야 한다(복수 정답 금지)")
+                             f"범위·초점·논리(주장 뒤집기·부분만 맞음 등)가 어긋난 '낚는 선지'를 둔다. 정답 {CIRCLED[pos]}는 지문 단어를 그대로 옮기지 않고 "
+                             f"다른 말(상위 개념어·동의어·구조 변경)로 재진술한다. 단, 나머지 오답 중 1~2개도 정답만큼 지문에 없는 말로 바꿔 써서 "
+                             f"'지문 단어가 가장 적은 선지 = 정답'이 되지 않게 한다(지문 근거로 정답이 아님이 분명하게). "
+                             f"학생이 {CIRCLED[tp]}에 끌려 고르게 만드는 것이 목표다. 단, {CIRCLED[tp]}도 지문 근거로 정답이 아님이 분명해야 한다(복수 정답 금지)")
+                if q_type in QB_ONE_CHOICE_TYPES and level != "하" and not (
+                        level == "중" and q_type in ("요지·주장", "내용 일치·불일치") and (school, q_type) not in QB_EN_CHOICE_RULE):
+                    # v1.3 찍기 차단: '정답만 재진술' 버릇을 막으려고 낯설게 쓸 오답 자리를 번호로 정해 줌
+                    #   (2026-11-10 테스트: 말로만 '오답 1~2개도 낯설게'라고 하면 지문 단어가 가장 적은 선지 = 정답이 49%)
+                    # 오답은 4개뿐: '지문 핵심어를 그대로 쓴 오답 n개'(QB_OPPOSITE_TRAP)·낚는 선지와 겹치지 않게 낯선 오답 수를 줄임 (최소 1개)
+                    opp = next((int(m.group(1)) for x in pl for m in [re.match(r"오답 (\d)개는 지문 핵심어를 그대로", str(x))] if m), 0)
+                    k_unf = min(1 if level == "중" else 2, 4 - opp - (1 if use_trap else 0))
+                    others = [t for t in range(5) if t != pos and not (use_trap and t == tp)]
+                    if k_unf >= 1:
+                        unf = sorted(rnd.sample(others, k_unf))
+                        u_txt = "·".join(CIRCLED[t] for t in unf)
+                        line += (f". 낯선 오답: {u_txt}도 정답만큼 지문 단어를 거의 쓰지 않은 다른 말(상위 개념어·동의어·구조 변경)로 쓰되 "
+                                 f"지문 근거로 정답이 아님이 분명하게 한다(극단적인 말 always·never·only·completely나 상식 밖 주장으로 만들지 말고, 지문을 읽어야만 정답이 아님이 보이게). "
+                                 f"정답 {CIRCLED[pos]}에는 지문 핵심어 1~2개를 그대로 써도 된다. "
+                                 f"다 쓴 뒤 선지마다 지문에 나온 단어 수를 세어, 정답이 지문 단어가 가장 적은 선지가 되면 {u_txt}를 더 낯설게 고친다")
+                        if q_type in ("내용 일치·불일치", "추론 (추론 가능·불가)"):
+                            line += "(발문이 '일치하지 않는/추론할 수 없는 것'이면 정답이 지문과 어긋나는 진술이고 오답은 모두 지문과 맞는 진술이다 — 낯선 오답도 지문과 맞는 진술)"
+                        if opp:
+                            line += f". 위의 '지문 핵심어를 그대로 쓴 오답 {opp}개'와 낚는 선지는 {u_txt}가 아닌 번호에 둔다"
+                        if any(str(x).startswith("헷갈림 장치") for x in pl):
+                            line += f". 헷갈림 장치에서 지문 단어를 그대로 쓰라고 한 선지가 있으면 {u_txt}를 뺀 나머지 선지에 둔다"
             else:
                 line = f"정답 번호: {CIRCLED[pos]} (지문 속 ①~⑤ 중 {CIRCLED[pos]} 자리가 정답이 되게 만든다)"
             pl.append(line)
@@ -5402,7 +5649,7 @@ QB_GRAMMAR_LEVEL = {
     "중": "밑줄 6개(ⓐ~ⓕ), 틀린 것 2~3개. 관계사·분사·to부정사/동명사 같은 빈출 포인트 섞기.",
     "상": "밑줄 7개(ⓐ~ⓖ), 틀린 것 2~4개. 빈출 포인트 + 고난도 1~2개. '틀린 것만을' 또는 '옳은 것만을' 중 하나.",
     "최상": "지문 전체에 고르게 밑줄 8개(ⓐ~ⓗ). stem은 '어법상 옳은 것만을 있는 대로 고른 것은?' 또는 '틀린 것만을 있는 대로 고른 것은?' 중 하나(문항마다 섞기). "
-            "틀린 것 개수는 3~5개로 정해 개수로 답을 추측할 수 없게 하고, choices 5개는 2개·3개·4개·5개짜리 조합을 섞는다. "
+            "틀린 것 개수는 3~5개로 정해 개수로 답을 추측할 수 없게 하고, 선택지 조합은 [문항별 출제 계획]의 조합을 그대로 쓴다. "
             "포인트는 완료부정사, 동격 that vs 관계대명사, 관계부사 vs 관계대명사, 분사구문의 태, 도치 후 수 일치, 가정법, 병렬, 강조구문, 수동태 불가 동사 등 고난도 위주로 하고 "
             "바로 옆 단어만 보면 맞아 보이는 함정을 넣는다.",
 }
@@ -6057,12 +6304,14 @@ def qb_school_pack_load(sb, dna: Dict = None) -> Dict:
 
 # ---- 출제 규칙 버전 (2026-11-10): 학교 스타일을 담는 규칙을 바꿀 때마다 올리고, 만든 문제에 그때 버전을 남김 ----
 #   버전 기록이 없는 예전 문제는 v1.0으로 봄 (저장된 문제를 고치지 않고 읽을 때만 판단). 실제 기출은 버전 없음
-QB_RULES_VERSION = "1.2"
+QB_RULES_VERSION = "1.3"
 QB_RULES_HISTORY = [
     ("1.0", "~2026-11-09", "학교 스타일·지문 변형 비율·어법 출제 빈도·헷갈림 장치·난이도 판정 (선지 길이 기준 없음)"),
     ("1.1", "2026-11-10", "학년 반영 · 학교·학년·유형별 선지 길이(24~26년 실제 기출 30개 측정) · 상·최상 선지 어휘 기준"),
     ("1.2", "2026-11-10", "학교별 실제 기출 DNA(시험지 52개 전 문항·학생 채점 흔적) · 학교·학년별 수치(선지 길이·배점·오답률) 자동 계산 · "
                           "같은 학교·유형 실제 기출 예시 · 학교 실제 발문 말투 · 제일고 내용 일치 하·중도 영어 선지"),
+    ("1.3", "2026-11-10", "찍기 요령 차단(실제 기출 52회 vs 변형 6,743개 비교) · 조합형 선택지를 실제 기출처럼 흩어 정함 · 요약문 다섯 쌍 단어를 서로 다르게 · "
+                          "오답 한두 개도 정답만큼 재진술 · 선택지형 정답 번호를 ①부터 ⑤까지 고르게 · 상식 함정·정도/시간 바꾸기·주체/강도 바꾸기 장치"),
 ]
 
 def qb_ver(r: Dict) -> str:
@@ -6097,8 +6346,12 @@ def qb_build_prompt(label: str, text: str, q_type: str, level: str, school: str,
         extra += f"\n[운양고·제일고 실제 기출 어휘 출제 패턴]\n{QB_VOCAB_TRAPS}\n"
     if q_type in QB_CHOICE_TYPES:
         extra += f"\n[선택지 재진술 — 실제 기출 측정]\n- {QB_CHOICE_PARA}\n"
+    if q_type in QB_ONE_CHOICE_TYPES:
+        extra += QB_ANTI_GUESS + "\n"
+    if q_type == "요약문 (A)(B)":
+        extra += QB_SUMMARY_WORDS + "\n"
     extra += qb_link_note(label, text)
-    plans = qb_question_plans(q_type, level, school, count, existing or [], underline)
+    plans = qb_question_plans(q_type, level, school, count, existing or [], underline, text=text)
     yt = qb_yt_applicable(yt_points, q_type, bool(unit_other)) if level != "하" else []
     if qb_yt_plans(plans, yt, yt_focus) and unit_other and any("영쌤 출제 포인트" in x and p.get("tb") and str(p["text"]).strip() in x
                                                              for pl in plans for x in pl for p in yt):
@@ -6203,6 +6456,9 @@ def qb_parse(out, q_type: str, count: int, plans: List[List[str]], text: str) ->
                 continue
             if fx:
                 q["_q_type"] = fx
+            if (q.get("_q_type") or q_type) in QB_COMBO_TYPES:
+                # 조합형 선택지가 찍기 요령(가운데 조합·많이 나온 기호)에 걸리지 않게 (정답 검증 전에 바꿔서 검증도 바뀐 문항으로)
+                qb_combo_enforce(q, q.get("_q_type") or q_type, plan, random.Random(f"{qi}|{str(q.get('passage') or '')[:80]}|{str(q.get('box') or '')[:80]}"))
             if q_type == "순서":
                 qb_fix_order(q)  # 수능식 고정 선택지 + 정답 번호 고르게 (정답 검증 전에 바꿔서 검증도 바뀐 문항으로)
             if not qb_shape_ok(q, q.get("_q_type") or q_type):
@@ -6309,7 +6565,7 @@ def _generate_qbank_item(sb_factory, gclient, item: Dict, opts: Dict, dna_rules:
                          yt_points: List[Dict] = None, pack: Dict = None) -> (bool, str):
     """작업 목록의 변형문제 1건(지문·유형·난이도) 생성 → 정답 검증 → 문제 표에 저장"""
     sb = sb_factory()
-    item = {**item, "ver": QB_RULES_VERSION if pack else "1.1"}  # 학교별 기출 자료를 못 읽었으면 v1.1 방식이므로 그대로 표시
+    item = {**item, "ver": QB_RULES_VERSION, "no_dna": not pack}  # 학교별 기출 자료를 못 읽었으면 no_dna (v1.3 찍기 차단은 그대로 적용)
     label, q_type, level, school = item["passage_label"], item["q_type"], item["difficulty"], item.get("school", "운양고")
     count = int(item.get("count", 2))
     model = job_item_model(item, opts)
@@ -6385,6 +6641,8 @@ def qb_save_questions(sb, gclient, model: str, item: Dict, questions: List[Dict]
             continue
         q["verified"] = bool(item.get("verify", True)) and not q.pop("_unverified", False)
         q["ver"] = str(item.get("ver") or QB_RULES_VERSION)  # 이 문제를 만든 출제 규칙 버전 (시험지 문항 위에 표시)
+        if item.get("no_dna"):
+            q["no_dna"] = True  # 학교별 실제 기출 자료를 못 읽고 만든 문제 (나중에 확인용)
         qt = q.pop("_q_type", q_type)
         lv = level
         jl, why = q.pop("_judged", (None, ""))
@@ -6431,7 +6689,7 @@ def qb_batch_submit(sb, items: List[Dict], opts: Dict, dna_rules: str, essay_rul
             new_batches.append({"id": bid, "model": m, "ts": now, "n": len(lst)})
             for it, _, _, plans in lst:
                 upd[it["id"]] = {"state": "waiting", "batch_id": bid, "batch_model": m, "batch_ts": now, "plans": plans,
-                                 "ver": QB_RULES_VERSION if pack else "1.1"}
+                                 "ver": QB_RULES_VERSION, "no_dna": not pack}
             notes.append(f"💸 반값 모드로 {len(lst)}건 제출 · {ai_model_label(m)} (보통 몇 분~몇 시간, 길면 24시간)")
         except Exception as e:
             for it, *_ in lst:
@@ -8437,6 +8695,89 @@ def qb_clinic_update(sb, change):
     _store_put(sb, QB_CLINIC_FILE, {"weeks": change(weeks)})
     qb_clinic_weeks.clear()
 
+# 만든 클리닉 보관함 (2026-11-10): 클리닉을 만들 때마다 문항 id·표시 옵션·선지 어휘 정리를 남겨 나중에 같은 클리닉(같은 문제·같은 순서)을 다시 받음
+#   app_storage 문서 qb_clinic_saved = {"records": [{id, week_id, week, school, title, n, date, qids, meta}]} (최근 60개, 다시 받기는 AI 비용 없음)
+QB_CLINIC_SAVED_FILE = os.path.join(BASE_DIR, "qb_clinic_saved.json")
+QB_CLINIC_SAVED_MAX = 60
+
+@st.cache_data(ttl=60, show_spinner=False)
+def qb_clinic_saved(_sb) -> List[Dict]:
+    recs = (_store_get(_sb, QB_CLINIC_SAVED_FILE, {}) or {}).get("records", [])
+    return [r for r in recs if isinstance(r, dict) and r.get("id") and isinstance(r.get("qids"), list)]
+
+def qb_clinic_saved_update(sb, change):
+    """저장 직전에 최신 목록을 다시 읽어 바꿈 (다른 창에서 보관한 클리닉을 덮어쓰지 않게)"""
+    recs = (_store_get(sb, QB_CLINIC_SAVED_FILE, {}) or {}).get("records", [])
+    recs = [r for r in recs if isinstance(r, dict)]
+    _store_put(sb, QB_CLINIC_SAVED_FILE, {"records": change(recs)[:QB_CLINIC_SAVED_MAX]})
+    qb_clinic_saved.clear()
+
+def qb_clinic_keep(sb, week: Dict, qids: List[str], meta: Dict) -> bool:
+    """만든 클리닉을 보관함에 (같은 주차·같은 문항 구성이면 하나로 두고 날짜만 새로). 보관은 덤이라 실패해도 클리닉은 그대로"""
+    from datetime import datetime, timedelta, timezone
+    if not qids:
+        return False
+    key = hashlib.md5((str(week.get("id", "")) + "|" + ",".join(qids)).encode("utf-8")).hexdigest()[:10]
+    rec = {"id": key, "week_id": week.get("id", ""), "week": week.get("name", ""), "school": week.get("school", ""),
+           "title": meta.get("title") or week.get("name") or "클리닉", "n": len(qids),
+           "date": datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:%M"), "qids": list(qids),
+           "meta": {k: v for k, v in (meta or {}).items() if k != "academy"}}
+    try:
+        qb_clinic_saved_update(sb, lambda rs: [rec] + [r for r in rs if r.get("id") != key])
+        return True
+    except Exception:
+        return False
+
+def render_clinic_archive(sb, wid: str, labels_all: set, text_model: str, academy_name: str, school_name: str):
+    """📂 만든 클리닉 다시 받기: 보관된 클리닉 → 같은 문제·같은 순서·같은 선지 어휘 정리로 HTML 다시 만들기 (AI 비용 없음)"""
+    try:
+        recs = qb_clinic_saved(sb)
+    except Exception as e:
+        st.caption(f"⚠️ 보관된 클리닉을 읽지 못했어요 ({str(e)[:80]}). 클리닉 만들기는 그대로 쓸 수 있어요.")
+        return
+    recs = sorted(recs, key=lambda r: (r.get("week_id") != wid, ""))  # 이 주차 것을 먼저 (같은 주차 안에서는 최근 것부터)
+    with st.expander(f"📂 만든 클리닉 다시 받기 · 보관된 클리닉 {len(recs)}개", expanded=bool(st.session_state.get("qb_carch_out"))):
+        if not recs:
+            st.caption("아직 보관된 클리닉이 없어요. 위에서 '📄 클리닉 만들기'를 누르면 만든 클리닉이 여기에 자동으로 남아요 "
+                       "(이 기능을 넣기 전에 만든 클리닉은 문항 기록이 남아 있지 않아 다시 받을 수 없어요).")
+            return
+        names = {r["id"]: f"{'📌 ' if r.get('week_id') == wid else ''}{r.get('title') or '클리닉'} · {r.get('week', '')} · {r.get('date', '')} · {r.get('n', len(r['qids']))}문항"
+                 for r in recs}
+        a1, a2, a3 = st.columns([4, 1.6, 1.1], vertical_alignment="bottom")
+        rid = a1.selectbox("클리닉 고르기 (📌 지금 고른 주차)", list(names), format_func=names.get, key="qb_carch_pick")
+        rec = next(r for r in recs if r["id"] == rid)
+        if a2.button("📄 다시 만들기 (AI 비용 없음)", type="primary", use_container_width=True, key="qb_carch_make"):
+            got = {r["id"]: r for r in qb_fetch_ids(sb, rec["qids"])}
+            qs = [got[i] for i in rec["qids"] if i in got]
+            meta = {"brand": "클리닉 미니모의고사", "kind": school_name, "show_tag": True, "show_gichul": False, "with_answers": True,
+                    "show_style": False, "show_time": True, **(rec.get("meta") or {})}
+            meta["title"] = meta.get("title") or rec.get("title") or "클리닉"
+            meta["academy"] = academy_name
+            if len(qs) != len(rec["qids"]) and meta.get("sub"):
+                meta["sub"] = re.sub(r"총 \d+문항", f"총 {len(qs)}문항", str(meta["sub"]))
+            page = render_qbank_exam(qs, meta, gichul_index(load_gichul_map(), labels_all)) if qs else ""
+            st.session_state.qb_carch_out = (rid, page, len(qs), len(rec["qids"]) - len(qs), meta["title"], [r["id"] for r in qs])
+        with a3.popover("🗑️ 지우기", use_container_width=True):
+            st.warning("이 클리닉을 보관함에서 지울까요? 보관 기록만 지우고 문제 은행의 문제와 주차는 그대로예요.")
+            if st.button("네, 지울게요", type="primary", key="qb_carch_del"):
+                qb_clinic_saved_update(sb, lambda rs: [r for r in rs if r.get("id") != rid])
+                st.session_state.pop("qb_carch_out", None)
+                st.rerun()
+        out = st.session_state.get("qb_carch_out")
+        if out and out[0] == rid:
+            _, page, n, n_gone, title, qids = out
+            if n_gone:
+                st.warning(f"{n_gone}문항은 문제 은행에서 지워져서 빠졌어요 (남은 {n}문항으로 만들었어요).")
+            if not page:
+                st.error("이 클리닉의 문항이 모두 지워져서 다시 만들 수 없어요.")
+                return
+            safe = re.sub(r'[\\/:*?"<>|]', "", title).strip() or "클리닉"
+            st.download_button(f"📥 클리닉 HTML 다운로드 ({n}문항) — 열어서 '인쇄 / PDF로 저장'", page, f"{safe}.html", "text/html",
+                               use_container_width=True, key="qb_carch_dl")
+            render_choice_trans_ui(sb, "qb_carch_tr", qids, title, text_model, academy_name, school_name)
+            with st.expander("미리 보기", expanded=False):
+                components.html(page, height=850, scrolling=True)
+
 def qb_clinic_mix(total: int, levels: List[str]) -> Dict[str, int]:
     """총 문항 수 → 난이도별 문항 수 (중4·상8·최상8 비율, 고른 난이도만)"""
     base = {lv: QB_CLINIC_MIX.get(lv, 4) for lv in levels} or {"상": 1}
@@ -8531,6 +8872,7 @@ def render_weekly_clinic(sb, mock_lib: List[Dict], by_label: Dict, summary: List
                     st.rerun()
     if wid == "__new__":
         st.caption("지문을 고르고 이름을 붙여 저장하면 아래에서 클리닉을 만들 수 있어요.")
+        render_clinic_archive(sb, wid, set(by_label), text_model, academy_name, school_name)  # 주차를 지웠어도 보관된 클리닉은 다시 받을 수 있게
         return
     labels = sorted(w.get("labels", []), key=lambda l: natural_sort_key({"label": l}))
     labels = [l for l in labels if l in by_label]
@@ -8538,6 +8880,7 @@ def render_weekly_clinic(sb, mock_lib: List[Dict], by_label: Dict, summary: List
     if not passages:
         # 저장된 주차 지문이 원문 라이브러리에서 모두 지워졌거나 이름이 바뀐 경우 (예전엔 여기서 오류가 나 아래 탭까지 멈췄음)
         st.warning("이 주차에 저장된 지문이 지금 원문 라이브러리에 하나도 없어요 (지워졌거나 이름이 바뀜). 위에서 지문을 다시 골라 저장해 주세요.")
+        render_clinic_archive(sb, wid, set(by_label), text_model, academy_name, school_name)
         return
     # 이 주차 지문을 묶어 만든 문제(이어 붙이기·(A)(B))도 함께 · 모자란 문제는 짧은 교과서 단락을 자동으로 묶어 만듦
     links_w = [l for l in qb_link_labels(sb) if set(qb_link_parts(l)[1]) <= set(labels)]
@@ -8614,10 +8957,13 @@ def render_weekly_clinic(sb, mock_lib: List[Dict], by_label: Dict, summary: List
             st.session_state.qb_clinic_html = render_qbank_exam(picked, meta, gichul_index(load_gichul_map(), set(by_label)))
             st.session_state.qb_clinic_info = (len(picked), short2, meta["title"], [r["id"] for r in picked])
             st.session_state.qb_clinic_marked = False
+            st.session_state.qb_clinic_kept = qb_clinic_keep(sb, w, [r["id"] for r in picked], meta)  # 보관함에 자동으로 (다시 받기는 AI 비용 없음)
     if st.session_state.get("qb_clinic_html"):
         n, short2, fname, qids = st.session_state.qb_clinic_info
         if short2:
             st.warning("문제가 모자라 " + " · ".join(f"{lv} {k}문항" for lv, k in short2.items()) + " 빠진 채로 만들었어요.")
+        if st.session_state.get("qb_clinic_kept"):
+            st.caption("📂 이 클리닉은 아래 '만든 클리닉 다시 받기'에 보관됐어요. 나중에 같은 문제·같은 순서로 다시 출력할 수 있어요.")
         safe = re.sub(r'[\\/:*?"<>|]', "", fname).strip() or "클리닉"
         d1, d2 = st.columns([3, 1.3])
         d1.download_button(f"📥 클리닉 HTML 다운로드 ({n}문항) — 열어서 '인쇄 / PDF로 저장'", st.session_state.qb_clinic_html, f"{safe}.html", "text/html",
@@ -8631,6 +8977,7 @@ def render_weekly_clinic(sb, mock_lib: List[Dict], by_label: Dict, summary: List
             st.rerun()
         render_choice_trans_ui(sb, "qb_clinic_tr", qids, fname, text_model, academy_name, school_name)
         components.html(st.session_state.qb_clinic_html, height=850, scrolling=True)
+    render_clinic_archive(sb, wid, set(by_label), text_model, academy_name, school_name)
 
 def _qb_passage_picker(key: str, mock_lib: List[Dict], counts: Dict[str, int]) -> List[str]:
     """출처·학년·시험을 고른 뒤 번호 칩을 눌러 지문을 고름 (여러 시험에 걸쳐 모아 담김)"""
@@ -10057,9 +10404,10 @@ APP_HELP = {
 - **📅 주간 클리닉**: 그 주에 배운 지문을 주차로 저장해 두면, 그 지문으로 만든 변형문제만 모아 클리닉 미니모의고사(기본 20문항 · 중4/상8/최상8 · 한 학교 스타일 · 실제 기출 제외)를 만들어요. 모자라면 '모자란 문제 만들기'가 지문·유형을 골고루 나눠 필요한 만큼만 생성하고, '낸 것으로 표시'하면 다음 클리닉에서 그 문항은 빠져요.
 - **순서 유형 선택지**는 수능처럼 ① (A)-(C)-(B) ② (B)-(A)-(C) ③ (B)-(C)-(A) ④ (C)-(A)-(B) ⑤ (C)-(B)-(A)로 고정돼요 ((A)로 시작하는 선지는 ① 하나). 예전에 만든 순서 문제도 시험지에서는 이렇게 바뀌어 나와요.
 - **어법 밑줄**: 섞기(학교 기출 비율로 단어·구 밑줄과 문장 전체 밑줄을 무작위로) / 단어·구 / 문장 전체.
-- **문항마다 출제 장치를 무작위로 정해요** (AI 비용 추가 없음): 어법은 실제 기출 개념 약 20가지 중 2~3개를 '꼭 묻기'로 뽑아요. 학교마다 지금까지 만든 문제를 세서 덜 나온 개념부터 채우기 때문에, 분사처럼 많이 나온 개념만 반복되지 않고 실제 출제된 개념(5형식·관계부사·대명사 지칭·복합관계사 등)이 모두 고르게 나와요. 시험지를 뽑을 때도 어법 문제는 이미 나온 개념과 덜 겹치는 것을 골라요.
-  영어 선택지·<보기>·요약문은 두 학교 모두 늘 재진술하고, 주제를 뒤집은 오답(제일고 1~2개, 운양고 가끔)을 넣어요.
-  정답 번호도 프로그램이 ①~⑤에 고르게 정해요. 상·최상은 실제 내신처럼 지문 단어를 그대로 쓴 '낚는 선지'를 ①·②에, 완전히 다른 말로 바꾼 정답을 ③·④(가끔 ⑤)에 둬요.
+- **문항마다 출제 장치를 무작위로 정해요** (AI 비용 추가 없음): 어법은 실제 기출 개념 약 20가지 중 2, 3개를 '꼭 묻기'로 뽑아요. 학교마다 지금까지 만든 문제를 세서 덜 나온 개념부터 채우기 때문에, 분사처럼 많이 나온 개념만 반복되지 않고 실제 출제된 개념(5형식·관계부사·대명사 지칭·복합관계사 등)이 모두 고르게 나와요. 시험지를 뽑을 때도 어법 문제는 이미 나온 개념과 덜 겹치는 것을 골라요.
+  영어 선택지·<보기>·요약문은 두 학교 모두 늘 재진술하고, 주제를 뒤집은 오답(제일고 한두 개, 운양고 가끔)을 넣어요.
+  정답 번호도 프로그램이 ①부터 ⑤까지 고르게 정해요. 상·최상은 실제 내신처럼 지문 단어를 그대로 쓴 '낚는 선지'를 주로 정답보다 앞 번호에 두고, 오답 한두 개도 정답만큼 다른 말로 써서 '낯선 선지 = 정답'으로 찍히지 않게 해요.
+  조합형(어법·<보기> '있는 대로')은 선택지 5개를 프로그램이 실제 기출처럼 흩어 정하고, 요약문은 다섯 쌍의 단어를 서로 다르게 써요 (v1.3 찍기 요령 차단).
   제일고 상·최상은 순서 문제의 덩어리를 새로 써서 원문과 다른 순서로 만들거나, 지문 전체를 다시 쓰기도 해요.
   **헷갈림 장치**(중 25%·상 60%·최상 90%): 100점 학생도 '어렵다'고 표시한 실제 기출 방식을 유형마다 하나씩 넣어요 — 주제·제목은 글 일부의 구체어를 묶은 오답, 요약문은 한 칸만으로 안 갈리는 쌍,
   내용 일치는 맞는 선지를 낯설게 바꿔 쓰고 틀린 선지는 지문 단어 그대로 한 단어만 뒤집기, 삽입은 단어만 겹치는 가짜 자리, 어법은 같은 함정 두 번 + 긴 주어. 해설 끝에 '헷갈리는 포인트'가 한 줄 붙어요.
@@ -10231,14 +10579,15 @@ def render_dna_board():
 
     lv_rows = "".join(
         f"<tr><td><b>{lv}</b></td><td>{QB_TRAP_RATE.get(lv, 0):.0%}</td><td>{esc(QB_LEVEL_RULES.get(lv, ''))}</td></tr>" for lv in QB_LEVELS)
-    pos_txt = " · ".join(f"{CIRCLED[p]} {w:.0%}" for p, w in zip(QB_TRAP_ANS_POS, QB_TRAP_ANS_W))
     st.markdown(f"""<div class='dnab-card'>
 <h4>두 학교 공통 — 난이도별로 이렇게 만듭니다</h4>
 <table class='dnab-tbl'><tr><th>난이도</th><th>함정형 문항 비율<br><span style='font-weight:400'>(선택지 유형)</span></th><th>난이도 기준</th></tr>{lv_rows}</table>
 <ul class='dnab-li' style='margin-top:10px'>
-<li><b>함정형 문항</b>: 지문 단어를 그대로 많이 쓴 '낚는 선지'를 앞 번호(①·②)에 두고, 정답은 지문 단어를 거의 쓰지 않은 다른 말로 뒤에 둡니다. 정답 번호 — {pos_txt}.</li>
-<li><b>헷갈림 장치</b>(중 {QB_FEEL_RATE['중']:.0%} · 상 {QB_FEEL_RATE['상']:.0%} · 최상 {QB_FEEL_RATE['최상']:.0%}): 100점 학생도 '어렵다'고 표시한 실제 기출 방식을 유형마다 하나 넣고(구체어 오답·한 칸으로 안 갈리는 요약문·맞는 선지 낯설게·가짜 삽입 자리·같은 어법 함정 두 번), 해설 끝에 '헷갈리는 포인트'를 붙입니다.</li>
-<li><b>나머지 문항</b>은 정답을 ①·②·⑤ 쪽으로 조금 더 보내서, 시험지 전체로 보면 정답 번호가 고르게 나오게 합니다.</li>
+<li><b>함정형 문항</b>: 지문 단어를 그대로 많이 쓴 '낚는 선지'를 정답보다 앞 번호에 주로({QB_TRAP_AHEAD:.0%}) 두고, 정답은 지문 단어를 옮기지 않은 다른 말로 씁니다. 오답 1~2개도 정답만큼 다른 말로 써서 '낯선 선지 = 정답'으로 찍히지 않게 합니다.</li>
+<li><b>헷갈림 장치</b>(중 {QB_FEEL_RATE['중']:.0%} · 상 {QB_FEEL_RATE['상']:.0%} · 최상 {QB_FEEL_RATE['최상']:.0%}): 100점 학생도 '어렵다'고 표시한 실제 기출 방식을 유형마다 하나 넣고(구체어 오답·주체/강도 바꾸기·한 칸으로 안 갈리는 요약문·맞는 선지 낯설게·상식 함정·정도/시간 한 단어·가짜 삽입 자리·같은 어법 함정 두 번), 해설 끝에 '헷갈리는 포인트'를 붙입니다.</li>
+<li><b>정답 번호</b>는 선택지형이면 ①부터 ⑤까지 고르게 뽑습니다(실제 기출도 번호마다 약 20%).</li>
+<li><b>조합형</b>(어법·&lt;보기&gt; '있는 대로')은 선택지 5개를 프로그램이 실제 기출처럼 흩어 정하고 개수 → 사전순으로 놓습니다. 가운데 조합이나 많이 나온 기호로 찍어도 맞지 않게 합니다(실제 기출 23% · 예전 변형 약 90%).</li>
+<li><b>요약문</b>은 다섯 쌍의 단어를 서로 다르게 써서 '자주 나온 단어 = 정답'으로 찍히지 않게 합니다.</li>
 <li><b>선택지·&lt;보기&gt;·요약문 문장</b>은 난이도와 상관없이 원문 문장을 그대로 옮기지 않고 모두 다른 말로 씁니다(실제 기출에서 원문 표현이 0~6%만 남음).</li>
 <li>문제를 만든 뒤 <b>정답을 한 번 더 따로 풀어 보고</b>, 맞지 않으면 버립니다.</li>
 </ul></div>""", unsafe_allow_html=True)
