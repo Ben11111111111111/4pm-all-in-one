@@ -5634,6 +5634,29 @@ def qb_yt_plans(plans: List[List[str]], points: List[Dict], focus: bool, rnd=Non
             used = True
     return used
 
+# ---- 출제 규칙 버전 (2026-11-10): 학교 스타일을 담는 규칙을 바꿀 때마다 올리고, 만든 문제에 그때 버전을 남김 ----
+#   버전 기록이 없는 예전 문제는 v1.0으로 봄 (저장된 문제를 고치지 않고 읽을 때만 판단). 실제 기출은 버전 없음
+QB_RULES_VERSION = "1.1"
+QB_RULES_HISTORY = [
+    ("1.0", "~2026-11-09", "학교 스타일·지문 변형 비율·어법 출제 빈도·헷갈림 장치·난이도 판정 (선지 길이 기준 없음)"),
+    ("1.1", "2026-11-10", "학년 반영 · 학교·학년·유형별 선지 길이(24~26년 실제 기출 30개 측정) · 상·최상 선지 어휘 기준"),
+]
+
+def qb_ver(r: Dict) -> str:
+    """문제의 출제 규칙 버전 ('1.0'·'1.1' …, 실제 기출은 빈 문자열)"""
+    if r.get("difficulty") == QB_GICHUL_LEVEL:
+        return ""
+    return str((r.get("content") or {}).get("ver") or "1.0")
+
+def qb_ver_mix(qs: List[Dict]) -> str:
+    """'v1.1 12 · v1.0 18' (변형문제만, 높은 버전 먼저)"""
+    cnt = {}
+    for r in qs:
+        v = qb_ver(r)
+        if v:
+            cnt[v] = cnt.get(v, 0) + 1
+    return " · ".join(f"v{v} {n}" for v, n in sorted(cnt.items(), key=lambda x: [int(t) for t in x[0].split(".") if t.isdigit()], reverse=True))
+
 def qb_build_prompt(label: str, text: str, q_type: str, level: str, school: str, count: int,
                     avoid: List[str], dna_rules: str, essay_rules: str, existing: List[Dict] = None, underline: str = "mix",
                     yt_points: List[Dict] = None, yt_focus: bool = False, unit_other: str = "", grade: str = ""):
@@ -5923,6 +5946,7 @@ def qb_save_questions(sb, gclient, model: str, item: Dict, questions: List[Dict]
         if not ok:
             continue
         q["verified"] = bool(item.get("verify", True)) and not q.pop("_unverified", False)
+        q["ver"] = QB_RULES_VERSION  # 이 문제를 만든 출제 규칙 버전 (시험지 문항 위에 표시)
         qt = q.pop("_q_type", q_type)
         lv = level
         jl, why = q.pop("_judged", (None, ""))
@@ -7260,7 +7284,7 @@ def render_qbank_exam(qs: List[Dict], meta: Dict, gidx: Dict[str, List[Dict]]) -
                      + (f" · {html.escape(re.sub(r'\s*점\s*$', '', str(src['points'])))}점" if src.get("points") else ""))
         else:
             style = f"{html.escape(r.get('school') or '')} 스타일 · " if meta.get("show_style", True) else ""
-            badge = f"<span class='bd var'>변형 · {style}{html.escape(r['difficulty'])}</span>"  # 🎣 표시는 학생이 알아채지 않게 해설 쪽에만
+            badge = f"<span class='bd var'>변형 · {style}{html.escape(r['difficulty'])} · v{html.escape(qb_ver(r))}</span>"  # 🎣 표시는 학생이 알아채지 않게 해설 쪽에만
         t = f"▶ {html.escape(r['passage_label'])} · {html.escape(r['q_type'])} {badge}"
         if meta.get("show_gichul"):
             groups = {}
@@ -7792,6 +7816,9 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
                 ("고른 지문: " + " · ".join(f"{g_} <b>{n_}개</b>" for g_, n_ in sorted(g_found.items())) + " → 선지 길이를 그 학년 실제 기출에 맞춰요"
                  + (" (모름은 학교 전체 평균)" if "모름" in g_found else "")) if gen_grade == "지문 따라"
                 else f"모든 지문을 <b>{school} {gen_grade}</b> 실제 기출 선지 길이에 맞춰요") + "</div>", unsafe_allow_html=True)
+            _v, _d, _what = QB_RULES_HISTORY[-1]
+            st.caption(f"📌 지금 출제 규칙 **v{_v}** ({_d}): {_what} — 만드는 문제마다 이 버전이 붙고, 시험지 문항 위에 'v{_v}'로 보여요. "
+                       "버전이 없는 예전 문제는 v1.0이에요.")
             # 난이도마다 만들 문제 수 (지문 × 유형마다) = 난이도 비중 (예: 최상 3 · 상 2 · 중 1 → 50% · 33% · 17%)
             lv_n = {}
             levels = [lv for lv in QB_LEVELS if lv in levels]  # 누른 순서와 관계없이 최상·상·중·하 순서로
@@ -9672,7 +9699,8 @@ def render_final_exam(qs: List[Dict], meta: Dict) -> str:
         o.append(f"<div class='ans-page'><div class='anshead'>{html.escape(title)} 정답 및 해설</div>")
         if meta.get("predicted") is not None:
             o.append(f"<div class='keynote'>교사용 · 예상 평균 {meta['predicted']:g}점 / {total:g}점 · 난이도 구성: "
-                     + " · ".join(f"{lv} {sum(1 for r in qs if r['difficulty'] == lv)}" for lv in QB_LEVELS + [QB_GICHUL_LEVEL] if any(r['difficulty'] == lv for r in qs)) + "</div>")
+                     + " · ".join(f"{lv} {sum(1 for r in qs if r['difficulty'] == lv)}" for lv in QB_LEVELS + [QB_GICHUL_LEVEL] if any(r['difficulty'] == lv for r in qs))
+                     + (f" · 출제 규칙 {qb_ver_mix(qs)}" if qb_ver_mix(qs) else "") + "</div>")
         for s in range(0, len(qs), 12):
             part = qs[s:s + 12]
             nos = []
