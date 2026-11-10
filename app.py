@@ -7450,6 +7450,96 @@ def qb_exam_log_update(sb, change):
     _store_put(sb, QB_EXAM_LOG_FILE, {"records": change(records)})
     qb_exam_log.clear()
 
+# 만든 시험지 보관함 (2026-11-10): 다운로드한 시험지를 문항 id·표시 옵션과 함께 남겨 나중에 같은 시험지를 다시 받음 (최근 60개, AI 비용 없음)
+#   '💾 문항 기록 저장'(이미 낸 문항 빼기용) 기록도 문항 id가 있어서 함께 다시 받을 수 있음
+QB_EXAM_SAVED_FILE = os.path.join(BASE_DIR, "qb_exam_saved.json")
+QB_EXAM_SAVED_MAX = 60
+QB_EXAM_META_DEFAULT = {"brand": "변형문제 TEST", "kind": "", "show_tag": True, "show_gichul": True, "with_answers": True,
+                        "show_style": True, "show_time": True, "as_book": True}
+
+def qb_exam_saved(sb) -> List[Dict]:
+    return (_store_get(sb, QB_EXAM_SAVED_FILE, {}) or {}).get("records", [])
+
+def qb_exam_saved_update(sb, change):
+    recs = (_store_get(sb, QB_EXAM_SAVED_FILE, {}) or {}).get("records", [])
+    _store_put(sb, QB_EXAM_SAVED_FILE, {"records": change(recs)[:QB_EXAM_SAVED_MAX]})
+
+def qb_exam_keep(sb, title: str, qids: List[str], meta: Dict):
+    """다운로드한 시험지를 보관함에 (문항 구성이 같으면 하나로 두고 날짜만 새로)"""
+    from datetime import datetime, timedelta, timezone
+    if not qids:
+        return
+    key = hashlib.md5(",".join(qids).encode("utf-8")).hexdigest()[:10]
+    rec = {"id": key, "title": title, "n": len(qids), "date": datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:%M"),
+           "qids": list(qids), "meta": dict(meta or {})}
+    try:
+        qb_exam_saved_update(sb, lambda rs: [rec] + [r for r in rs if r.get("id") != key])
+    except Exception:
+        pass  # 보관은 덤이라 실패해도 다운로드는 그대로
+
+def qb_exam_sub(qs: List[Dict]) -> str:
+    """'실제 기출 3 · 변형 27 (최상 9 · 상 12 · 중 6) · 총 30문항'"""
+    real = sum(1 for r in qs if r["difficulty"] == QB_GICHUL_LEVEL)
+    var = [r for r in qs if r["difficulty"] != QB_GICHUL_LEVEL]
+    cnt = _qb_chip_counts(var, "difficulty")
+    parts = ([f"실제 기출 {real}"] if real else []) + \
+            ([f"변형 {len(var)} (" + " · ".join(f"{lv} {cnt[lv]}" for lv in QB_LEVELS if cnt.get(lv)) + ")"] if var else [])
+    return " · ".join(parts + [f"총 {len(qs)}문항"])
+
+def render_exam_archive(sb, labels_all: set, text_model: str, academy_name: str, school_name: str):
+    """📂 만든 시험지 다시 받기: 보관함(다운로드한 시험지) + 문항 기록 → 같은 문제·같은 순서로 시험지 HTML·선지 해석본"""
+    items = [("s", r) for r in qb_exam_saved(sb)] + [("l", r) for r in qb_exam_log(sb) if r.get("qids")]
+    with st.expander(f"📂 만든 시험지 다시 받기 · 보관된 시험지 {len(items)}개", expanded=bool(st.session_state.get("qb_arch_out"))):
+        if not items:
+            st.caption("아직 보관된 시험지가 없어요. 위에서 시험지를 다운로드하거나 '💾 문항 기록 저장'을 하면 여기에 남아요.")
+            return
+        names = {}
+        for src, r in items:
+            t = r.get("title") or r.get("name") or "시험지"
+            names[f"{src}:{r['id']}"] = (f"{'📥' if src == 's' else '💾'} {t} · {r.get('date', '')} · {r.get('n', len(r.get('qids', [])))}문항"
+                                         + (f" · 기록 이름 '{r['name']}'" if src == "l" and r.get("name") and r.get("name") != t else ""))
+        a1, a2, a3 = st.columns([4, 1.6, 1.1], vertical_alignment="bottom")
+        pick = a1.selectbox("시험지 고르기 (📥 다운로드해서 보관된 것 · 💾 문항 기록 저장한 것)", list(names), format_func=names.get, key="qb_arch_pick")
+        src, rid = pick.split(":", 1)
+        rec = next(r for s_, r in items if s_ == src and r["id"] == rid)
+        if a2.button("📄 다시 만들기 (AI 비용 없음)", type="primary", use_container_width=True, key="qb_arch_make"):
+            got = {r["id"]: r for r in qb_fetch_ids(sb, rec["qids"])}
+            qs = [got[i] for i in rec["qids"] if i in got]
+            meta = {**QB_EXAM_META_DEFAULT, **(rec.get("meta") or {})}
+            meta["title"] = meta.get("title") or rec.get("title") or rec.get("name") or "변형문제"
+            meta["academy"] = academy_name
+            meta["sub"] = meta.get("sub") or qb_exam_sub(qs)
+            gmap = load_gichul_map()
+            gidx = gichul_index(gmap, labels_all)
+            if meta.pop("as_book", True):
+                meta["book_stats"] = qb_book_stats(gmap, gidx)
+            st.session_state.qb_arch_out = (pick, render_qbank_exam(qs, meta, gidx) if qs else "", len(qs), len(rec["qids"]) - len(qs),
+                                            meta["title"], [r["id"] for r in qs])
+        with a3.popover("🗑️ 지우기", use_container_width=True):
+            st.warning(("이 시험지를 보관함에서 지울까요? 시험지 기록만 지우고 문제 은행의 문제는 그대로예요." if src == "s" else
+                        "이 문항 기록을 지울까요? 지우면 '이미 낸 문항 빼기'에서도 사라져요. 문제 은행의 문제는 그대로예요."))
+            if st.button("네, 지울게요", type="primary", key="qb_arch_del"):
+                if src == "s":
+                    qb_exam_saved_update(sb, lambda rs: [r for r in rs if r.get("id") != rid])
+                else:
+                    qb_exam_log_update(sb, lambda rs: [r for r in rs if r.get("id") != rid])
+                st.session_state.pop("qb_arch_out", None)
+                st.rerun()
+        out = st.session_state.get("qb_arch_out")
+        if out and out[0] == pick:
+            _, page, n, n_gone, title, qids = out
+            if n_gone:
+                st.warning(f"{n_gone}문항은 문제 은행에서 지워져서 빠졌어요 (남은 {n}문항으로 만들었어요).")
+            if not page:
+                st.error("이 시험지의 문항이 모두 지워져서 다시 만들 수 없어요.")
+                return
+            safe = re.sub(r'[\\/:*?"<>|]', "", title).strip() or "변형문제"
+            st.download_button(f"📥 시험지 HTML 다운로드 ({n}문항) — 열어서 '인쇄 / PDF로 저장'", page, f"{safe}.html", "text/html",
+                               use_container_width=True, key="qb_arch_dl")
+            render_choice_trans_ui(sb, "qb_arch_tr", qids, title, text_model, academy_name, school_name)
+            with st.expander("미리 보기", expanded=False):
+                components.html(page, height=850, scrolling=True)
+
 def _qb_is_mock(p: Dict) -> bool:
     return bool(p.get("year") and p.get("month"))
 
@@ -7922,6 +8012,7 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
     with t_exam:
         st.caption("고른 번호에서 같은 개수씩 골고루 뽑고, 번호 안에서는 유형을 돌아가며 섞습니다.")
         st.caption("🧭 이럴 때: 지문·유형·문항 수를 마음대로 정해 시험지를 만들 때 · 매주 같은 구성은 '📅 주간 클리닉', 학교 실제 시험과 같은 구성·배점은 왼쪽 '🏁 영T FINAL 모의고사'")
+        render_exam_archive(sb, set(by_label), text_model, academy_name, school_name)
         sel_e = _qb_passage_picker("qb_exam_labels", mock_lib, label_counts)
         with st.container(key="qb_card_exam_opts"):
             st.markdown("<div class='qb-title'>시험지 구성</div>", unsafe_allow_html=True)
@@ -8076,6 +8167,7 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
                 if as_book:
                     meta["book_stats"] = qb_book_stats(gmap, gidx)
                 st.session_state.qb_exam_html = render_qbank_exam(picked, meta, gidx)
+                st.session_state.qb_exam_meta = {**{k: v for k, v in meta.items() if k not in ("book_stats", "academy")}, "as_book": bool(as_book)}
                 st.session_state.qb_exam_info = (len(picked), notes, title or default_title or "변형문제")
                 st.session_state.qb_exam_qids = [r["id"] for r in picked]
                 st.session_state.qb_exam_logged = False
@@ -8088,7 +8180,9 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
                 st.warning(note)
             safe = re.sub(r'[\\/:*?"<>|]', "", fname).strip() or "변형문제"
             st.download_button(f"📥 시험지 HTML 다운로드 ({n}문항) — 열어서 '인쇄 / PDF로 저장'", st.session_state.qb_exam_html,
-                               f"{safe}.html", "text/html", use_container_width=True, key="qb_exam_dl")
+                               f"{safe}.html", "text/html", use_container_width=True, key="qb_exam_dl",
+                               on_click=qb_exam_keep, args=(sb, fname, list(st.session_state.get("qb_exam_qids", [])), dict(st.session_state.get("qb_exam_meta") or {})),
+                               help="다운로드하면 아래 '📂 만든 시험지 다시 받기'에 자동으로 보관돼요")
             s1, s2 = st.columns([3, 1.2], vertical_alignment="bottom")
             log_name = s1.text_input("이 시험지 기록 이름", placeholder="예: 김민수 1차 · 고1 A반 중간 대비", key="qb_exam_log_name",
                                      help="기록해 두면 다음 시험지를 만들 때 '이미 낸 문항'에서 골라 이 문항들을 뺄 수 있어요")
@@ -8097,7 +8191,8 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
             elif s2.button("💾 문항 기록 저장", use_container_width=True, key="qb_exam_log_save", disabled=not log_name.strip()):
                 from datetime import datetime, timedelta, timezone
                 rec = {"id": uuid.uuid4().hex[:10], "name": log_name.strip(), "title": fname, "n": n,
-                       "date": datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d"), "qids": st.session_state.get("qb_exam_qids", [])}
+                       "date": datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d"), "qids": st.session_state.get("qb_exam_qids", []),
+                       "meta": dict(st.session_state.get("qb_exam_meta") or {})}
                 qb_exam_log_update(sb, lambda rs: [rec] + rs)
                 st.session_state.qb_exam_logged = True
                 st.rerun()
