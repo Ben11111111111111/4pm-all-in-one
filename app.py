@@ -2018,7 +2018,7 @@ def render_victory(p):
     img_url = get_image_base64(p)
     img_html = f'<img src="{img_url}">' if img_url else '<div style="color:#ccc;">No Image</div>'
     kw_html = "".join([
-        f'<div class="keyword-item"><span class="keyword-word">{esc(kw.get("word",""))}</span> ({esc(kw.get("meaning",""))}) : {esc(kw.get("synonyms",""))}</div>'
+        f'<div class="keyword-item"><span class="keyword-word">{esc(kw.get("word",""))}</span> ({esc(kw.get("meaning",""))}){(" : " + esc(kw.get("synonyms",""))) if str(kw.get("synonyms","")).strip() else ""}</div>'
         for kw in data.get("keywords", [])[:8]
     ])
     top_section = f"""
@@ -2489,8 +2489,8 @@ def render_core(p: Dict) -> str:
             <div class="summary-en"><span class="core-badge" style="background:#0047AB; color:white;">Summary {i}</span> {eng_hl}</div>
             <div class="summary-ko">해석: {esc(s.get('kor', ''))}</div>
             <div class="summary-ans-bar">
-                <div>🎯 <b>(A) 정답: {esc(ba)}</b> vs 오답: {esc(dist_a)} <span style="color:#475569;">({esc(sa_syn)})</span></div>
-                <div>🎯 <b>(B) 정답: {esc(bb)}</b> vs 오답: {esc(dist_b)} <span style="color:#475569;">({esc(sb_syn)})</span></div>
+                <div>🎯 <b>(A) 정답: {esc(ba)}</b> vs 오답: {esc(dist_a)}{f' <span style="color:#475569;">({esc(sa_syn)})</span>' if str(sa_syn).strip() else ""}</div>
+                <div>🎯 <b>(B) 정답: {esc(bb)}</b> vs 오답: {esc(dist_b)}{f' <span style="color:#475569;">({esc(sb_syn)})</span>' if str(sb_syn).strip() else ""}</div>
             </div>
         </div>"""
 
@@ -2517,7 +2517,7 @@ def render_core(p: Dict) -> str:
     for cv in data.get("core_vocab", [])[:10]:
         syn_txt = ", ".join([f"{s.get('word','')}({s.get('meaning','')})" for s in cv.get("synonyms", [])[:2] if s.get("word")])
         ant_txt = ", ".join([f"{a.get('word','')}({a.get('meaning','')})" for a in cv.get("antonyms", [])[:1] if a.get("word")])
-        rel_str = f"유의: {syn_txt}" + (f" | 반의: {ant_txt}" if ant_txt else "")
+        rel_str = " | ".join(x for x in ((f"유의: {syn_txt}" if syn_txt else ""), (f"반의: {ant_txt}" if ant_txt else "")) if x)
         cv_items.append(
             f"<div>• <b style='color:#0047AB;'>{esc(cv.get('word',''))}</b> [{esc(cv.get('pronunciation',''))}] "
             f"{esc(cv.get('meaning',''))} <span style='color:#64748b; font-size:9.8px;'>({esc(rel_str)})</span></div>"
@@ -2917,9 +2917,15 @@ SCHEMA_PAST_PDF_VOCA = {
     "required": ["school_name", "exam_year_term", "grade", "questions"]
 }
 
+# 유의어 규칙 (2026-11-10): 개수를 꼭 채우라고 하면 상위어·연상어가 섞여 나옴 (enzyme ≈ protein, perishable ≈ degradable)
+#   → 시험 선택지에서 바꿔 써도 뜻이 같은 말만, 확실하지 않으면 빼게 함. 교재·PPT·단어장 생성 프롬프트에 함께 씀
+SYN_RULE = ("유의어는 시험 선택지에서 그 단어 자리에 바꿔 넣어도 문장 뜻이 그대로인 말(같은 품사·같은 뜻)만 쓴다. "
+            "상위어·하위어(enzyme '효소' → protein '단백질'), 관련어·연상어(perishable '상하기 쉬운' → degradable '분해되는'), "
+            "뜻이 더 넓거나 좁은 말은 쓰지 않는다. 확실하지 않으면 개수를 채우지 말고 빼며, 맞는 말이 없으면 비워 둔다.")
+
 VICTORY_PROMPT = """너는 한국 고등학생 영어 내신용 '한판승' 교재 편집자다. 지문을 분석해 JSON만 반환하라.
 1. summary: 반드시 '한글(한국어)'로 작성된 핵심 요약 2문장.
-2. keywords: 중요 단어 8개. synonyms는 반드시 "동의어1(뜻), 동의어2(뜻)" 형식으로 2개 작성.
+2. keywords: 중요 단어 8개. synonyms는 "동의어1(뜻), 동의어2(뜻)" 형식으로 최대 2개. """ + SYN_RULE + """ 맞는 동의어가 없으면 빈 문자열.
 3. analysis: 모든 문장 분석.
    - eng: 문장에 끊어 읽기 표시(/)를 삽입해라. 단, 종속절의 자잘한 주어/동사가 아닌 **문장 전체의 메인 주어(S), 본동사(V), 메인 목적어(O), 메인 보어(C)**만 표시하고, 관계대명사절 등 나머지는 묶어서 수식어구(M)로 처리해라.
    ★(중요) 표시 형태는 반드시 해당 어구를 대괄호로 묶고 바로 뒤에 괄호로 기호를 붙여라.
@@ -2947,7 +2953,7 @@ VICTORY_PROMPT = """너는 한국 고등학생 영어 내신용 '한판승' 교�
 ANATOMY_PROMPT = """너는 한국 고등학생용 영어 내신 교재를 만드는 최상급 편집자다. 지문을 분석해 반드시 JSON만 반환하라.
 지문 정보: {label}
 [반환 규칙]
-1. vocab: 정확히 10개 추출. synonyms_text는 반드시 "동의어1(뜻), 동의어2(뜻)" 형식으로 작성.
+1. vocab: 정확히 10개 추출. synonyms_text는 "동의어1(뜻), 동의어2(뜻)" 형식으로 최대 2개. """ + SYN_RULE + """ 맞는 동의어가 없으면 빈 문자열.
 2. translation: 지문 전체의 자연스러운 한국어 해석.
 3. grammar_points: 핵심 문법 3개 (title, explanation).
 4. structure_flow: 반드시 '➔'를 사용한 도식형으로 작성.
@@ -3053,11 +3059,12 @@ def analyze_passage(label, text, model_name, target_type="victory", core_context
    - 서로 다른 문장 구조로 지문 전체를 요약한 영문 문장 3개 작성.
    - 반드시 영문 요약문(eng) 안에 `(A) 정답단어` 와 `(B) 정답단어` 형태로 표기할 것!
    - blank_a, blank_b에는 각각 (A), (B)의 정확한 정답 영어 단어를 적고, distractor_a, distractor_b에는 각각 (A), (B) 자리에 들어갈 매력적인 오답 영어 단어(반의어 또는 철자 유사 함정 어휘 1단어, 품사 일치 필수)를 적을 것.
-   - synonyms_a, synonyms_b에는 각각 동의어 2개와 오답 단어의 뜻을 "동의어1(뜻), 동의어2(뜻) / [함정]오답단어(뜻)" 형태로 작성할 것.
+   - synonyms_a, synonyms_b에는 각각 정답 단어의 동의어(최대 2개)와 오답 단어의 뜻을 "동의어1(뜻), 동의어2(뜻) / [함정]오답단어(뜻)" 형태로 작성할 것. 동의어는 아래 [유의어 규칙]에 맞는 것만 쓰고, 없으면 "[함정]오답단어(뜻)"만 쓴다.
 5. paraphrased_tf (내신 <보기>형 패러프레이징 진위 문장 4선):
    - 2개는 O(True: 참 진술), 2개는 X(False: 매력적인 오답 진술). 단, O와 X의 배치 순서는 예측할 수 없게 섞어서 작성하라.
 6. core_vocab (위 주제/제목/요지/요약문/진위문에서 사용된 핵심 패러프레이징 어휘 8~10개):
-   - pronunciation은 반드시 '한글 발음'으로만 적고, synonyms(2개)와 antonyms(1~2개)도 각각 word, pronunciation(한글발음), meaning(뜻)을 완비할 것.
+   - pronunciation은 반드시 '한글 발음'으로만 적고, synonyms(최대 2개, [유의어 규칙]에 맞는 것만 — 없으면 빈 배열)와 antonyms(1~2개)도 각각 word, pronunciation(한글발음), meaning(뜻)을 완비할 것.
+[유의어 규칙] {SYN_RULE}
 
 지문 정보: {label}
 지문: \"\"\"{text}\"\"\""""
@@ -3083,7 +3090,7 @@ def analyze_passage(label, text, model_name, target_type="victory", core_context
    - Track 2 (`category`: "★CORE 패러프레이징"): 주제문, 제목, 요지문, 요약문 빈칸(A)/(B)용 상위 개념어 및 핵심 요약 어휘 5~8개.
 3. 각 항목 세부 규칙:
    - word: 영어 단어 또는 숙어 / pos: 품사 약어 / pronunciation: 한글 발음(IPA 금지, 한글로만 표기!) / meaning: 한국어 뜻
-   - synonyms: 유의어/대체 표현 2~3개 (word, pronunciation, meaning 필수).
+   - synonyms: 유의어/대체 표현 최대 3개 (word, pronunciation, meaning 필수). {SYN_RULE} 맞는 말이 없으면 빈 배열.
    - antonyms: 반의어 또는 철자 유사 혼동어 1~2개 (word, pronunciation, meaning 필수).
 
 지문 정보: {label}{core_ref_str}
@@ -4333,7 +4340,7 @@ GEN_WORKER_LEASE_SEC = 1200  # 작업 담당 서버가 이 시간 동안 소식�
 #   저장 시각만 먼저 읽어 그대로면 내용을 다시 내려받지 않음.
 #   (예전에는 지문 하나 만들 때마다 '이미 있나' 확인·저장 직전에 교재 문서 전체를 여러 번 받아서 DB 전송량이 컸음)
 #   스레드에서 st.cache_resource를 부르지 않도록, 화면이 실행될 때 같은 dict를 꺼내 둠.
-_BIG_DOC_KEYS = {filepath_to_doc_key(f) for f in (VICTORY_FILE, ANATOMY_FILE, CORE_FILE, VOCA_FILE, PAST_VOCA_FILE, MOCK_FILE)}
+_BIG_DOC_KEYS = {filepath_to_doc_key(f) for f in (VICTORY_FILE, ANATOMY_FILE, CORE_FILE, VOCA_FILE, PAST_VOCA_FILE, MOCK_FILE)} | {"syn_review", "gichul_full"}  # AI 검수 기록(약 1MB)도 바뀌었을 때만 다시 받음
 _SHARED_DOC_CACHE = _lib_mem_cache()
 
 def _store_get(sb, filepath, default=None):
@@ -4606,6 +4613,8 @@ def gen_worker_main(api_key: str, sb_url: str, sb_key: str):
                 sb_factory = (lambda: create_client(sb_url, sb_key)) if sb is not None else (lambda: None)
                 if item.get("kind") == "qbank":
                     ok, err = _generate_qbank_item(sb_factory, gclient, item, job.get("opts", {}), dna_rules, essay_rules, logs, yt_points)
+                elif item.get("kind") == "trans":
+                    ok, err = _trans_item(sb_factory, item, job.get("opts", {}), logs)
                 else:
                     ok, err = _generate_item(sb_factory, gclient, item, {**job.get("opts", {}), "essay_rules": essay_rules}, dna_rules, logs,
                                              heartbeat=lambda: _job_update(sb, claim))
@@ -4735,7 +4744,7 @@ def _render_gen_job_body(job: Dict):
     if status == "running" and c["waiting"] and not c["pending"]:
         status_text = "🟢 반값 모드 결과 기다리는 중 · 보통 몇 분~몇 시간, 길면 24시간 · 서버가 2분마다 확인해서 들어온 것부터 저장해요"
     st.markdown(f"**⚙️ 교재 생성 작업** — {status_text}")
-    st.progress(finished / max(1, c["total"]), text=f"{finished}/{c['total']} 지문 처리 · 실패 {c['failed']}개 · 남음 {c['pending']}개"
+    st.progress(finished / max(1, c["total"]), text=f"{finished}/{c['total']}건 처리 · 실패 {c['failed']}개 · 남음 {c['pending']}개"
                 + (f" · 💸 반값 결과 대기 {c['waiting']}개" if c["waiting"] else ""))
     if job.get("current"):
         st.caption(f"⏳ 지금 처리 중: {job['current']}" + (f" · 🤖 {ai_model_label(job['current_model'])}" if job.get("current_model") else ""))
@@ -4759,6 +4768,17 @@ def _render_gen_job_body(job: Dict):
             _job_update(supabase if IS_CLOUD_DB else None, lambda j: use_model(j, cur_model))
             st.rerun()
 
+    # 서버가 다시 켜지는 등으로 담당 서버가 사라지면 20분(GEN_WORKER_LEASE_SEC) 뒤에 자동으로 이어받음 → 8분 넘게 소식이 없으면 바로 이어받기 버튼
+    lease_age = time.time() - float((job.get("worker") or {}).get("ts", time.time()))
+    #   (이 서버의 스레드는 화면이 그려질 때마다 새로 떴다가 다른 서버 표시를 보고 바로 끝나므로 '살아 있음'으로는 판단하지 않음)
+    if status == "running" and c["pending"] and lease_age > 480:
+        k1, k2 = st.columns([3, 1.2], vertical_alignment="center")
+        k1.warning(f"작업을 처리하던 서버 소식이 {int(lease_age // 60)}분째 없어요 (서버가 다시 켜졌을 수 있어요). "
+                   f"{max(0, int((GEN_WORKER_LEASE_SEC - lease_age) // 60))}분 뒤에는 자동으로 이어서 하고, 지금 바로 이어서 하려면 오른쪽을 누르세요. 끝난 건은 그대로 저장돼 있어요.")
+        if k2.button("▶️ 지금 이어서 진행", type="primary", use_container_width=True, key="gen_takeover"):
+            _job_update(supabase if IS_CLOUD_DB else None, lambda j: (j.update(worker=None), _job_log(j, "▶️ 멈춘 작업을 이어서 진행")))
+            start_gen_thread()
+            st.rerun()
     b1, b2, b3, b4 = st.columns(4)
     if status == "running":
         if b1.button("⏸️ 생성 중단 (지금 지문 끝내고 멈춤)", use_container_width=True, key="gen_stop"):
@@ -4800,7 +4820,7 @@ def _gen_job_live_body(slow: bool):
     c = _gen_job_counts(job)
     # 지문이 완료될 때마다 화면의 교재 목록을 DB에서 다시 불러와, 화면이 오래된 목록으로 덮어쓰지 않게 함
     # (변형문제는 교재 목록과 상관없으므로 세지 않음)
-    done_books = sum(1 for it in job.get("items", []) if it.get("state") == "done" and it.get("kind") != "qbank")
+    done_books = sum(1 for it in job.get("items", []) if it.get("state") == "done" and it.get("kind") not in ("qbank", "trans"))
     seen = st.session_state.get("gen_seen_done")
     if seen is not None and seen != done_books:
         # 지문이 빨리 끝날 때 몇 초마다 교재 전체를 다시 받지 않게 1분에 한 번까지만 (작업이 끝나면 바로)
@@ -4851,6 +4871,7 @@ def render_gen_job_panel():
 # -----------------------------
 QB_TABLE = "question_bank"
 QB_FILE = os.path.join(BASE_DIR, "question_bank.json")   # Supabase가 없을 때만 쓰는 로컬 저장
+GICHUL_FULL_FILE = os.path.join(BASE_DIR, "gichul_full.json")  # 실제 기출 시험지 전 문항 (발문·지문·선지·정답) — 2026-11-10부터, 학교·학년별 분석용
 GICHUL_FILE = os.path.join(BASE_DIR, "gichul_map.json")   # 실제 기출 시험지 문항 → 원문 라이브러리 지문 연결
 QB_LEVELS = ["최상", "상", "중", "하"]
 QB_SCHOOLS = ["운양고", "제일고"]
@@ -5006,6 +5027,50 @@ QB_PASSAGE_TYPES = {"순서", "삽입", "무관한 문장", "빈칸", "낱말 (�
 # ---- 문항별 출제 계획 (파이썬이 문항마다 무작위로 정해 프롬프트 뒤쪽에 붙임 · AI 호출 추가 없음, 공통 앞부분 캐시 그대로) ----
 # 2026-11-04 실제 기출 54문항(올바르게 연결된 것) 재측정: 영어 선택지·<보기>·요약문 문장은 두 학교 모두 원문 4단어 묶음이 0~6%만 남음
 QB_CHOICE_TYPES = {"주제", "제목", "요지·주장", "내용 일치·불일치", "<보기> 일치 조합형", "빈칸", "요약문 (A)(B)", "함축 의미", "추론 (추론 가능·불가)"}
+# 영어 선택지 하나의 단어 수 (2026-11-10 측정: 운양고·제일고 24~26년 고1·고2 시험지 30개, 'FINAL 단어 수 재기'로 문항마다 잰 영어 선지 단어 ÷ 5)
+#   우리 변형문제는 같은 유형에서 실제보다 1.3~2배 길었고, '중'도 최상만큼 길었음 → 학교·학년·유형별로 이 길이에 맞춤 (난이도와 관계없이)
+#   학년 자료가 모자란 칸(운양고1 함축 등)은 그 학교 24~26년 전체 평균. 추론은 내용 일치와 같게
+QB_GRADES = ["고1", "고2"]
+QB_CHOICE_LEN = {
+    ("운양고", "고1"): {"주제": 9, "제목": 8, "요지·주장": 17, "내용 일치·불일치": 16, "빈칸": 7, "함축 의미": 10},
+    ("운양고", "고2"): {"주제": 9, "제목": 9, "요지·주장": 19, "내용 일치·불일치": 13, "빈칸": 8, "함축 의미": 10},
+    ("제일고", "고1"): {"주제": 10, "제목": 8, "요지·주장": 14, "내용 일치·불일치": 15, "빈칸": 7, "함축 의미": 10},
+    ("제일고", "고2"): {"주제": 11, "제목": 8, "요지·주장": 17, "내용 일치·불일치": 17, "빈칸": 8, "함축 의미": 12},
+    ("운양고", ""): {"주제": 9, "제목": 9, "요지·주장": 18, "내용 일치·불일치": 15, "빈칸": 8, "함축 의미": 10},
+    ("제일고", ""): {"주제": 10, "제목": 8, "요지·주장": 16, "내용 일치·불일치": 16, "빈칸": 9, "함축 의미": 11},
+}
+
+def qb_passage_grade(p) -> str:
+    """지문의 학년: 원문 라이브러리의 grade(모의고사) → 이름 '[2025년 10월 고1]' → 교과서 이름(공통영어 = 고1, 영어Ⅰ·Ⅱ = 고2). 모르면 ''"""
+    label = str(p.get("label", "") if isinstance(p, dict) else p)
+    g = str(p.get("grade", "") if isinstance(p, dict) else "").strip()
+    if re.fullmatch(r"고[123]", g):
+        return g
+    m = re.search(r"고\s*([123])\s*\]", label) or re.search(r"(?<![가-힣])고([123])(?![0-9])", label)
+    if m:
+        return "고" + m.group(1)
+    if "공통영어" in label:
+        return "고1"
+    if re.search(r"영어\s*(Ⅰ|Ⅱ|II|I|1|2)(?![0-9])", label):
+        return "고2"
+    return ""
+
+def qb_choice_len_rule(school: str, grade: str, q_type: str, level: str) -> str:
+    """[이번 출제]에 붙이는 선지 길이·어휘 기준 (영어 선지 유형만). 호출마다 다른 뒷부분이라 캐시는 그대로"""
+    key_t = "내용 일치·불일치" if q_type == "추론 (추론 가능·불가)" else q_type
+    tbl = (QB_CHOICE_LEN.get((school, grade)) or {}) if grade else {}
+    src = f"{school} {grade}" if key_t in tbl else school
+    n = tbl.get(key_t) or (QB_CHOICE_LEN.get((school, "")) or {}).get(key_t)
+    if not n:
+        return ""
+    lo, hi = max(2, round(n * 0.6)), round(n * 1.4)
+    out = (f"[선택지 길이 — {src} 실제 기출(24~26년) 측정] 영어 선택지 하나는 평균 약 {n}단어로 쓴다. 5개 모두 {lo}~{hi}단어 안에 두고, "
+           f"가장 긴 선택지도 {hi}단어를 넘기지 않는다. 난이도는 길이가 아니라 재진술·함정 구조로 올린다(최상도 이 길이를 지킨다). "
+           "실제 시험보다 선택지가 길면 학생이 '우리 학교 시험과 다르다'고 느낀다.")
+    if level in ("상", "최상"):
+        out += ("\n[선택지 어휘 — 실제 기출 측정] 실제 선택지는 고교 필수 단어 밖의 어려운 단어가 5단어에 1개 정도다. "
+                "상위 개념어 재진술은 선택지마다 1~2개로 하고, 지문보다 어려운 단어를 늘어놓아 어렵게 만들지 않는다.")
+    return out
 QB_CHOICE_PARA = ("영어 선택지·<보기> 진술·요약문 문장은 난이도와 상관없이 원문 문장을 그대로 옮기지 않고 모두 다른 말로 재진술한다"
                   "(하·중은 쉬운 어휘로, 상·최상은 상위 개념어·구조 변경으로). 한국어 선택지는 직역이 아니라 의미 요약으로 쓴다.")
 QB_OPPOSITE_TRAP = ("오답 {n}개는 지문 핵심어를 그대로 쓰면서 글의 주장·결론을 뒤집은 재진술로 만든다"
@@ -5571,8 +5636,8 @@ def qb_yt_plans(plans: List[List[str]], points: List[Dict], focus: bool, rnd=Non
 
 def qb_build_prompt(label: str, text: str, q_type: str, level: str, school: str, count: int,
                     avoid: List[str], dna_rules: str, essay_rules: str, existing: List[Dict] = None, underline: str = "mix",
-                    yt_points: List[Dict] = None, yt_focus: bool = False, unit_other: str = ""):
-    """→ (공통 앞부분, 이번 출제 부분, 문항별 계획)
+                    yt_points: List[Dict] = None, yt_focus: bool = False, unit_other: str = "", grade: str = ""):
+    """→ (공통 앞부분, 이번 출제 부분, 문항별 계획). grade: '고1'·'고2' (비우면 지문 이름으로 판단)
     프롬프트 앞부분(출제 DNA + 공통 규칙)은 모든 호출에서 글자 하나까지 같게 두어 캐시로 읽히게 하고,
     학교·유형·난이도·지문처럼 호출마다 다른 내용은 뒤에 붙임"""
     avoid_str = ""
@@ -5612,10 +5677,13 @@ def qb_build_prompt(label: str, text: str, q_type: str, level: str, school: str,
 - 만든 뒤 스스로 점검: 상·최상인데 상위권 고등학생이 한눈에 정답을 고를 수 있으면(정답만 혼자 튀거나 오답이 명백히 틀림) 기준에 맞게 다시 어렵게 고친다.
 - explanation은 한국어 2~4줄: 근거(영어 원문 일부) + 오답 이유.
 - 서식 태그는 <u>, <b>만 쓴다."""
-    task = f"""[이번 출제] {school} 스타일 · [{q_type}] 유형 · 난이도 [{level}] · {count}문항
+    grade = grade or qb_passage_grade(label)
+    len_rule = qb_choice_len_rule(school, grade, q_type, level) if q_type in QB_CHOICE_TYPES else ""
+    task = f"""[이번 출제] {school}{(" " + grade) if grade else ""} 스타일 · [{q_type}] 유형 · 난이도 [{level}] · {count}문항
 
 [{school} 출제 스타일]
 {QB_SCHOOL_STYLE.get(school, '')}
+{len_rule}
 
 [난이도 {level} 기준]
 {QB_LEVEL_RULES[level]}
@@ -5632,10 +5700,10 @@ def qb_build_prompt(label: str, text: str, q_type: str, level: str, school: str,
 
 def qb_generate(gclient, model: str, label: str, text: str, q_type: str, level: str, school: str, count: int,
                 avoid: List[str], dna_rules: str, essay_rules: str, logs: List[str], existing: List[Dict] = None, underline: str = "mix",
-                yt_points: List[Dict] = None, yt_focus: bool = False, unit_other: str = "") -> List[Dict]:
+                yt_points: List[Dict] = None, yt_focus: bool = False, unit_other: str = "", grade: str = "") -> List[Dict]:
     """변형문제 count개 생성 (형식이 맞지 않는 문항은 버림)"""
     shared, task, plans = qb_build_prompt(label, text, q_type, level, school, count, avoid, dna_rules, essay_rules, existing, underline,
-                                          yt_points, yt_focus, unit_other)
+                                          yt_points, yt_focus, unit_other, grade)
     out = _qb_call(gclient, model, [shared, task], SCHEMA_QBANK, 0.7, logs, f"{label} {q_type} {level} 생성", cache_first=True)
     return qb_parse(out, q_type, count, plans, text)
 
@@ -5797,7 +5865,8 @@ def _generate_qbank_item(sb_factory, gclient, item: Dict, opts: Dict, dna_rules:
     for round_idx in range(len(GEN_RETRY_WAITS) + 1):
         time.sleep(opts.get("api_delay", 3))
         questions = qb_generate(gclient, model, label, item["text"], q_type, level, school, count, avoid, dna_rules, essay_rules, logs,
-                                existing, item.get("underline", "mix"), yt_points, bool(item.get("yt_focus")), item.get("unit_other", ""))
+                                existing, item.get("underline", "mix"), yt_points, bool(item.get("yt_focus")), item.get("unit_other", ""),
+                                item.get("grade", ""))
         if questions:
             break
         if round_idx < len(GEN_RETRY_WAITS):
@@ -5887,7 +5956,7 @@ def qb_batch_submit(sb, items: List[Dict], opts: Dict, dna_rules: str, essay_rul
             avoid = [str((r.get("content") or {}).get("focus", "")) for r in existing if (r.get("content") or {}).get("focus")]
             shared, task, plans = qb_build_prompt(it["passage_label"], it["text"], it["q_type"], it["difficulty"], it.get("school", "운양고"),
                                                   int(it.get("count", 2)), avoid, dna_rules, essay_rules, existing, it.get("underline", "mix"),
-                                                  yt_points, bool(it.get("yt_focus")), it.get("unit_other", ""))
+                                                  yt_points, bool(it.get("yt_focus")), it.get("unit_other", ""), it.get("grade", ""))
             groups.setdefault(job_item_model(it, opts), []).append((it, shared, task, plans))
         except Exception as e:
             upd[it["id"]] = {"batch": False}
@@ -6090,8 +6159,9 @@ def qb_link_labels(_sb) -> List[str]:
 
 def enqueue_qbank(passages: List[Dict], q_types: List[str], levels: List[str], school: str, count: int, verify: bool,
                   text_model: str, api_delay: int, academy_name: str, school_name: str, light_easy: bool = False, underline: str = "mix",
-                  batch: bool = False, yt_focus: bool = False, plan: List[tuple] = None, note: str = "") -> int:
-    """지문 × 유형 × 난이도 조합마다 작업 1건씩 추가 (light_easy: 하·중은 같은 제공사의 가벼운 모델로)"""
+                  batch: bool = False, yt_focus: bool = False, plan: List[tuple] = None, note: str = "", grade: str = "") -> int:
+    """지문 × 유형 × 난이도 조합마다 작업 1건씩 추가 (light_easy: 하·중은 같은 제공사의 가벼운 모델로)
+    grade: '고1'·'고2'로 고르면 모든 건에, 비우면 지문마다 원문 라이브러리 학년·지문 이름으로 (선지 길이 기준에 씀)"""
     sb = supabase if IS_CLOUD_DB else None
     added = {"n": 0}
     # 영쌤 포인트 중 '교과서만'이 켜져 있으면, 교과서 지문에는 같은 단원 다른 단락을 함께 넘김 (그 포인트가 쓰이는 유형만)
@@ -6130,7 +6200,8 @@ def enqueue_qbank(passages: List[Dict], q_types: List[str], levels: List[str], s
                                  "text_key": _job_text_key(job, p.get("body_text", "")), "q_type": t, "difficulty": lv, "school": school,
                                  "count": cnt, "verify": verify, "state": "pending", "error": "",
                                  "light": bool(light_easy and lv in ("하", "중")), "underline": underline, "batch": bool(batch),
-                                 "yt_focus": bool(yt_focus), "unit_key": (_job_text_key(job, uo) if (uo := unit_for(p, t)) else "")})
+                                 "yt_focus": bool(yt_focus), "unit_key": (_job_text_key(job, uo) if (uo := unit_for(p, t)) else ""),
+                                 "grade": grade or qb_passage_grade(p)})
             added["n"] += 1
         _job_log(job, f"➕ 변형문제 {added['n']}건 추가 ({note or (school + ' · ' + ', '.join(levels) + f' · 건당 {count}문제')}{' · 💸 반값 모드' if batch else ''}"
                       f"{' · 🎣 영쌤 포인트 위주' if yt_focus else ''})")
@@ -6176,13 +6247,12 @@ def gichul_candidates_text(mock_lib: List[Dict]) -> str:
 
 def gichul_extract(gclient, model: str, pdf_part, file_name: str, candidates: str) -> Dict:
     prompt = f"""이 PDF는 운양고 또는 제일고 영어 내신 시험지다 (파일명: {file_name}).
-객관식·서술형 문항마다 번호, 배점, 유형, 지문 출처를 정리하고, 원문 지문과 연결되는 문항은 문제 전체를 옮겨라.
+객관식·서술형 모든 문항마다 번호, 배점, 유형, 지문 출처를 정리하고, 문제 전체를 시험지 그대로 옮겨라 (기출 분석용으로 모든 문항을 보관한다).
 - q_type은 주어진 목록에서 가장 가까운 것 (해당 없으면 '기타').
 - 각 문항 지문을 아래 [후보 지문 목록]의 지문 첫 부분과 비교해, 같은 지문이면 matched_label에 그 label을 그대로 적는다 (일부 문장만 같아도 같은 지문). 없으면 빈 문자열.
-- matched_label이 있는 문항은 시험지 그대로 옮긴다: stem(발문), given(주어진 글·문장), passage(지문 — 밑줄은 <u>…</u>, ⓐ~ⓖ·①~⑤·빈칸·(A)(B)(C) 표시 유지, 단락은 줄바꿈), box(<보기>·요약문·<조건>), choices(선택지 5개, 번호 기호 없이. 지문 속 ①~⑤가 선택지인 유형은 빈 문자열 5개, 서술형은 빈 배열).
+- 모든 문항을 시험지 그대로 옮긴다: stem(발문 — 시험지 문구 그대로, '[4~6] 다음 글의 제목으로 가장 적절한 것을 고르시오.' 같은 묶음 머리말이면 그 발문을, 부정어 밑줄 <u>않은</u>도 유지), given(주어진 글·문장), passage(지문 — 밑줄은 <u>…</u>, ⓐ~ⓖ·①~⑤·빈칸·(A)(B)(C) 표시 유지, 단락은 줄바꿈), box(<보기>·요약문·<조건>), choices(선택지 5개, 번호 기호 없이. 지문 속 ①~⑤가 선택지인 유형은 빈 문자열 5개, 서술형은 빈 배열).
 - 여러 문항이 지문 하나를 같이 쓰면 문항마다 passage를 똑같이 넣는다.
-- answer: 시험지의 학생 필기·표시는 믿지 말고 지문으로 직접 풀어 ①~⑤ 중 하나를 적는다 (서술형은 모범 답안). explanation은 한국어 2~3줄.
-- matched_label이 빈 문항은 stem만 적고 given·passage·box·answer는 빈 문자열, choices·explanation은 빈 배열로 둔다.
+- answer: 시험지의 학생 필기·표시는 믿지 말고 지문으로 직접 풀어 ①~⑤ 중 하나를 적는다 (서술형은 모범 답안). explanation은 한국어 1~2줄.
 - school, grade, exam_name은 표지·머리말·파일명으로 판단한다.
 - 서식 태그는 <u>, <b>만 쓴다.
 
@@ -6245,6 +6315,21 @@ def gichul_add_exam(exam_id: str, ex: Dict):
     gmap.setdefault("exams", {})[exam_id] = ex
     gmap["updated_at"] = time.strftime("%Y-%m-%d %H:%M")
     _store_put(sb_, GICHUL_FILE, gmap)
+
+def gichul_full_record(res: Dict, file_name: str, model: str) -> Dict:
+    """기출 시험지 전 문항 (발문·지문·선지·정답) — 학교·학년별 선지 길이·어휘·발문 말투·난이도 분석용 (문제 은행과 따로 보관)"""
+    meta = gichul_light(res, file_name)
+    keep = ("no", "points", "q_type", "source_hint", "matched_label", "stem", "given", "passage", "box", "choices", "answer", "explanation")
+    qs = [{k: (list(q.get(k) or []) if k in ("choices", "explanation") else q.get(k, "")) for k in keep} for q in res.get("questions", [])]
+    return {k: meta[k] for k in ("school", "grade", "exam_name", "file", "display")} | {"questions": qs, "model": model, "at": time.strftime("%Y-%m-%d")}
+
+def gichul_full_add(exam_id: str, rec: Dict):
+    """전 문항 기록 하나를 DB 최신 문서에 더해 바로 저장"""
+    sb_ = supabase if IS_CLOUD_DB else None
+    doc = _store_get(sb_, GICHUL_FULL_FILE, {}) or {}
+    doc.setdefault("exams", {})[exam_id] = rec
+    doc["updated_at"] = time.strftime("%Y-%m-%d %H:%M")
+    _store_put(sb_, GICHUL_FULL_FILE, doc)
 
 def gichul_index(gmap: Dict, labels: set) -> Dict[str, List[Dict]]:
     """지문 label → 그 지문이 나온 실제 기출 문항 목록 (운양고·제일고 전부, 최신 시험 먼저)"""
@@ -6936,6 +7021,51 @@ def qb_choice_trans(sb, qs: List[Dict], model: str, logs: List[str]) -> Dict[str
             logs.append(f"⚠️ {miss}문항은 해석을 받지 못했어요 (한 번 더 누르면 그 문항만 다시 해석해요)")
     return out
 
+# 선지 해석도 변형문제처럼 서버 작업으로 (2026-11-10): 창을 닫거나 인터넷이 끊겨도 서버에서 계속하고,
+#   문항 6개마다 1건이라 끊기거나 멈춰도 해석한 문항은 이미 문제에 저장돼 있음 → 다시 누르면 남은 문항만 이어서 해석
+def qb_trans_queued(job: Dict, qids: List[str]) -> int:
+    """작업 목록에서 아직 해석을 기다리는 (이 문항들 중) 문항 수"""
+    want = set(qids)
+    return len({q for it in job.get("items", []) if it.get("kind") == "trans" and it.get("state") == "pending" for q in it.get("qids", []) if q in want})
+
+def enqueue_trans(qs: List[Dict], text_model: str, api_delay: int, academy_name: str, school_name: str, note: str) -> int:
+    """아직 해석 안 된 문항을 6개씩 작업에 추가 (이미 기다리는 문항은 다시 넣지 않음) → 추가한 문항 수"""
+    sb = supabase if IS_CLOUD_DB else None
+    todo = [r["id"] for r in qs if qb_trans_parts(r) and qb_trans_cached(r) is None]
+    added = {"n": 0}
+
+    def add(job):
+        if job.get("status") not in ("running", "stopping"):
+            job["status"] = "running"
+            job["items"] = [it for it in job.get("items", []) if it.get("state") in ("pending", "failed", "waiting")]
+            job["created_at"] = time.time()
+            job["worker"] = None
+        queued = {q for it in job.get("items", []) if it.get("kind") == "trans" and it.get("state") == "pending" for q in it.get("qids", [])}
+        ids = [i for i in todo if i not in queued]
+        job["opts"] = {"model": text_model, "api_delay": api_delay, "academy_name": academy_name, "school_name": school_name}
+        for k in range(0, len(ids), QB_TRANS_BATCH):
+            job["items"].append({"id": str(uuid.uuid4()), "kind": "trans", "label": f"선지 해석 · {note} · {k // QB_TRANS_BATCH + 1}",
+                                 "qids": ids[k:k + QB_TRANS_BATCH], "light": True, "state": "pending", "error": ""})
+        added["n"] = len(ids)
+        if ids:
+            _job_log(job, f"➕ 선지 해석 {len(ids)}문항 추가 ({note})")
+    _job_update(sb, add)
+    start_gen_thread()
+    return added["n"]
+
+def _trans_item(sb_factory, item: Dict, opts: Dict, logs: List[str]) -> (bool, str):
+    """작업 1건: 문항 몇 개의 선지를 해석해 문제에 저장 (이미 해석된 문항은 건너뜀)"""
+    sb = sb_factory()
+    rows = [r for r in qb_fetch_ids(sb, item.get("qids") or []) if qb_trans_parts(r) and qb_trans_cached(r) is None]
+    if not rows:
+        return True, ""
+    qb_choice_trans(sb, rows, job_item_model(item, opts), logs)
+    left = [r for r in rows if qb_trans_cached(r) is None]
+    if left:
+        return False, f"{len(left)}문항은 해석을 받지 못했어요"
+    logs.append(f"✅ 선지 해석 {len(rows)}문항 저장")
+    return True, ""
+
 QB_TRANS_CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;700;900&family=Noto+Serif+KR:wght@400;700&display=swap');
 @page { size: A4; margin: 13mm 12mm; }
@@ -7042,15 +7172,18 @@ def render_voca_choice_option(prefix: str, sel_passages: List[Dict], text_model:
         c1, c2 = st.columns([3, 2], vertical_alignment="center")
         c1.caption(f"선지 단어 {sum(len(v) for v in added.values())}개 (단어장에 이미 있는 단어는 뺌) · "
                    f"선지 단어를 아직 안 뽑은 문제 {n_todo}개" + (f" → 뽑으면 약 {max(1, round(won)):,}원" if n_todo else ""))
-        if n_todo and c2.button(f"🔎 남은 {n_todo}문제 선지 단어 뽑기", use_container_width=True, key=f"{prefix}_pull_choice",
-                                help="문제마다 선지 해석과 단어를 한 번 뽑아 저장해요 (시험지 '선지 해석본'과 같은 데이터, 다시 뽑지 않음)"):
-            logs = []
-            with st.spinner(f"선지 단어를 뽑는 중... ({n_todo}문제)"):
-                qb_choice_trans(sb, todo, model, logs)
-            flush_ai_usage()
+        n_wait = qb_trans_queued(load_gen_job(), [r["id"] for r in todo]) if n_todo else 0
+        if n_wait:
+            c2.caption(f"⏳ 서버에서 선지 단어를 뽑는 중 ({n_wait}문제 남음) · 창을 닫아도 계속돼요")
+            if c2.button("🔄 새로 보기", use_container_width=True, key=f"{prefix}_pull_refresh"):
+                qb_rows_for_voca.clear()
+                st.rerun()
+        elif n_todo and c2.button(f"🔎 남은 {n_todo}문제 선지 단어 뽑기", use_container_width=True, key=f"{prefix}_pull_choice",
+                                  help="문제마다 선지 해석과 단어를 한 번 뽑아 저장해요 (시험지 '선지 해석본'과 같은 데이터, 다시 뽑지 않음). "
+                                       "서버 작업이라 창을 닫아도 계속되고, 뽑은 문제는 바로 저장돼요."):
+            n = enqueue_trans(todo, text_model, api_delay, academy_name, school_name, "Voca 선지 단어")
             qb_rows_for_voca.clear()
-            for m in logs:
-                st.warning(m)
+            st.session_state.gen_flash = f"✅ 선지 단어 뽑기 {n}문제를 서버 작업에 넣었어요. 다 되면 '새로 보기'를 누르세요."
             st.rerun()
     if not on:
         return sel_passages
@@ -7064,27 +7197,45 @@ def render_voca_choice_option(prefix: str, sel_passages: List[Dict], text_model:
     return out
 
 def render_choice_trans_ui(sb, key: str, qids: List[str], title: str, text_model: str, academy_name: str, school_name: str):
-    """시험지·클리닉 아래: 선지 해석본 만들기 + 단어장에 넣기"""
+    """시험지·클리닉 아래: 선지 해석본 만들기 + 단어장에 넣기
+    해석은 서버 작업으로 (창을 닫아도 계속, 끊겨도 해석한 문항은 저장). 모두 해석되면 버튼을 누르는 즉시 HTML (AI 비용 없음)"""
     with st.container(border=True):
-        qs_all = {r["id"]: r for r in qb_fetch_ids(sb, qids)} if f"{key}_rows" not in st.session_state or st.session_state[f"{key}_rows"][0] != qids else None
-        if qs_all is not None:
-            st.session_state[f"{key}_rows"] = (qids, [qs_all[i] for i in qids if i in qs_all])
+        job = load_gen_job()
+        n_wait = qb_trans_queued(job, qids)
+        cached = st.session_state.get(f"{key}_rows")
+        # 아직 해석 안 된 문항이 있으면 매번 새로 읽음 (서버 작업이 그사이 저장했을 수 있어서 · 문항 수십 개라 가벼움)
+        if (not cached or cached[0] != qids or n_wait or st.session_state.pop(f"{key}_refresh", False)
+                or any(qb_trans_parts(r) and qb_trans_cached(r) is None for r in cached[1])):
+            got_rows = {r["id"]: r for r in qb_fetch_ids(sb, qids)}
+            st.session_state[f"{key}_rows"] = (qids, [got_rows[i] for i in qids if i in got_rows])
         qs = st.session_state[f"{key}_rows"][1]
         model = light_model_for(text_model)
         n_todo, won = qb_trans_estimate(qs, model)
         n_has = sum(1 for r in qs if qb_trans_parts(r))
+        n_done = n_has - n_todo
         c1, c2 = st.columns([2, 3], vertical_alignment="center")
-        go = c1.button("📝 선지 해석본 만들기", use_container_width=True, key=f"{key}_btn", disabled=not n_has)
-        c2.caption(f"선지가 문장인 문항 {n_has}개 (순서·삽입·어법·낱말은 빠짐) · "
-                   + (f"새로 해석 {n_todo}문항, 예상 약 {max(1, round(won)):,}원" if n_todo else "모두 해석돼 있어서 0원")
-                   + " · 한 번 해석한 문항은 저장돼서 다시 뽑으면 0원")
-        if go:
-            logs = []
-            with st.spinner("선지를 해석하는 중... (20문항이면 30초~1분)"):
-                trans = qb_choice_trans(sb, qs, model, logs)
-            flush_ai_usage()
-            meta = {"title": title, "academy": academy_name}
-            st.session_state[f"{key}_out"] = (qids, render_choice_trans(qs, trans, meta), qb_trans_words(qs, trans), logs)
+        if n_todo and not n_wait:
+            go = c1.button(f"📝 선지 해석 시작 ({n_todo}문항)", use_container_width=True, key=f"{key}_btn", type="primary")
+            c2.caption(f"선지가 문장인 문항 {n_has}개 중 해석된 {n_done}개 · 남은 {n_todo}문항 해석 예상 약 {max(1, round(won)):,}원 · "
+                       "서버에서 해석해서 창을 닫거나 인터넷이 끊겨도 계속되고, 해석한 문항은 바로 저장돼요 (멈추면 남은 문항부터 이어서)")
+            if go:
+                n = enqueue_trans(qs, text_model, api_delay, academy_name, school_name, title)
+                st.session_state.gen_flash = f"✅ 선지 해석 {n}문항을 서버 작업에 넣었어요. 위 작업 칸에서 진행을 볼 수 있고, 다 되면 여기서 '선지 해석본 만들기'를 누르세요."
+                st.rerun()
+        elif n_wait:
+            c1.button("🔄 진행 상황 새로 보기", use_container_width=True, key=f"{key}_refresh_btn",
+                      on_click=lambda: st.session_state.__setitem__(f"{key}_refresh", True))
+            c2.markdown(f"<div class='qb-note' style='margin-top:0'>⏳ 서버에서 해석 중 · <b>{n_done}/{n_has}문항</b> 완료 · 기다리는 {n_wait}문항<br>"
+                        "창을 닫아도 계속돼요. 다 되면 이 자리에 '선지 해석본 만들기'가 나와요.</div>", unsafe_allow_html=True)
+        else:
+            c2.caption(f"선지가 문장인 문항 {n_has}개 모두 해석돼 있어요 (순서·삽입·어법·낱말은 빠짐) · 만들기는 AI 비용 0원")
+        if not n_wait and n_has and (not n_todo or n_done):
+            mk = st.columns([2, 3])[0].button("📄 선지 해석본 만들기" + (f" (해석된 {n_done}문항만)" if n_todo else ""), use_container_width=True,
+                                              key=f"{key}_make", disabled=not n_done)
+            if mk:
+                trans = qb_choice_trans(sb, [r for r in qs if qb_trans_cached(r) is not None], model, [])  # 저장된 해석만 씀 (AI 호출 없음)
+                meta = {"title": title, "academy": academy_name}
+                st.session_state[f"{key}_out"] = (qids, render_choice_trans(qs, trans, meta), qb_trans_words(qs, trans), [])
         got = st.session_state.get(f"{key}_out")
         if got and got[0] == qids:
             _, page, words, logs = got
@@ -7628,6 +7779,19 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
             levels = _qb_row("난이도").pills("난이도", QB_LEVELS, selection_mode="multi", default=["상", "중"], key="qb_gen_levels", label_visibility="collapsed") or []
             school = _qb_row("학교 스타일").segmented_control("학교 스타일", QB_SCHOOLS, default=QB_SCHOOLS[0], key="qb_gen_school",
                                                           label_visibility="collapsed") or QB_SCHOOLS[0]
+            # 학년: 선지 길이를 그 학교·학년 실제 기출에 맞춤. 기본은 지문 따라 (모의고사 학년·교과서 이름)
+            g_found = {}
+            for l in sel:
+                g_ = qb_passage_grade(by_label[l]) or "모름"
+                g_found[g_] = g_found.get(g_, 0) + 1
+            g_cols = _qb_row("학년").columns([3.2, 4.8], vertical_alignment="center")
+            gen_grade = g_cols[0].segmented_control("학년", ["지문 따라"] + QB_GRADES, default="지문 따라", key="qb_gen_grade",
+                                                    label_visibility="collapsed",
+                                                    help="선지 길이를 이 학교·학년의 24~26년 실제 기출에 맞춰요. '지문 따라'는 모의고사 학년, 교과서 이름(공통영어 = 고1, 영어Ⅰ·Ⅱ = 고2)으로 정해요.") or "지문 따라"
+            g_cols[1].markdown("<div class='qb-note' style='margin-top:0'>" + (
+                ("고른 지문: " + " · ".join(f"{g_} <b>{n_}개</b>" for g_, n_ in sorted(g_found.items())) + " → 선지 길이를 그 학년 실제 기출에 맞춰요"
+                 + (" (모름은 학교 전체 평균)" if "모름" in g_found else "")) if gen_grade == "지문 따라"
+                else f"모든 지문을 <b>{school} {gen_grade}</b> 실제 기출 선지 길이에 맞춰요") + "</div>", unsafe_allow_html=True)
             # 난이도마다 만들 문제 수 (지문 × 유형마다) = 난이도 비중 (예: 최상 3 · 상 2 · 중 1 → 50% · 33% · 17%)
             lv_n = {}
             levels = [lv for lv in QB_LEVELS if lv in levels]  # 누른 순서와 관계없이 최상·상·중·하 순서로
@@ -7711,7 +7875,8 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
             used_lv = [lv for lv in levels if lv_n.get(lv, 0) > 0]
             n = enqueue_qbank(gen_ps, q_types, used_lv, school, max(lv_n.values()), verify, text_model, api_delay, academy_name, school_name, light_easy, underline,
                               batch, yt_focus, plan=[(p, t, lv, lv_n[lv]) for p in gen_ps for t, lv in combos],
-                              note=f"{school} · " + " · ".join(f"{lv} {lv_n[lv]}" for lv in used_lv) + "문제씩")
+                              note=f"{school}{'' if gen_grade == '지문 따라' else ' ' + gen_grade} · " + " · ".join(f"{lv} {lv_n[lv]}" for lv in used_lv) + "문제씩",
+                              grade="" if gen_grade == "지문 따라" else gen_grade)
             st.session_state.gen_flash = f"✅ 변형문제 {n}건을 생성 작업에 추가했습니다. 위 작업 칸에서 진행 상황을 볼 수 있어요."
             st.rerun()
 
@@ -7946,8 +8111,9 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
         exams = gmap.get("exams") or {}
         gidx = gichul_index(gmap, set(by_label))
         st.caption(f"실제 기출 시험지 {len(exams)}개를 분석해 두었고, 원문 라이브러리 지문 {len(gidx)}개가 기출로 연결되어 있습니다. "
-                   "새 시험지 PDF를 올리면 문항별 출처를 찾아 '기출 이력'에 쓰고, 원문 라이브러리 지문으로 낸 문항은 **실제 기출문제**로 문제 은행에 수록합니다 "
-                   "(시험지 1개에 약 1분, 약 110원 · 영T FINAL용 지문 단어 수 재기 약 50원 포함).")
+                   "새 시험지 PDF를 올리면 문항별 출처를 찾아 '기출 이력'에 쓰고, 원문 라이브러리 지문으로 낸 문항은 **실제 기출문제**로 문제 은행에 수록합니다. "
+                   "모든 문항의 발문·지문·선지·정답도 기출 분석용으로 따로 보관해요 "
+                   "(시험지 1개에 약 2~3분, 약 200원 · 영T FINAL용 지문 단어 수 재기 약 50원 포함).")
         g_pdfs = st.file_uploader("📄 운양고·제일고 기출 시험지 PDF (여러 개 가능)", type=["pdf"], accept_multiple_files=True, key="gichul_pdf_uploader")
         if g_pdfs and st.button("🔎 기출 문항 출처 분석해서 추가", type="primary", key="gichul_btn"):
             cands = gichul_candidates_text(mock_lib)
@@ -7964,6 +8130,7 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
                     if n_off:
                         st.toast(f"⚠️ {f.name}: 원문과 내용이 맞지 않는 {n_off}문항은 연결하지 않았어요")
                     exams[key_md5] = gichul_light(res, f.name)
+                    gichul_full_add(key_md5, gichul_full_record(res, f.name, text_model))  # 전 문항 보관 (분석용)
                     w_stat = final_measure_words(client, text_model, pdf_to_part(f), f.name)  # 영T FINAL 단어 수 기준 (Gemini Flash 기준 약 50원)
                     if w_stat:
                         final_save_words(sb, key_md5, w_stat)
@@ -8919,8 +9086,8 @@ APP_HELP = {
 
 **🗂️ 문제 보기·삭제**: 지문 하나를 골라 쌓인 문제를 표로 보고, 체크해서 지울 수 있어요. ⚠️ 정답 확인 = 검증에서 답이 엇갈린 문제예요.
 
-**🏫 기출 표시 — 비용 발생 (시험지 1개 약 60원)**: 운양고·제일고 실제 시험지 PDF를 올리면 문항마다 **어느 모의고사 몇 번 지문인지** 찾아요.
-그 결과로 시험지에 '같은 지문 기출 이력'이 붙고, 원문 라이브러리 지문으로 낸 문항은 **실제 기출문제**로 문제 은행에 들어가요. 이미 올린 PDF는 다시 분석하지 않아요.
+**🏫 기출 표시 — 비용 발생 (시험지 1개 약 200원)**: 운양고·제일고 실제 시험지 PDF를 올리면 문항마다 **어느 모의고사 몇 번 지문인지** 찾아요.
+그 결과로 시험지에 '같은 지문 기출 이력'이 붙고, 원문 라이브러리 지문으로 낸 문항은 **실제 기출문제**로 문제 은행에 들어가요. 모든 문항의 발문·지문·선지·정답은 기출 분석용으로 따로 보관해요. 이미 올린 PDF는 다시 분석하지 않아요.
 AI가 짝지은 원문과 내용 단어가 20%도 안 겹치면 잘못 연결된 것으로 보고 연결하지 않아요.
 """,
 "library": """
@@ -9730,7 +9897,7 @@ def render_final_tab(text_model: str, api_delay: int, academy_name: str, school_
             if st.button(f"🛠️ 부족한 문제 만들기 작업 추가 ({', '.join(lk)} · {'·'.join(levels)}) · 고른 지문 {len(fb['labels'])}개 × 2문제 · 약 {cost:,.0f}원",
                          key="final_fill"):
                 n = enqueue_qbank([by_label[l] for l in fb["labels"] if l in by_label], lk, levels, school, 2, True, text_model, api_delay,
-                                  academy_name, school_name, True, "mix", False)
+                                  academy_name, school_name, True, "mix", False, grade=grade if grade in QB_GRADES else "")
                 st.session_state.gen_flash = f"✅ 문제 만들기 작업 {n}건을 추가했어요. 다 만들어지면 다시 'FINAL 만들기'를 눌러 주세요."
                 st.rerun()
         meta = {"school": school, "grade": grade, "round": fb["round"], "subject": fb["subject"], "term": series, "date": fb["date"],
@@ -10196,7 +10363,7 @@ def page_past_voca():
    - words: 해당 문항의 **지문 본문**과 **객관식 선지(1~5번 및 <보기>)**에 등장한 중고등 필수 어휘·숙어·패러프레이징 어휘를 빠짐없이 추출하라.
    - 초등 기초 단어(be동사, a, the, beautiful, happy, good 등)는 절대 제외하라.
    - 각 단어의 source_part에는 본문에서 나왔으면 '기출본문', 문제 선지나 <보기>/요약문에서 나왔으면 '기출선지'라고 정확히 구분해 적어라.
-   - pronunciation은 반드시 자연스러운 '한글 발음'(IPA 금지)으로 표기하고, 문맥에 맞는 유의어(synonyms 1~2개)와 반의어(antonyms 1~2개)도 각각 한글발음과 뜻을 포함해 작성하라."""
+   - pronunciation은 반드시 자연스러운 '한글 발음'(IPA 금지)으로 표기하고, 문맥에 맞는 유의어(synonyms 최대 2개)와 반의어(antonyms 1~2개)도 각각 한글발음과 뜻을 포함해 작성하라. {SYN_RULE} 맞는 유의어가 없으면 빈 배열."""
 
                 for attempt in range(4):
                     try:
@@ -10601,6 +10768,565 @@ def page_settings():
             st.success(st.session_state.pop("mig_done"))
 
 
+# =============================
+# ✅ 배포 전 검수 (2026-11-10): 조교샘이 교재·PPT를 내보내기 전에 지문마다 유의어와 정답만 훑어보는 화면 (AI 비용 없음)
+#   - 유의어: Voca 단어장 · 한판승 키워드 · Self-Note 어휘 · Core 핵심 어휘 · Core 요약문 (A)(B) → PPT·교재에 나오는 유의어가 모두 여기서 옴
+#     같은 지문·같은 단어·같은 유의어는 한 줄로 묶고, '틀림'으로 지우면 묶인 교재 모두에서 빠짐 (다음 출력·PPT부터 반영)
+#   - 정답: Core 요약문 (A)(B) 정답, Core <보기>형 진위 O/X, Self-Note OX 퀴즈 → 고친 정답은 저장
+#   - 한국어 뜻이 한 글자도 안 겹치는 유의어(예: enzyme 효소 ≈ protein 단백질)는 '먼저 볼 것'으로 표시
+# =============================
+REVIEW_SRC = {"w": "Voca", "v": "한판승", "a": "Self-Note", "c": "Core 어휘", "cs": "Core 요약문"}
+REVIEW_LIBS = {"w": ("saved_w", VOCA_FILE), "v": ("saved_v", VICTORY_FILE), "a": ("saved_a", ANATOMY_FILE),
+               "c": ("saved_c", CORE_FILE), "cs": ("saved_c", CORE_FILE)}
+REVIEW_STOP = set("하다는은을를의에이가적인한되게고있것수기함성로으와과도된할들적")
+REVIEW_FROM_SHARED = "다른 교재 화면에서 고른 지문"
+
+def review_split_rel(s) -> (List[str], str):
+    """'a(뜻), b(뜻) / [함정]c(뜻)' → (['a(뜻)', 'b(뜻)'], ' / [함정]c(뜻)')"""
+    s = str(s or "").strip()
+    m = re.search(r"\s*/\s*(?=\[함정\])", s)
+    head, tail = (s[:m.start()], s[m.start():]) if m else (s, "")
+    return [t.strip() for t in re.split(r",\s*(?![^()\[\]]*[)\]])", head) if t.strip()], tail
+
+def review_join_rel(toks: List[str], tail: str) -> str:
+    if not toks:
+        return re.sub(r"^\s*/\s*", "", tail)  # 유의어를 다 지운 요약문은 '[함정]오답(뜻)'만
+    return ", ".join(toks) + tail
+
+def review_tok(t: str) -> (str, str):
+    """'gather(모이다)' · 'gather[개더](모이다)' → ('gather', '모이다')"""
+    m = re.match(r"\s*([^(\[]*?)\s*(?:\[[^\]]*\])?\s*(?:\((.*)\))?\s*$", str(t))
+    return ((m.group(1) or "").strip(), (m.group(2) or "").strip()) if m else (str(t).strip(), "")
+
+def review_suspect(m1, m2) -> bool:
+    """두 한국어 뜻이 한 글자도 안 겹치면 '먼저 볼 것' (조사·'하다' 같은 흔한 글자는 빼고 셈, 뜻이 비면 판단 안 함)"""
+    a = {ch for ch in str(m1) if "가" <= ch <= "힣"} - REVIEW_STOP
+    b = {ch for ch in str(m2) if "가" <= ch <= "힣"} - REVIEW_STOP
+    return bool(a and b and not (a & b))
+
+def review_group_of(label: str) -> str:
+    m = re.match(r"\s*\[([^\]]+)\]", str(label))
+    return m.group(1).strip() if m else extract_group_prefix(label)
+
+def review_short(label: str) -> str:
+    return re.sub(r"^\s*\[[^\]]*\]\s*", "", str(label)) or str(label)
+
+def review_collect(labels: List[str]) -> (List[Dict], List[Dict]):
+    """고른 지문들의 유의어 행(한 교재 한 칸씩)과 정답 행 — 행마다 고칠 위치(src, i, tag) 포함"""
+    by = {k: {p.get("label"): p for p in st.session_state[sk]} for k, (sk, _) in REVIEW_LIBS.items() if k != "cs"}
+    syn, ans = [], []
+    def add(lbl, src, i, word, meaning, sw, sm, tag=""):
+        if str(sw).strip() and str(word).strip():
+            syn.append({"label": lbl, "src": src, "i": i, "tag": tag, "word": str(word).strip(), "meaning": str(meaning or "").strip(),
+                        "syn": str(sw).strip(), "syn_meaning": str(sm or "").strip()})
+    for lbl in labels:
+        d = (by["w"].get(lbl) or {}).get("data") or {}
+        for i, it in enumerate(d.get("voca_list") or []):
+            for x in it.get("synonyms") or []:
+                if isinstance(x, dict):
+                    add(lbl, "w", i, it.get("word"), it.get("meaning"), x.get("word"), x.get("meaning"))
+        d = (by["v"].get(lbl) or {}).get("data") or {}
+        for i, kw in enumerate(d.get("keywords") or []):
+            for t in review_split_rel(kw.get("synonyms"))[0]:
+                add(lbl, "v", i, kw.get("word"), kw.get("meaning"), *review_tok(t))
+        d = (by["a"].get(lbl) or {}).get("data") or {}
+        for i, v in enumerate(d.get("vocab") or []):
+            for t in review_split_rel(v.get("synonyms_text"))[0]:
+                add(lbl, "a", i, v.get("word"), v.get("meaning"), *review_tok(t))
+        for i, q in enumerate(d.get("quizzes") or []):
+            ans.append({"label": lbl, "src": "a", "i": i, "field": "answer", "kind": "Self-Note OX",
+                        "text": q.get("english_statement", ""), "answer": q.get("answer", ""), "note": q.get("korean_statement", "")})
+        d = (by["c"].get(lbl) or {}).get("data") or {}
+        for i, cv in enumerate(d.get("core_vocab") or []):
+            for x in cv.get("synonyms") or []:
+                if isinstance(x, dict):
+                    add(lbl, "c", i, cv.get("word"), cv.get("meaning"), x.get("word"), x.get("meaning"))
+        for i, sm in enumerate(d.get("summaries") or []):
+            for tag in ("a", "b"):
+                for t in review_split_rel(sm.get(f"synonyms_{tag}"))[0]:
+                    add(lbl, "cs", i, sm.get(f"blank_{tag}"), "", *review_tok(t), tag=tag)
+                ans.append({"label": lbl, "src": "c", "i": i, "field": f"blank_{tag}", "kind": f"Core 요약문 ({tag.upper()})",
+                            "text": sm.get("eng", ""), "answer": sm.get(f"blank_{tag}", ""), "note": "함정: " + str(sm.get(f"distractor_{tag}", ""))})
+        for i, tf in enumerate(d.get("paraphrased_tf") or []):
+            ans.append({"label": lbl, "src": "c", "i": i, "field": "tf", "kind": "Core 진위 O/X",
+                        "text": tf.get("eng", ""), "answer": tf.get("answer", ""), "note": tf.get("point", "")})
+    return syn, ans
+
+def review_group_syn(syn: List[Dict]) -> List[Dict]:
+    """같은 지문·같은 단어·같은 유의어는 한 줄로 (어느 교재에 있는지 함께 표시)"""
+    out, seen = [], {}
+    for r in syn:
+        k = (r["label"], r["word"].lower(), r["syn"].lower())
+        if k not in seen:
+            seen[k] = dict(r, srcs=[REVIEW_SRC[r["src"]]])
+            out.append(seen[k])
+        else:
+            g = seen[k]
+            if REVIEW_SRC[r["src"]] not in g["srcs"]:
+                g["srcs"].append(REVIEW_SRC[r["src"]])
+            g["meaning"] = g["meaning"] or r["meaning"]
+            g["syn_meaning"] = g["syn_meaning"] or r["syn_meaning"]
+    for g in out:
+        g["suspect"] = review_suspect(g["meaning"], g["syn_meaning"])
+    return out
+
+def review_delete_syns(picked: List[Dict], fixes: Dict = None) -> int:
+    """'틀림'으로 고른 (지문, 단어, 유의어)를 그 지문의 모든 교재에서 지움 → 바뀐 교재만 저장. 고친 칸 수
+    fixes: {(지문, 단어, 틀린 유의어): (바꿀 유의어, 한글 발음, 뜻)} → 지우는 대신 그 자리에 바꿔 넣음 (이미 있는 말이면 지우기만)"""
+    keys = {(r["label"], r["word"].lower(), r["syn"].lower()) for r in picked}
+    fixes = fixes or {}
+    by = {k: {p.get("label"): p for p in st.session_state[sk]} for k, (sk, _) in REVIEW_LIBS.items()}
+    fresh, _ = review_collect(sorted({r["label"] for r in picked}))
+    n, dirty = 0, set()
+    for r in fresh:
+        if (r["label"], r["word"].lower(), r["syn"].lower()) not in keys:
+            continue
+        d = (by[r["src"]].get(r["label"]) or {}).get("data") or {}
+        sw = r["syn"].lower()
+        fx = fixes.get((r["label"], r["word"].lower(), sw))
+        if r["src"] in ("w", "c"):
+            it = (d.get("voca_list" if r["src"] == "w" else "core_vocab") or [])[r["i"]]
+            old = [x for x in it.get("synonyms") or [] if isinstance(x, dict)]
+            have = {str(x.get("word", "")).strip().lower() for x in old} | {r["word"].lower()}
+            new = []
+            for x in old:
+                if str(x.get("word", "")).strip().lower() != sw:
+                    new.append(x)
+                elif fx and fx[0].strip() and fx[0].strip().lower() not in have:
+                    new.append({"word": fx[0].strip(), "pronunciation": fx[1].strip(), "meaning": fx[2].strip()})
+                    have.add(fx[0].strip().lower())
+            it["synonyms"] = new
+        else:
+            obj, field = {"v": (lambda: (d["keywords"][r["i"]], "synonyms")), "a": (lambda: (d["vocab"][r["i"]], "synonyms_text")),
+                          "cs": (lambda: (d["summaries"][r["i"]], f"synonyms_{r['tag']}"))}[r["src"]]()
+            toks, tail = review_split_rel(obj.get(field))
+            have = {review_tok(t)[0].lower() for t in toks} | {r["word"].lower()}
+            new = []
+            for t in toks:
+                if review_tok(t)[0].lower() != sw:
+                    new.append(t)
+                elif fx and fx[0].strip() and fx[0].strip().lower() not in have:
+                    new.append(f"{fx[0].strip()}({fx[2].strip()})")
+                    have.add(fx[0].strip().lower())
+            obj[field] = review_join_rel(new, tail)
+        n += 1
+        dirty.add(r["src"])
+    for k in {REVIEW_LIBS[x] for x in dirty}:
+        save_to_file(k[1], st.session_state[k[0]])
+    return n
+
+def review_save_answers(changes: List[tuple]) -> int:
+    """고친 정답 저장. 요약문 (A)(B) 정답을 바꾸면 요약문 문장 속 '(A) 정답'도 같이 바꿈"""
+    by = {"a": {p.get("label"): p for p in st.session_state.saved_a}, "c": {p.get("label"): p for p in st.session_state.saved_c}}
+    dirty, n = set(), 0
+    for a, new in changes:
+        d = (by[a["src"]].get(a["label"]) or {}).get("data") or {}
+        if a["kind"] == "Self-Note OX":
+            obj, field = (d.get("quizzes") or [])[a["i"]], "answer"
+        elif a["field"] == "tf":
+            obj, field = (d.get("paraphrased_tf") or [])[a["i"]], "answer"
+        else:
+            obj, field = (d.get("summaries") or [])[a["i"]], a["field"]
+            tag = field[-1].upper()
+            old = str(obj.get(field, "")).strip()
+            eng = str(obj.get("eng", ""))
+            mk = re.search(rf"\({tag}\)", eng)
+            if old and mk:  # '(A) **influence**' · '(A) culturally fabricated'처럼 (A) 뒤에서 처음 나오는 옛 정답을 바꿈
+                obj["eng"] = eng[:mk.end()] + re.sub(rf"(?<![A-Za-z]){re.escape(old)}(?![A-Za-z])", lambda _m: new, eng[mk.end():], count=1)
+        obj[field] = new.upper() if field == "answer" else new
+        dirty.add(a["src"])
+        n += 1
+    for src in dirty:
+        sk, fp = REVIEW_LIBS[src]
+        save_to_file(fp, st.session_state[sk])
+    return n
+
+def review_print_html(labels: List[str], groups: List[Dict], ans: List[Dict]) -> str:
+    """인쇄용 체크리스트 (지문마다 유의어 □ · 정답 □ · 확인자 칸)"""
+    css = """body{font-family:'Malgun Gothic','Apple SD Gothic Neo',sans-serif;font-size:11px;color:#111;margin:14mm}
+h1{font-size:17px;margin:0 0 4px}.sub{color:#555;margin-bottom:10px}
+.ps{page-break-inside:avoid;border:1px solid #bbb;border-radius:6px;padding:8px 10px;margin:0 0 10px}
+.ps h2{font-size:13px;margin:0 0 6px}table{border-collapse:collapse;width:100%;margin:2px 0 6px}
+td,th{border-bottom:1px solid #e3e3e3;padding:2px 4px;text-align:left;vertical-align:top}th{background:#f4f6f8;font-size:10px}
+.ck{width:14px;font-size:13px}.sus{color:#b45309;font-weight:700}.src{color:#777;font-size:9.5px}.sign{margin-top:4px;color:#555}
+@page{size:A4;margin:10mm}"""
+    out = [f"<html><head><meta charset='utf-8'><title>배포 전 검수 체크리스트</title><style>{css}</style></head><body>",
+           f"<h1>✅ 배포 전 검수 체크리스트</h1><div class='sub'>{esc(time.strftime('%Y-%m-%d'))} · 지문 {len(labels)}개 · "
+           f"유의어 {len(groups)}개 · 정답 {len(ans)}개 · 시험 선지에서 바꿔 써도 뜻이 같은 말인지만 보세요. 틀리면 ✗, ⚠ 표시는 먼저 보세요.</div>"]
+    for lbl in labels:
+        gs = [g for g in groups if g["label"] == lbl]
+        aa = [a for a in ans if a["label"] == lbl]
+        if not gs and not aa:
+            continue
+        out.append(f"<div class='ps'><h2>{esc(lbl)}</h2>")
+        if gs:
+            out.append("<table><tr><th class='ck'>□</th><th>단어</th><th>유의어</th><th>교재</th></tr>")
+            for g in sorted(gs, key=lambda g: not g["suspect"]):
+                out.append(f"<tr><td class='ck'>□</td><td>{esc(g['word'])} <span class='src'>{esc(g['meaning'])}</span></td>"
+                           f"<td>{'<span class=sus>⚠ </span>' if g['suspect'] else ''}{esc(g['syn'])} <span class='src'>{esc(g['syn_meaning'])}</span></td>"
+                           f"<td class='src'>{esc('·'.join(g['srcs']))}</td></tr>")
+            out.append("</table>")
+        if aa:
+            out.append("<table><tr><th class='ck'>□</th><th>종류</th><th>문장</th><th>정답</th></tr>")
+            for a in aa:
+                out.append(f"<tr><td class='ck'>□</td><td class='src'>{esc(a['kind'])}</td><td>{esc(a['text'])}</td><td><b>{esc(a['answer'])}</b> <span class='src'>{esc(a['note'])}</span></td></tr>")
+            out.append("</table>")
+        out.append("<div class='sign'>확인자 ________ · 고친 것 ____개</div></div>")
+    out.append("</body></html>")
+    return "".join(out)
+
+# ---- 🤖 AI 검수 (2026-11-10): 조교샘이 검수할 수 없어서 AI가 대신 봄 ----
+#   1차: 지금 모델이 지문마다 유의어 쌍을 판정하고, 정답 문항은 저장된 답을 보지 않고 직접 풂
+#   2차: 1차에서 '틀림'인 유의어와 저장된 답과 다른 정답만 더 강한 다른 모델(REVIEW_AI_SECOND)이 따로 다시 봄
+#   적용: 두 번 다 틀림인 유의어 → 2차가 준 확실한 유의어로 바꾸고, 없으면 지움 / O·X 정답은 두 모델이 같은 다른 답이면 고침 /
+#         요약문 (A)(B)는 두 모델 모두 함정 단어를 고르면 '확인 필요'로만 표시 (요약문 문장을 다시 써야 할 수 있어서)
+#   결과는 syn_review 문서에 남겨, 다음에는 새로 생긴 유의어·정답만 봄 (다시 볼 때 비용이 안 듦)
+REVIEW_FILE = os.path.join(BASE_DIR, "syn_review.json")
+REVIEW_AI_SECOND = ("openai:gpt-6.1-sol", "anthropic:claude-sonnet-5-5")
+REVIEW_ALL = "전체 지문"
+SCHEMA_REVIEW1 = {  # 1차: 틀린 유의어 번호만 (출력을 줄여 비용을 낮춤)
+    "type": "object",
+    "properties": {
+        "bad_ids": {"type": "array", "items": {"type": "integer"}},
+        "answers": {"type": "array", "items": {"type": "object", "properties": {
+            "id": {"type": "integer"}, "answer": {"type": "string"}}, "required": ["id", "answer"]}},
+    },
+    "required": ["bad_ids", "answers"],
+}
+SCHEMA_REVIEW = {  # 2차: 틀린 유의어의 이유와 바꿔 넣을 말
+    "type": "object",
+    "properties": {
+        "bad_syns": {"type": "array", "items": {"type": "object", "properties": {
+            "id": {"type": "integer"}, "why": {"type": "string"},
+            "fix_word": {"type": "string"}, "fix_pron": {"type": "string"}, "fix_meaning": {"type": "string"}},
+            "required": ["id", "why", "fix_word", "fix_pron", "fix_meaning"]}},
+        "answers": {"type": "array", "items": {"type": "object", "properties": {
+            "id": {"type": "integer"}, "answer": {"type": "string"}}, "required": ["id", "answer"]}},
+    },
+    "required": ["bad_syns", "answers"],
+}
+REVIEW_AI_RULES = """너는 고등학교 영어 내신 교재 검수자다. 아래 지문을 기준으로 [유의어]와 [정답]을 검수하고 JSON만 반환하라.
+[유의어 판정] 줄마다 'id. 단어(뜻) ≈ 유의어(뜻)'이다. 학생이 이 둘을 '같은 뜻'으로 외워도 되는지 본다. 지문 속 그 단어 자리에 유의어를 넣었을 때 핵심 뜻이 그대로면 맞다.
+- 맞음: 뜻이 같은 말, 시험 선택지 재진술에 흔히 쓰는 조금 넓거나 약한 말(toxic → harmful, gradually → slowly), 숙어·구로 바꾼 말.
+- 틀림: 핵심 뜻이 다른 말(enzyme '효소' → protein '단백질', efficient '효율적인' → effective '효과적인'), 철자·소리가 비슷한 다른 단어와 헷갈린 말(perishable '상하기 쉬운' → degradable '분해되는'), 지문 속 뜻이 아닌 다른 뜻의 동의어, 반대·무관한 말, 품사가 달라 그 자리에 쓸 수 없는 말, 유의어의 한국어 뜻 풀이가 틀린 경우.
+- 단어장은 원형으로 적으므로 시제·인칭·단복수 같은 형태 차이는 따지지 않는다. 확실히 틀린 것만 틀림으로 본다.
+[정답 풀기] 문항마다 지문만 보고 직접 푼다. (O/X) 문항은 지문 내용과 맞으면 'O', 틀리면 'X'. (고르기) 문항은 _____에 들어갈 보기 단어 하나를 그대로 쓴다.
+[답하는 방법] 맨 아래 [이번에 할 일]을 따른다. answers에는 문항마다 id와 answer를 넣는다."""
+
+def review_syn_key(g: Dict) -> str:
+    return f"{g['label']}|{g['word'].lower()}|{g['syn'].lower()}"
+
+def review_ans_key(a: Dict) -> str:
+    return f"{a['label']}|{a['kind']}|{a['i']}|{re.sub(r'[^a-z]', '', str(a['text']).lower())[:50]}"
+
+def review_store_get() -> Dict:
+    d = _store_get(supabase if IS_CLOUD_DB else None, REVIEW_FILE, {}) or {}
+    d.setdefault("syn", {})
+    d.setdefault("ans", {})
+    return d
+
+def review_second_model(model: str) -> str:
+    for m in REVIEW_AI_SECOND:
+        if m != model and AI_KEYS.get(split_model_spec(m)[0]):
+            return m
+    return model
+
+def review_passage_text(label: str) -> str:
+    for sk in ("saved_w", "saved_v", "saved_a", "saved_c", "saved_mock"):
+        for p in st.session_state.get(sk) or []:
+            if p.get("label") == label and str(p.get("body_text", "")).strip():
+                return str(p["body_text"])
+    return ""
+
+def _rv_norm(v) -> str:
+    return re.sub(r"[^a-z]", "", str(v).lower())
+
+def _review_blank(a: Dict) -> (str, List[str]):
+    """요약문 (A)(B) 문항: (A) 자리 정답을 _____로 가리고 보기 두 개(정답·함정, 순서는 섞음)"""
+    tag = a["field"][-1].upper()
+    eng = str(a["text"]).replace("**", "")
+    ans_w = str(a["answer"]).strip()
+    mk = re.search(rf"\({tag}\)", eng)
+    if mk and ans_w:
+        eng = eng[:mk.end()] + re.sub(rf"(?<![A-Za-z]){re.escape(ans_w)}(?![A-Za-z])", lambda _m: "_____", eng[mk.end():], count=1)
+    opts = [ans_w, re.sub(r"^함정:\s*", "", str(a["note"])).strip()]
+    random.Random(eng).shuffle(opts)
+    return eng, opts
+
+def review_ai_block(label: str, text: str, srows: List[Dict], arows: List[Dict], second: bool = False) -> str:
+    out = [f"지문 정보: {label}", f'지문: """{text}"""']
+    if srows:
+        out.append("\n[유의어]")
+        out += [f"{k}. {g['word']}({g['meaning'] or '-'}) ≈ {g['syn']}({g['syn_meaning'] or '-'})" for k, g in enumerate(srows, 1)]
+    if arows:
+        out.append("\n[정답]")
+        for k, a in enumerate(arows, 1):
+            if a["field"].startswith("blank_"):
+                eng, opts = _review_blank(a)
+                out.append(f"{k}. (고르기: {' / '.join(opts)}) {eng}")
+            else:
+                out.append(f"{k}. (O/X) {a['text']}")
+    out.append("\n[이번에 할 일] " + ("틀린 유의어 줄마다 bad_syns에 id, why(한국어 20자 이내), 바꿔 넣을 확실한 유의어(fix_word·fix_pron 한글 발음·fix_meaning 한국어 뜻, "
+                                      "원래 단어·이미 있는 유의어와 다른 말 — 확실한 것이 없으면 셋 다 빈 문자열)를 넣는다. 맞는 줄은 쓰지 않는다."
+                                      if second else "틀린 유의어 줄의 id만 bad_ids에 넣는다. 맞는 줄은 쓰지 않는다."))
+    return "\n".join(out)
+
+def _review_differs(a: Dict, v: str) -> bool:
+    v = str(v or "").strip()
+    if not v:
+        return False
+    if a["field"].startswith("blank_"):
+        return _rv_norm(v) != _rv_norm(a["answer"])
+    return v[:1].upper() in ("O", "X") and v[:1].upper() != str(a["answer"]).strip()[:1].upper()
+
+def review_ai_cost_krw(model: str, n_ps: int, n_syn: int, n_ans: int, n_words: int) -> float:
+    """대략: 지문당 규칙 약 700토큰 + 지문 + 유의어 줄·정답 줄, 출력은 틀림 30% 가정(이유·바꿀 말) + 생각 토큰. 2차는 1차의 약 40%를 더 강한 모델로"""
+    def usd(m, tin, tout):
+        p_in, _, p_out = ai_price(m)
+        return (tin * p_in + tout * p_out) / 1_000_000
+    tin = n_ps * 700 + n_words * 1.4 + n_syn * 22 + n_ans * 45
+    tout = (n_ps * 80 + n_syn * 0.3 * 35 + n_ans * 12) * 2
+    m2 = review_second_model(model)
+    return (usd(model, tin, tout) + usd(m2, tin * 0.4, tout * 0.4)) * 1400
+
+def review_ai_run(labels: List[str], model: str, progress=None) -> Dict:
+    """고른 지문 중 아직 AI가 안 본 유의어·정답을 검수하고 바로 고침 → 결과 요약 (바뀐 것 목록 포함)"""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    store = review_store_get()
+    syn, ans = review_collect(labels)
+    gsyn = review_group_syn(syn)
+    texts = {l: review_passage_text(l) for l in labels}
+    tasks = []
+    for l in labels:
+        sr = [g for g in gsyn if g["label"] == l and review_syn_key(g) not in store["syn"]]
+        ar = [a for a in ans if a["label"] == l and review_ans_key(a) not in store["ans"] and str(a["answer"]).strip()]
+        if (sr or ar) and texts.get(l):
+            tasks.append((l, sr, ar))
+    logs: List[str] = []
+
+    def judge(m, l, sr, ar, second):
+        out = _qb_call(client, m, [REVIEW_AI_RULES, review_ai_block(l, texts[l], sr, ar, second)], SCHEMA_REVIEW if second else SCHEMA_REVIEW1,
+                       0.0, logs, f"{l} AI 검수", cache_first=True)
+        if not isinstance(out, dict):
+            return False, {}, {}
+        if second:
+            bad = {int(x.get("id") or 0): x for x in out.get("bad_syns") or [] if isinstance(x, dict)}
+        else:
+            bad = {int(x): {} for x in out.get("bad_ids") or [] if str(x).lstrip("-").isdigit()}
+        got = {int(x.get("id") or 0): str(x.get("answer", "")).strip() for x in out.get("answers") or [] if isinstance(x, dict)}
+        return True, bad, got
+
+    def run_all(m, jobs, lo, hi, what, second=False):
+        res = {}
+        if not jobs:
+            return res
+        with ThreadPoolExecutor(max_workers=6) as ex:
+            futs = {ex.submit(judge, m, l, sr, ar, second): l for l, sr, ar in jobs}
+            for n, f in enumerate(as_completed(futs), 1):
+                try:
+                    res[futs[f]] = f.result()
+                except Exception as e:
+                    logs.append(f"❌ {futs[f]}: {str(e)[:120]}")
+                    res[futs[f]] = (False, {}, {})
+                if progress:
+                    progress(lo + (hi - lo) * n / len(jobs), f"{what} {n}/{len(jobs)}")
+        return res
+
+    first = run_all(model, tasks, 0.0, 0.7, "1차 검수")
+    m2 = review_second_model(model)
+    jobs2 = []
+    for l, sr, ar in tasks:
+        ok, bad, got = first.get(l, (False, {}, {}))
+        if not ok:
+            continue
+        s2 = [sr[i - 1] for i in sorted(bad) if 1 <= i <= len(sr)]
+        a2 = [ar[i - 1] for i in sorted(got) if 1 <= i <= len(ar) and _review_differs(ar[i - 1], got[i])]
+        if s2 or a2:
+            jobs2.append((l, s2, a2))
+    second = run_all(m2, jobs2, 0.7, 1.0, f"2차 다시 보기 ({split_model_spec(m2)[1]})", second=True)
+    sent2 = {l: (s2, a2) for l, s2, a2 in jobs2}
+
+    bad_rows, fixes, ans_fix, ans_check, n_syn_ok, n_ans_ok = [], {}, [], [], 0, 0
+    for l, sr, ar in tasks:
+        ok, bad, got = first.get(l, (False, {}, {}))
+        if not ok:
+            continue
+        s2, a2 = sent2.get(l, ([], []))
+        ok2, bad2, got2 = second.get(l, (False, {}, {}))
+        if s2 and not ok2:
+            s2_keys_pending = {review_syn_key(g) for g in s2}  # 2차가 실패한 지문의 '틀림' 후보는 기록하지 않음 → 다음에 다시 봄
+        else:
+            s2_keys_pending = set()
+        bad2_by = {review_syn_key(s2[i - 1]): v for i, v in bad2.items() if 1 <= i <= len(s2)} if ok2 else {}
+        for g in sr:
+            k = review_syn_key(g)
+            if k in s2_keys_pending:
+                continue
+            if k in bad2_by:
+                v = bad2_by[k]
+                fw, fp, fm = (str(v.get(x, "") or "").strip() for x in ("fix_word", "fix_pron", "fix_meaning"))
+                bad_rows.append(dict(g, why=str(v.get("why", "")).strip(), fix=(f"{fw}({fm})" if fw else "")))
+                if fw:
+                    fixes[(g["label"], g["word"].lower(), g["syn"].lower())] = (fw, fp, fm)
+                    store["syn"][f"{g['label']}|{g['word'].lower()}|{fw.lower()}"] = 1  # 2차 모델이 준 말은 다시 안 봄
+                store["syn"][k] = [str(v.get("why", "")).strip(), fw]
+            else:
+                store["syn"][k] = 1
+                n_syn_ok += 1
+        a2_keys = {review_ans_key(a): a for a in a2}
+        got2_by = {review_ans_key(a2[i - 1]): v for i, v in got2.items() if 1 <= i <= len(a2)} if ok2 else {}
+        for i, a in enumerate(ar, 1):
+            k = review_ans_key(a)
+            if i not in got:
+                continue  # AI가 답을 안 냈음 → 다음에 다시
+            if k not in a2_keys:
+                store["ans"][k] = "ok"
+                n_ans_ok += 1
+                continue
+            if not ok2 or k not in got2_by:
+                continue
+            v1, v2 = got[i], got2_by[k]
+            if not _review_differs(a, v2):
+                store["ans"][k] = "ok"
+                n_ans_ok += 1
+            elif a["field"].startswith("blank_") or (v1[:1].upper() != v2[:1].upper()):
+                ans_check.append(dict(a, ai1=v1, ai2=v2))
+                store["ans"][k] = ["check", v1, v2]
+            else:
+                ans_fix.append((a, v2[:1].upper()))
+                store["ans"][k] = ["fixed", str(a["answer"]), v2[:1].upper()]
+    n_changed = review_delete_syns(bad_rows, fixes) if bad_rows else 0
+    if ans_fix:
+        review_save_answers(ans_fix)
+    store["updated"] = time.strftime("%Y-%m-%d %H:%M")
+    _store_put(supabase if IS_CLOUD_DB else None, REVIEW_FILE, store)
+    return {"tasks": len(tasks), "failed": [l for l in first if not first[l][0]], "syn_ok": n_syn_ok, "bad": bad_rows,
+            "n_fixed": sum(1 for b in bad_rows if b["fix"]), "n_changed": n_changed, "ans_ok": n_ans_ok,
+            "ans_fix": [dict(a, new=v) for a, v in ans_fix], "ans_check": ans_check, "logs": logs[-10:], "model": model, "model2": m2}
+
+
+def page_review():
+    all_labels = sorted({p.get("label") for sk in ("saved_w", "saved_v", "saved_a", "saved_c") for p in st.session_state[sk] if p.get("label")},
+                        key=natural_sort_key)
+    if not all_labels:
+        st.info("검수할 교재가 아직 없어요. 먼저 원문 라이브러리에서 교재를 만들어 주세요.")
+        return
+    if st.session_state.get("rv_flash"):
+        st.success(st.session_state.pop("rv_flash"))
+    label_set = set(all_labels)
+    shared = [l for l in st.session_state.shared_sel_labels if l in label_set]
+    groups = sorted({review_group_of(l) for l in all_labels}, key=natural_sort_key)
+    opts = [REVIEW_ALL] + ([REVIEW_FROM_SHARED] if shared else []) + groups
+    c1, c2 = st.columns([1.4, 2.6])
+    grp = c1.selectbox("📁 검수할 범위", opts, key="rv_group",
+                       format_func=lambda g: f"{g} ({len(shared)}개)" if g == REVIEW_FROM_SHARED else (f"{g} ({len(all_labels)}개)" if g == REVIEW_ALL else g))
+    if grp == REVIEW_ALL:
+        labels = all_labels
+        c2.markdown(f"<div class='qb-note' style='margin-top:1.9rem'>교재가 있는 모든 지문 <b>{len(all_labels)}개</b></div>", unsafe_allow_html=True)
+    else:
+        pool = shared if grp == REVIEW_FROM_SHARED else [l for l in all_labels if review_group_of(l) == grp]
+        labels = c2.multiselect("지문", pool, default=pool, key=f"rv_labels_{grp}", format_func=review_short)
+    syn, ans = review_collect(labels)
+    gsyn = review_group_syn(syn)
+    n_sus = sum(g["suspect"] for g in gsyn)
+    mins = max(1, round((len(gsyn) * 2 + len(ans) * 5) / 60)) if (gsyn or ans) else 0
+    st.markdown(f"<div class='qb-note'>지문 <b>{len(labels)}개</b> · 유의어 <b>{len(gsyn)}개</b> (뜻이 한 글자도 안 겹쳐 먼저 볼 것 <b>{n_sus}개</b>) · "
+                f"정답 <b>{len(ans)}개</b> → 훑어보는 데 약 <b>{mins}분</b> (유의어 하나 2초, 정답 하나 5초 기준)<br>"
+                "기준: <b>시험 선지에서 그 단어 자리에 바꿔 넣어도 뜻이 같은가?</b> 상위어(enzyme → protein)·연상어(perishable → degradable)는 틀림이에요.</div>",
+                unsafe_allow_html=True)
+    ver = st.session_state.setdefault("rv_ver", 0)
+    # 🤖 AI 검수: 아직 AI가 안 본 것만 (조교샘 대신)
+    store = review_store_get()
+    todo_s = [g for g in gsyn if review_syn_key(g) not in store["syn"]]
+    todo_a = [a for a in ans if review_ans_key(a) not in store["ans"] and str(a["answer"]).strip()]
+    todo_l = sorted({x["label"] for x in todo_s + todo_a}, key=natural_sort_key)
+    with st.container(border=True):
+        a1, a2 = st.columns([3.2, 1.6], vertical_alignment="center")
+        if todo_l:
+            n_words = sum(len(review_passage_text(l).split()) for l in todo_l)
+            cost = review_ai_cost_krw(text_model, len(todo_l), len(todo_s), len(todo_a), n_words)
+            a1.markdown(f"**🤖 AI 검수** — 아직 AI가 안 본 유의어 <b>{len(todo_s):,}개</b> · 정답 <b>{len(todo_a):,}개</b> (지문 {len(todo_l)}개) · "
+                        f"예상 약 <b>{cost:,.0f}원</b><br><span style='color:#64748b;font-size:0.85rem'>"
+                        f"{split_model_spec(text_model)[1]}가 먼저 보고, 틀림으로 본 것만 {split_model_spec(review_second_model(text_model))[1]}가 다시 봐요. "
+                        "둘 다 틀리다고 한 유의어는 맞는 말로 바꾸거나 지우고, 둘 다 같은 다른 답을 낸 O/X 정답은 고쳐요.</span>", unsafe_allow_html=True)
+            go = a2.button("🤖 AI로 검수하고 고치기", type="primary", use_container_width=True, key="rv_ai_go")
+        else:
+            a1.markdown("**🤖 AI 검수** — 고른 지문의 유의어·정답을 AI가 모두 봤어요 ✅" + (f" <span style='color:#64748b;font-size:0.85rem'>(마지막 {esc(store.get('updated', ''))})</span>" if store.get("updated") else ""),
+                        unsafe_allow_html=True)
+            go = False
+        if go:
+            bar = st.progress(0.0, text="AI 검수를 시작해요…")
+            r = review_ai_run(todo_l, text_model, lambda f, t: bar.progress(min(1.0, f), text=t))
+            flush_ai_usage()  # 사이드바 'AI 사용 금액'에 바로 반영
+            st.session_state.rv_ai_last = r
+            st.session_state.rv_ver = ver + 1
+            st.session_state.rv_flash = (f"🤖 AI 검수를 마쳤어요 (지문 {r['tasks']}개). 유의어 {len(r['bad'])}개를 고쳤어요 "
+                                         f"(맞는 말로 바꿈 {r['n_fixed']}개 · 지움 {len(r['bad']) - r['n_fixed']}개) · O/X 정답 {len(r['ans_fix'])}개 고침"
+                                         + (f" · 확인 필요 {len(r['ans_check'])}개" if r["ans_check"] else "")
+                                         + (f" · 실패한 지문 {len(r['failed'])}개 (다시 누르면 그것만 봐요)" if r["failed"] else ""))
+            st.rerun()
+        last = st.session_state.get("rv_ai_last")
+        if last and (last["bad"] or last["ans_fix"] or last["ans_check"]):
+            with st.expander(f"방금 AI가 고친 것 보기 (유의어 {len(last['bad'])} · 정답 {len(last['ans_fix'])} · 확인 필요 {len(last['ans_check'])})"):
+                if last["bad"]:
+                    st.dataframe(pd.DataFrame([{"지문": review_short(b["label"]), "단어": f"{b['word']} ({b['meaning']})", "틀린 유의어": f"{b['syn']} ({b['syn_meaning']})",
+                                                "바꾼 말": b["fix"] or "(지움)", "이유": b["why"]} for b in last["bad"]]), hide_index=True, use_container_width=True)
+                if last["ans_fix"]:
+                    st.dataframe(pd.DataFrame([{"지문": review_short(a["label"]), "종류": a["kind"], "문장": a["text"], "고친 정답": f"{a['answer']} → {a['new']}"}
+                                               for a in last["ans_fix"]]), hide_index=True, use_container_width=True)
+                if last["ans_check"]:
+                    st.caption("⚠️ 확인 필요: 두 AI가 저장된 정답과 다르게 풀었지만, 서로 답이 다르거나 요약문이라 자동으로 고치지 않았어요.")
+                    st.dataframe(pd.DataFrame([{"지문": review_short(a["label"]), "종류": a["kind"], "문장": a["text"], "저장된 정답": a["answer"],
+                                                "AI 1차": a["ai1"], "AI 2차": a["ai2"]} for a in last["ans_check"]]), hide_index=True, use_container_width=True)
+    t1, t2, t3 = st.tabs([f"🔤 유의어 {len(gsyn)}", f"✅ 정답 {len(ans)}", "🖨️ 인쇄용 체크리스트"])
+    with t1:
+        if not gsyn:
+            st.caption("고른 지문에 유의어가 없어요.")
+        else:
+            only = st.toggle(f"⚠️ 먼저 볼 것만 보기 ({n_sus}개)", key="rv_only_sus")
+            rows = [g for g in gsyn if g["suspect"]] if only else gsyn
+            df = pd.DataFrame([{"틀림": False, "지문": review_short(g["label"]), "단어": g["word"], "뜻": g["meaning"],
+                                "유의어": ("⚠️ " if g["suspect"] else "") + g["syn"], "유의어 뜻": g["syn_meaning"], "교재": "·".join(g["srcs"]),
+                                "AI": "✅" if store["syn"].get(review_syn_key(g)) == 1 else ""}
+                               for g in rows])
+            ed = st.data_editor(df, hide_index=True, use_container_width=True, height=min(620, 38 + 35 * len(rows)),
+                                disabled=[c for c in df.columns if c != "틀림"], key=f"rv_syn_{ver}_{grp}_{only}",
+                                column_config={"틀림": st.column_config.CheckboxColumn("❌ 틀림", width="small")})
+            picked = [rows[i] for i, v in enumerate(ed["틀림"].tolist()) if bool(v)]
+            if st.button(f"🗑️ 틀림 표시한 유의어 {len(picked)}개 지우기", type="primary", disabled=not picked, key="rv_del"):
+                n = review_delete_syns(picked)
+                st.session_state.rv_ver = ver + 1
+                st.session_state.rv_flash = f"✅ 유의어 {len(picked)}개를 지웠어요 (교재 {n}곳). 다음에 출력하는 교재·PPT부터 빠져요."
+                st.rerun()
+            st.caption("지우면 그 지문의 Voca·한판승·Self-Note·Core에서 같은 단어의 같은 유의어가 모두 빠져요. 되돌리려면 그 교재 화면의 편집에서 다시 적어 주세요.")
+    with t2:
+        if not ans:
+            st.caption("고른 지문에 Core 요약문·진위, Self-Note OX 정답이 없어요.")
+        else:
+            def ai_mark(a):
+                v = store["ans"].get(review_ans_key(a))
+                return "✅" if v == "ok" else ("🔧 고침" if isinstance(v, list) and v[0] == "fixed" else
+                                              (f"⚠️ AI: {v[1]}/{v[2]}" if isinstance(v, list) and v[0] == "check" else ""))
+            df2 = pd.DataFrame([{"지문": review_short(a["label"]), "종류": a["kind"], "문장": a["text"], "정답": str(a["answer"]), "참고": a["note"], "AI": ai_mark(a)}
+                                for a in ans])
+            ed2 = st.data_editor(df2, hide_index=True, use_container_width=True, height=min(620, 38 + 35 * len(ans)),
+                                 disabled=["지문", "종류", "문장", "참고", "AI"], key=f"rv_ans_{ver}_{grp}",
+                                 column_config={"정답": st.column_config.TextColumn("정답 ✏️", width="small"), "문장": st.column_config.TextColumn("문장", width="large")})
+            changes = [(a, str(v).strip()) for a, v in zip(ans, ed2["정답"].tolist()) if str(v).strip() != str(a["answer"]).strip()]
+            bad = [a for a, v in changes if a["field"] in ("answer", "tf") and v.upper() not in ("O", "X")] + [a for a, v in changes if not v]
+            if bad:
+                st.warning("O/X 문제의 정답은 O 또는 X로, 요약문 정답은 영어 단어로 적어 주세요.")
+            if st.button(f"💾 고친 정답 {len(changes)}개 저장", type="primary", disabled=not changes or bool(bad), key="rv_save_ans"):
+                n = review_save_answers(changes)
+                st.session_state.rv_ver = ver + 1
+                st.session_state.rv_flash = f"✅ 정답 {n}개를 고쳐 저장했어요. 요약문 정답은 요약문 문장 속 단어도 함께 바꿨어요."
+                st.rerun()
+    with t3:
+        st.caption("종이로 보고 싶을 때 받아서 인쇄하세요 (지문마다 □ 칸 · 먼저 볼 유의어가 위에). 고친 내용은 이 화면에서 저장해야 교재에 반영돼요.")
+        st.download_button("🖨️ 체크리스트 HTML 받기", data=review_print_html(labels, gsyn, ans).encode("utf-8"),
+                           file_name=f"배포전검수_{time.strftime('%Y%m%d')}.html", mime="text/html", disabled=not labels, key="rv_print")
+
+
 # ---- 메뉴 정의 (title: 메뉴 이름, short: 홈 화면 한 줄 설명, desc: 화면 위 설명, help: 사용법 키) ----
 PAGE_INFO = {
     "home": {"title": "홈", "icon": "🏠", "group": "", "func": page_home, "short": "", "desc": "", "help": None},
@@ -10625,6 +11351,10 @@ PAGE_INFO = {
              "short": "골라서 단행본 출력 · 빠진 지문 자동 생성", "desc": "만든 Anatomy Core를 골라 단행본으로 출력해요. 다른 교재만 있는 지문은 여기서 바로 만들 수 있어요.", "help": "library"},
     "voca": {"title": "Voca", "icon": "📖", "group": "교재 출력", "func": page_voca,
              "short": "단어장 출력 · 엑셀/CSV 받기", "desc": "만든 Anatomy Voca 단어장을 골라 출력하거나 엑셀·CSV로 받아요.", "help": "library"},
+    "review": {"title": "배포 전 검수", "icon": "✅", "group": "교재 출력", "func": page_review,
+               "short": "AI가 유의어·정답을 검수해 틀린 것 고치기 · 직접 확인 · 인쇄용 체크리스트",
+               "desc": "교재·PPT를 학생에게 내보내기 전에 유의어와 정답을 확인해요. 🤖 AI 검수를 누르면 AI 두 개가 보고 틀린 유의어·O/X 정답을 바로 고쳐요. 직접 표시해서 지우거나 고칠 수도 있어요.",
+               "help": None},
     "dna": {"title": "출제 DNA", "icon": "🎯", "group": "기출 분석", "func": page_dna,
             "short": "학교별 출제 방식 현황판 · 기출 PDF로 규칙 학습",
             "desc": "운양고·제일고 기출 시험지로 출제 규칙을 쌓아요. 여기 규칙이 교재·변형문제 생성에 함께 쓰여요.", "help": "dna"},
@@ -10635,7 +11365,7 @@ PAGE_INFO = {
                  "short": "로고·학원명·생성 속도·데이터 이전", "desc": "교재에 들어가는 로고·학원명, 생성 속도, 데이터 이전·백업을 관리해요. AI 모델은 왼쪽 메뉴 아래에서 골라요.", "help": None},
 }
 HOME_GROUPS = [("✍️ 만들기", ["source", "qbank", "final", "excel"]),
-               ("🖨️ 교재 출력", ["oneshot", "selfnote", "core", "voca"]),
+               ("🖨️ 교재 출력", ["oneshot", "selfnote", "core", "voca", "review"]),
                ("🏫 기출 분석", ["dna", "past-voca"])]
 PAGES = {k: st.Page(v["func"], title=v["title"], icon=v["icon"], url_path=k, default=(k == "home")) for k, v in PAGE_INFO.items()}
 nav = {}
