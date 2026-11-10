@@ -4340,7 +4340,7 @@ GEN_WORKER_LEASE_SEC = 1200  # 작업 담당 서버가 이 시간 동안 소식�
 #   저장 시각만 먼저 읽어 그대로면 내용을 다시 내려받지 않음.
 #   (예전에는 지문 하나 만들 때마다 '이미 있나' 확인·저장 직전에 교재 문서 전체를 여러 번 받아서 DB 전송량이 컸음)
 #   스레드에서 st.cache_resource를 부르지 않도록, 화면이 실행될 때 같은 dict를 꺼내 둠.
-_BIG_DOC_KEYS = {filepath_to_doc_key(f) for f in (VICTORY_FILE, ANATOMY_FILE, CORE_FILE, VOCA_FILE, PAST_VOCA_FILE, MOCK_FILE)} | {"syn_review", "gichul_full"}  # AI 검수 기록(약 1MB)도 바뀌었을 때만 다시 받음
+_BIG_DOC_KEYS = {filepath_to_doc_key(f) for f in (VICTORY_FILE, ANATOMY_FILE, CORE_FILE, VOCA_FILE, PAST_VOCA_FILE, MOCK_FILE)} | {"syn_review", "gichul_full", "gichul_marks"}  # AI 검수 기록(약 1MB)·기출 전 문항·채점 흔적도 바뀌었을 때만 다시 받음
 _SHARED_DOC_CACHE = _lib_mem_cache()
 
 def _store_get(sb, filepath, default=None):
@@ -4551,6 +4551,11 @@ def gen_worker_main(api_key: str, sb_url: str, sb_key: str):
     dna_rules = dna.get("rules_text") or DEFAULT_EXAM_DNA["rules_text"]
     essay_rules = dna.get("essay_rules_text", "")
     yt_points = qb_yt_points(dna)
+    pack_box = []  # v1.2 학교별 실제 기출 꾸러미: 이 서버가 작업을 맡고 변형문제를 만들 때 처음 한 번만 읽음 (읽기 실패면 None → v1.1 방식)
+    def get_pack():
+        if not pack_box:
+            pack_box.append(qb_school_pack_load(sb, dna))
+        return pack_box[0]
     # PC 앱과 배포된 앱이 동시에 열려 있어도 한 곳에서만 처리하도록 '작업 담당자'를 기록 (20분 동안 소식 없으면 넘겨받음)
     my_id = str(uuid.uuid4())
     def claim(j):
@@ -4589,13 +4594,13 @@ def gen_worker_main(api_key: str, sb_url: str, sb_key: str):
             fresh = [it for it in all_items if it.get("state") == "pending" and it.get("batch") and it.get("kind") == "qbank"]
             if fresh:
                 qb_batch_submit(sb, [job_item_full(job, it) for it in fresh[:QB_BATCH_MAX]], job.get("opts", {}), dna_rules, essay_rules, claim, yt_points,
-                                write=write)
+                                write=write, pack=get_pack())
                 continue
             pending = [it for it in all_items if it.get("state") == "pending"]
             waiting = [it for it in all_items if it.get("state") == "waiting"]
             if waiting and time.time() - last_poll > (QB_BATCH_POLL_SEC if not pending else QB_BATCH_POLL_BUSY_SEC):
                 last_poll = time.time()
-                qb_batch_poll(sb, gclient, job, claim, write=write)
+                qb_batch_poll(sb, gclient, job, claim, write=write, pack=get_pack())
                 flush_ai_usage()
                 continue
             if not pending and waiting:
@@ -4612,7 +4617,7 @@ def gen_worker_main(api_key: str, sb_url: str, sb_key: str):
             try:
                 sb_factory = (lambda: create_client(sb_url, sb_key)) if sb is not None else (lambda: None)
                 if item.get("kind") == "qbank":
-                    ok, err = _generate_qbank_item(sb_factory, gclient, item, job.get("opts", {}), dna_rules, essay_rules, logs, yt_points)
+                    ok, err = _generate_qbank_item(sb_factory, gclient, item, job.get("opts", {}), dna_rules, essay_rules, logs, yt_points, get_pack())
                 elif item.get("kind") == "trans":
                     ok, err = _trans_item(sb_factory, item, job.get("opts", {}), logs)
                 else:
@@ -4877,6 +4882,7 @@ QB_LEVELS = ["최상", "상", "중", "하"]
 QB_SCHOOLS = ["운양고", "제일고"]
 # 변형문제 비용 추정 (원, 1달러 1,400원): 작업 1건 = 고정(공통 규칙 약 6,800토큰은 캐시 + 지문·조건 약 1,400토큰) + 문제 수 × (출력 + 정답 검증)
 #   2026-11-04 GPT-6.1 Terra 165건(건당 2문제) 실제 $2.71과 맞춘 값 · 문제당 출력 토큰은 모델마다 실측 (Claude·Gemini는 생각 토큰 포함)
+QB_REAL_TASK_TOKENS = 2000  # v1.2 학교별 기출 DNA·수치·실제 기출 예시 2개 (2026-11-10 측정 약 4,500자 ≈ 2,000토큰, 캐시 안 됨)
 QB_OUT_TOKENS = {"opus": 2300, "fable": 2300, "sonnet": 2200, "haiku": 900, "gpt": 750, "pro": 2500, "flash-lite": 1200, "flash": 1900}
 
 def qb_job_cost_krw(model_spec: str, n_q: int, verify: bool = True, batch: bool = False) -> float:
@@ -4884,7 +4890,7 @@ def qb_job_cost_krw(model_spec: str, n_q: int, verify: bool = True, batch: bool 
     name = split_model_spec(model_spec)[1].lower()
     p_in, p_cache, p_out = ai_price(model_spec)
     out = next((v for k, v in QB_OUT_TOKENS.items() if k in name), 1200)
-    gen = 6800 * p_cache + 1400 * p_in + n_q * out * p_out
+    gen = 6800 * p_cache + (1400 + QB_REAL_TASK_TOKENS) * p_in + n_q * out * p_out
     ver = (400 * p_in + n_q * (600 * p_in + 50 * p_out)) if verify else 0
     return (gen * (0.5 if batch else 1) + ver) / 1_000_000 * 1400
 
@@ -5055,16 +5061,20 @@ def qb_passage_grade(p) -> str:
         return "고2"
     return ""
 
-def qb_choice_len_rule(school: str, grade: str, q_type: str, level: str) -> str:
-    """[이번 출제]에 붙이는 선지 길이·어휘 기준 (영어 선지 유형만). 호출마다 다른 뒷부분이라 캐시는 그대로"""
+def qb_choice_len_rule(school: str, grade: str, q_type: str, level: str, pack: Dict = None) -> str:
+    """[이번 출제]에 붙이는 선지 길이·어휘 기준 (영어 선지 유형만). 호출마다 다른 뒷부분이라 캐시는 그대로
+    pack(v1.2)이 있으면 기출 전 문항에서 잰 길이(최근 3개년)를 먼저 쓰고, 자료가 모자라면 아래 표(2026-11-10 측정값)"""
     key_t = "내용 일치·불일치" if q_type == "추론 (추론 가능·불가)" else q_type
-    tbl = (QB_CHOICE_LEN.get((school, grade)) or {}) if grade else {}
-    src = f"{school} {grade}" if key_t in tbl else school
-    n = tbl.get(key_t) or (QB_CHOICE_LEN.get((school, "")) or {}).get(key_t)
+    n, src = qb_real_len(pack, school, grade, q_type) if pack else (0, "")
+    if not n:
+        tbl = (QB_CHOICE_LEN.get((school, grade)) or {}) if grade else {}
+        src = (f"{school} {grade}" if key_t in tbl else school) + " 실제 기출(24~26년)"
+        n = tbl.get(key_t) or (QB_CHOICE_LEN.get((school, "")) or {}).get(key_t)
     if not n:
         return ""
-    lo, hi = max(2, round(n * 0.6)), round(n * 1.4)
-    out = (f"[선택지 길이 — {src} 실제 기출(24~26년) 측정] 영어 선택지 하나는 평균 약 {n}단어로 쓴다. 5개 모두 {lo}~{hi}단어 안에 두고, "
+    lo = max(2, round(n * 0.6))
+    hi = max(lo, round(n * 1.4))
+    out = (f"[선택지 길이 — {src} 측정] 영어 선택지 하나는 평균 약 {n}단어로 쓴다. 5개 모두 {lo}~{hi}단어 안에 두고, "
            f"가장 긴 선택지도 {hi}단어를 넘기지 않는다. 난이도는 길이가 아니라 재진술·함정 구조로 올린다(최상도 이 길이를 지킨다). "
            "실제 시험보다 선택지가 길면 학생이 '우리 학교 시험과 다르다'고 느낀다.")
     if level in ("상", "최상"):
@@ -5634,12 +5644,418 @@ def qb_yt_plans(plans: List[List[str]], points: List[Dict], focus: bool, rnd=Non
             used = True
     return used
 
+# ---- v1.2 (2026-11-10) 학교별 실제 기출 DNA — 기출 시험지 전 문항(gichul_full) + 학생 채점 흔적(gichul_marks) ----
+#   문제를 만들 때마다 [이번 출제]에만 붙임 (공통 앞부분 캐시는 그대로):
+#   ① AI가 학교 시험지 전 문항을 읽고 정리한 학교별 DNA (학교 공통 · 학년별 · 유형별) — 출제 DNA 화면에서 다시 만들 수 있음
+#   ② 프로그램이 전 문항에서 직접 센 수치 (선지 길이·배점·학생 오답률) — 시험지를 새로 올리면 저절로 바뀜 (AI 비용 없음)
+#   ③ 같은 학교·유형 실제 기출 예시 2개 (발문 말투·선지 길이·함정 방식 참고용, 같은 지문으로 나온 기출은 빼고)
+GICHUL_MARKS_FILE = os.path.join(BASE_DIR, "gichul_marks.json")  # 학생이 푼 실제 시험지의 채점 표시 (2026-11-10 시험지 52개에서 읽음)
+QB_REAL_RECENT = 3        # 수치·예시는 가장 최근 시험 연도부터 3개년(예: 24~26년)을 우선
+QB_REAL_EX_N = 2          # 문제를 만들 때마다 붙이는 실제 기출 예시 수
+QB_REAL_MIN_N = 3         # 학년 칸 문항 수가 이보다 적으면 그 학교 전체 값을 씀
+QB_REAL_EX_CHARS = 1500   # 예시 하나 최대 글자 수
+QB_REAL_WRONG_MIN = 8     # 학생 오답률은 채점 표시가 있는 문항이 이만큼 이상일 때만 보여 줌
+QB_REAL_LEN_TYPES = ("주제", "제목", "요지·주장", "내용 일치·불일치", "빈칸", "함축 의미", "추론 (추론 가능·불가)")
+_GQ_MARK_RE = re.compile(r"[①②③④⑤ⓐ-ⓗ]|<u>|_{3,}|\([ABC]\)")
+QB_STEM_U_WORDS = r"(틀린|옳은|맞는|않은|않는|없는|아닌)"  # 학교 발문에서 밑줄을 긋는 부정어·방향어
+
+def gq_year(exam_name) -> int:
+    """'25년 2학기 중간' → 25 (모르면 0)"""
+    m = re.search(r"(\d{2})\s*년", str(exam_name or ""))
+    return int(m.group(1)) if m else 0
+
+def gq_points(p) -> float:
+    """'4.3점' → 4.3 ('총 6.0점'·'각 1.0점' 같은 서술형 묶음 배점은 0)"""
+    m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*점?\s*", str(p or ""))
+    return float(m.group(1)) if m else 0.0
+
+def gq_clean_stem(stem) -> str:
+    """실제 발문에서 묶음 머리말('[4~6]', '다음 글을 읽고, 물음에 답하시오.')과 배점 표시를 뺀 한 줄"""
+    s = str(stem or "").strip()
+    s = re.sub(r"^\s*\[\s*\d+\s*[~\-–]\s*\d+\s*\]\s*", "", s)
+    s = re.sub(r"^다음 글을 읽고,?\s*물음에 답하시오\.?\s*", "", s)
+    s = re.sub(r"\s*\[?\s*\d+(?:\.\d+)?\s*점\s*\]?\s*$", "", s)
+    return " ".join(s.split())
+
+def gq_is_korean(t) -> bool:
+    t = re.sub(r"<[^>]+>", "", str(t or ""))
+    ko, en = len(re.findall(r"[가-힣]", t)), len(re.findall(r"[A-Za-z]", t))
+    return ko > 0 and ko >= en * 0.5
+
+def gq_format_ok(q: Dict, q_type: str) -> bool:
+    """우리 문제 형식과 같은 모양의 실제 문항인지 (예시·발문 말투로 쓸 것만 · 네모 고르기·개수형처럼 우리 형식에 없는 것은 뺌)"""
+    stem = re.sub(r"<[^>]+>", "", str(q.get("stem") or ""))
+    p, box = str(q.get("passage") or ""), str(q.get("box") or "")
+    ch = [str(c).strip() for c in (q.get("choices") or [])]
+    if not p.strip() and not q.get("given"):
+        return False
+    if q_type in QB_ESSAY_TYPES:
+        return True
+    if re.search(r"개수|네모|\(A\),\s*\(B\),\s*\(C\)의", stem):
+        return False
+    if q_type in QB_MARK_TYPES:  # 선지가 지문 속 ①~⑤라 선지 칸은 비어 있을 수 있음
+        return all(m in p for m in CIRCLED[:5]) and not re.search(r"있는 대로|모두 고르", stem)
+    if len(ch) != 5:
+        return False
+    if q_type == "어법 (조합형)":
+        return len(set(re.findall("[ⓐ-ⓗ]", p))) >= 4 and bool(re.search(r"있는 대로|모두 고르", stem))
+    if q_type == "<보기> 일치 조합형":
+        return len(set(re.findall("[ⓐ-ⓗ]", box))) >= 3
+    if q_type == "순서":
+        return all(f"({x})" in p for x in "ABC") and bool(str(q.get("given") or "").strip())
+    if q_type == "요약문 (A)(B)":
+        return "(A)" in box and "(B)" in box
+    if q_type in QB_ONE_CHOICE_TYPES:
+        return all(ch) and not any(_QB_COMBO_RE.match(c) for c in ch)
+    return all(ch)
+
+def _gq_short_passage(p: str, max_words: int = 45) -> str:
+    """예시용 지문 줄이기: 표시(①~⑤·ⓐ~ⓗ·밑줄·빈칸·(A)(B)(C))가 있는 문장만 남김 (없으면 첫 30단어)"""
+    p = str(p or "").strip()
+    if not p:
+        return ""
+    keep = []
+    for s in re.split(r"(?<=[.!?\"”])\s+|\n+", p):
+        if _GQ_MARK_RE.search(s):
+            w = s.split()
+            cut = " ".join(w[:max_words])
+            cut += "</u>" * max(0, cut.count("<u>") - cut.count("</u>"))  # 밑줄 중간에서 잘렸으면 닫아 줌
+            keep.append(cut + (" …" if len(w) > max_words else ""))
+    if not keep:
+        w = p.split()
+        return " ".join(w[:30]) + (" …" if len(w) > 30 else "")
+    return " / ".join(keep)
+
+def _gq_4grams(t) -> set:
+    w = re.findall(r"[a-z]+", re.sub(r"<[^>]+>", " ", str(t or "")).lower())
+    return {" ".join(w[i:i + 4]) for i in range(len(w) - 3)}
+
+_GQ_TEXT_KEYS = ("no", "points", "q_type", "source_hint", "matched_label", "stem", "given", "passage", "box", "answer")
+
+def _gq_exams(doc) -> Dict[str, Dict]:
+    """gichul_full·gichul_marks 문서 → {시험 id: 시험} (글 칸은 글자로, 선지는 글자 목록으로 맞추고 모양이 이상한 시험·문항은 뺌)"""
+    exams = (doc or {}).get("exams") if isinstance(doc, dict) else None
+    out = {}
+    for k, e in (exams.items() if isinstance(exams, dict) else []):
+        if not isinstance(e, dict):
+            continue
+        qs = []
+        for q in (e.get("questions") if isinstance(e.get("questions"), list) else []):
+            if not isinstance(q, dict):
+                continue
+            nq = {kk: ("" if q.get(kk) is None else str(q.get(kk))) for kk in _GQ_TEXT_KEYS}
+            nq["choices"] = [("" if c is None else str(c)) for c in q.get("choices")] if isinstance(q.get("choices"), list) else []
+            nq["graded"] = q.get("graded") if q.get("graded") in ("O", "X") else ""
+            qs.append(nq)
+        out[str(k)] = {**{kk: ("" if e.get(kk) is None else str(e.get(kk))) for kk in ("school", "grade", "exam_name", "display")}, "questions": qs}
+    return out
+
+def qb_school_pack(full_doc: Dict, marks_doc: Dict = None, dna: Dict = None) -> Dict:
+    """기출 전 문항·채점 흔적·학교별 DNA → 문제 만들 때 쓰는 꾸러미 (AI 호출 없음, 작업을 시작할 때 한 번 만듦)"""
+    exams = _gq_exams(full_doc)
+    marks = _gq_exams(marks_doc)
+    years = [gq_year(e.get("exam_name")) for e in exams.values() if gq_year(e.get("exam_name"))]
+    cut = (max(years) - QB_REAL_RECENT + 1) if years else 0
+    pool, lens, pts, wrong, n_exams, stem_u = {}, {}, {}, {}, {}, {}
+    for exam_id, e in exams.items():
+        school, grade, year = str(e.get("school", "")), str(e.get("grade", "")), gq_year(e.get("exam_name"))
+        if school not in QB_SCHOOLS:
+            continue
+        n_exams[school] = n_exams.get(school, 0) + 1
+        recent = year >= cut
+        mk = {str(q.get("no", "")): q for q in (marks.get(exam_id) or {}).get("questions", [])}
+        qs = e.get("questions") or []
+        ps = [gq_points(q.get("points")) for q in qs if q.get("q_type") not in QB_ESSAY_TYPES]
+        ps = [x for x in ps if 2.0 <= x <= 6.0]
+        avg = sum(ps) / len(ps) if ps else 0.0
+        for q in qs:
+            t = q.get("q_type")
+            if t not in QB_TYPES:
+                continue
+            g = (mk.get(str(q.get("no", ""))) or {}).get("graded")
+            pt = gq_points(q.get("points"))
+            for gk in ((grade, "") if grade else ("",)):
+                if pt and avg and recent:
+                    pts.setdefault((school, gk, t), []).append((pt, avg))
+                if g in ("O", "X"):
+                    w = wrong.setdefault((school, gk, t), [0, 0])
+                    w[0] += g == "X"
+                    w[1] += 1
+            ch = [str(c) for c in (q.get("choices") or []) if str(c).strip()]
+            lt = "내용 일치·불일치" if t == "추론 (추론 가능·불가)" else t
+            if recent and lt in QB_REAL_LEN_TYPES and len(ch) == 5 and not any(gq_is_korean(c) for c in ch):
+                n = sum(len(re.findall(r"[A-Za-z][A-Za-z'’\-]*", re.sub(r"<[^>]+>", " ", c))) for c in ch) / 5
+                for gk in ((grade, "") if grade else ("",)):
+                    lens.setdefault((school, gk, lt), []).append(n)
+            if gq_format_ok(q, t):
+                if recent and re.search(QB_STEM_U_WORDS, re.sub(r"<[^>]+>", "", str(q.get("stem") or ""))):
+                    su = stem_u.setdefault((school, t), [0, 0])
+                    su[0] += "<u>" in str(q.get("stem") or "")
+                    su[1] += 1
+                pool.setdefault((school, t), []).append({
+                    "exam_id": exam_id, "display": e.get("display", ""), "grade": grade, "year": year, "recent": recent,
+                    "q": q, "wrong": g == "X", "pts": pt, "avg": avg, "label": str(q.get("matched_label") or "")})
+    sr = (dna or {}).get("school_rules") if isinstance(dna, dict) else None
+    rules = {s: v for s, v in (sr.items() if isinstance(sr, dict) else []) if isinstance(v, dict) and isinstance(v.get("common"), str) and v["common"].strip()}
+    return {"pool": pool, "lens": lens, "pts": pts, "wrong": wrong, "n_exams": n_exams, "cut": cut, "rules": rules,
+            "stem_u": {k: v[0] / v[1] for k, v in stem_u.items() if v[1] >= QB_REAL_MIN_N},
+            "updated": str((full_doc or {}).get("updated_at", ""))}
+
+def qb_stem_style(pack: Dict, school: str, q_type: str, stem) -> str:
+    """이 학교·유형 실제 발문의 절반 이상(최근 3개년)이 '<u>틀린</u>'처럼 부정어·방향어에 밑줄을 그으면 만든 문제 발문에도 같은 자리에 밑줄 (이미 밑줄이 있으면 그대로)"""
+    st_ = str(stem or "")
+    if not pack or "<u>" in st_ or ((pack.get("stem_u") or {}).get((school, q_type)) or 0) < 0.5:
+        return stem
+    return re.sub(QB_STEM_U_WORDS, r"<u>\1</u>", st_, count=1)
+
+def qb_real_len(pack: Dict, school: str, grade: str, q_type: str):
+    """→ (평균 단어 수, 출처 글) 전 문항에서 잰 영어 선지 길이 (자료가 모자라면 (0, ''))"""
+    if not pack:
+        return 0, ""
+    lt = "내용 일치·불일치" if q_type == "추론 (추론 가능·불가)" else q_type
+    for gk in ((grade, "") if grade else ("",)):
+        v = (pack.get("lens") or {}).get((school, gk, lt)) or []
+        if len(v) >= QB_REAL_MIN_N:
+            return round(sum(v) / len(v)), f"{school}{(' ' + gk) if gk else ''} 실제 기출 {len(v)}문항"
+    return 0, ""
+
+def qb_real_examples(pack: Dict, school: str, grade: str, q_type: str, level: str, label: str = "", text: str = "", rnd=None) -> List[Dict]:
+    """같은 학교·유형 실제 기출 예시 (같은 학년·최근 시험 우선, 상·최상은 학생이 틀렸거나 배점 높은 문항 우선, 같은 지문 기출은 뺌)"""
+    cands = list(((pack or {}).get("pool") or {}).get((school, q_type)) or [])
+    if not cands:
+        return []
+    rnd = rnd or random.Random()
+    parts = (set(qb_link_parts(label)[1]) | {label}) if label else set()
+    mine = _gq_4grams(text) if text else set()
+    hard = level in ("상", "최상")
+
+    def score(r):
+        s = (4 if grade and r["grade"] == grade else 0) + (2 if r["recent"] else 0)
+        if hard and (r["wrong"] or (r["pts"] and r["avg"] and r["pts"] > r["avg"] + 0.05)):
+            s += 1
+        if not hard and r["pts"] and r["avg"] and r["pts"] <= r["avg"]:
+            s += 1
+        return s + rnd.random() * 0.5
+
+    out, seen = [], set()
+    for r in sorted(cands, key=score, reverse=True):
+        if r["exam_id"] in seen or (r["label"] and r["label"] in parts):
+            continue
+        body = f"{r['q'].get('given', '')} {r['q'].get('passage', '')}"
+        if mine and len(_gq_4grams(body) & mine) > 0.25 * max(1, min(len(mine), len(_gq_4grams(body)))):
+            continue  # 이번 지문으로 나온 실제 기출은 예시로 쓰지 않음 (그대로 베낄 수 있어서)
+        out.append(r)
+        seen.add(r["exam_id"])
+        if len(out) >= QB_REAL_EX_N:
+            break
+    return out
+
+def gq_example_text(r: Dict) -> str:
+    q = r["q"]
+    lines = [f"({r['display']} {q.get('no', '')}번{(' · ' + str(q.get('points'))) if q.get('points') else ''}"
+             f"{' · 학생이 틀린 문항' if r.get('wrong') else ''})", "발문: " + gq_clean_stem(q.get("stem"))]
+    if str(q.get("given") or "").strip():
+        w = str(q["given"]).split()
+        lines.append("주어진 글: " + " ".join(w[:60]) + (" …" if len(w) > 60 else ""))
+    sp = _gq_short_passage(q.get("passage"))
+    if sp:
+        lines.append("지문(표시 있는 문장만): " + sp)
+    if str(q.get("box") or "").strip():
+        lines.append("박스: " + str(q["box"]).strip()[:600])
+    ch = [str(c).strip() for c in (q.get("choices") or [])]
+    if any(ch):
+        lines.append("선택지: " + " | ".join(f"{CIRCLED[i]} {c}" for i, c in enumerate(ch[:5])))
+    lines.append("정답: " + str(q.get("answer", "")).strip()[:300])
+    s = "\n".join(lines)
+    return s if len(s) <= QB_REAL_EX_CHARS else s[:QB_REAL_EX_CHARS] + " …"
+
+def qb_real_stems(pack: Dict, school: str, grade: str, q_type: str, k: int = 3) -> List[str]:
+    """이 학교(같은 학년 먼저)·유형의 실제 발문 중 많이 쓴 것"""
+    cnt = {}
+    for r in ((pack or {}).get("pool") or {}).get((school, q_type)) or []:
+        s = gq_clean_stem(r["q"].get("stem"))
+        if 6 <= len(s) <= 160:
+            cnt[s] = cnt.get(s, 0) + 1 + (1 if r["recent"] else 0) + (1 if grade and r["grade"] == grade else 0)
+    return [s for s, _ in sorted(cnt.items(), key=lambda x: -x[1])[:k]]
+
+def qb_school_block(pack: Dict, school: str, grade: str, q_type: str, level: str, label: str = "", text: str = "", rnd=None) -> str:
+    """[이번 출제]에 붙이는 v1.2 학교별 실제 기출 DNA 묶음 (꾸러미가 없으면 빈 문자열 → v1.1과 같은 프롬프트)"""
+    if not pack:
+        return ""
+    out = []
+    rule = (pack.get("rules") or {}).get(school) or {}
+    if rule.get("common"):
+        grades_ = rule.get("grades") if isinstance(rule.get("grades"), dict) else {}
+        types_ = rule.get("types") if isinstance(rule.get("types"), dict) else {}
+        g_txt = str(grades_.get(grade, "") or "").strip()[:900] if grade else ""
+        t_txt = str(types_.get(q_type, "") or "").strip()[:600]
+        out.append(f"[{school} 실제 기출 DNA — 시험지 {rule.get('n_exams', '')}개 전 문항 분석 · 위 공통 출제 DNA와 다르면 이것을 따른다. "
+                   "단, 선택지 길이는 [선택지 길이] 기준을, 문제 형식(무엇을 고르는지·선택지 모양)은 [유형 형식]·[문항별 출제 계획]을 따르고, "
+                   "여기 적힌 다른 형식(네모 고르기·개수 묻기·도표·두 지문 복합 등)은 만들지 않는다]\n"
+                   + str(rule["common"]).strip()[:1800]
+                   + (f"\n- {grade}: {g_txt}" if g_txt else "") + (f"\n- {q_type}: {t_txt}" if t_txt else ""))
+    stems = qb_real_stems(pack, school, grade, q_type)
+    if stems:
+        out.append(f"[{school} 실제 발문 말투] stem은 아래 실제 발문 중 이번 문제에 맞는 것을 그대로 쓰거나 같은 말투로 쓴다(부정어 밑줄 <u>않는</u>·<u>틀린</u> 같은 표시도 그대로). "
+                   "ⓐ~ⓖ 같은 기호 범위와 묻는 방향(틀린/옳은, 일치/불일치)은 이번 문제에 맞게 고치고, 묻는 형식은 [유형 형식]을 따른다.\n"
+                   + "\n".join(f"- {s}" for s in stems))
+    nums = []
+    pv = (pack.get("pts") or {}).get((school, grade, q_type)) or []
+    if len(pv) < QB_REAL_MIN_N:
+        pv = (pack.get("pts") or {}).get((school, "", q_type)) or []
+    if len(pv) >= QB_REAL_MIN_N:
+        nums.append(f"평균 배점 {sum(p for p, _ in pv) / len(pv):.1f}점(같은 시험 평균 {sum(a for _, a in pv) / len(pv):.1f}점)")
+    wv = (pack.get("wrong") or {}).get((school, grade, q_type)) or [0, 0]
+    if wv[1] < QB_REAL_WRONG_MIN:
+        wv = (pack.get("wrong") or {}).get((school, "", q_type)) or [0, 0]
+    if wv[1] >= QB_REAL_WRONG_MIN:
+        nums.append(f"학생 오답률 {wv[0] / wv[1] * 100:.0f}%({wv[1]}문항 중 {wv[0]}개)")
+    if nums:
+        out.append(f"[{school}{(' ' + grade) if grade else ''} {q_type} 실제 수치] " + " · ".join(nums)
+                   + " — 배점이 높고 오답이 많은 유형일수록 실제 시험의 변별 문항이다.")
+    exs = qb_real_examples(pack, school, grade, q_type, level, label, text, rnd)
+    if exs:
+        out.append(f"[{school} 실제 기출 예시 — 발문 말투·선택지 길이·어휘 수준·함정 방식을 이만큼 맞춘다. 예시의 지문·문장·선택지 내용은 절대 베끼지 않는다]\n"
+                   + "\n".join(f"예시 {i}. " + gq_example_text(r) for i, r in enumerate(exs, 1)))
+    return ("\n" + "\n\n".join(out) + "\n") if out else ""
+
+# ---- 학교별 DNA 만들기 (AI 1회 · 학교마다): 그 학교 시험지 전 문항을 줄여서 한 번에 읽힘 ----
+SCHEMA_SCHOOL_DNA = {
+    "type": "object",
+    "properties": {
+        "common": {"type": "string", "description": "이 학교 시험 전체의 출제 DNA (1,200자 이내)"},
+        "grade_1": {"type": "string", "description": "고1 시험만의 특징 (600자 이내, 자료 없으면 빈 문자열)"},
+        "grade_2": {"type": "string", "description": "고2 시험만의 특징 (600자 이내, 자료 없으면 빈 문자열)"},
+        "grade_3": {"type": "string", "description": "고3 시험만의 특징 (600자 이내, 자료 없으면 빈 문자열)"},
+        "types": {"type": "array", "items": {"type": "object", "properties": {
+            "q_type": {"type": "string", "enum": QB_TYPE_NAMES},
+            "text": {"type": "string", "description": "이 유형의 이 학교 출제 방식 (350자 이내)"}}, "required": ["q_type", "text"]}},
+        "summary": {"type": "string", "description": "이번 정리의 핵심 3줄"},
+    },
+    "required": ["common", "grade_1", "grade_2", "grade_3", "types", "summary"],
+}
+QB_SCHOOL_DNA_MODELS = ["anthropic:claude-opus-5-5", "openai:gpt-6.1-sol", "gemini:gemini-3.1-pro-preview"]  # 키가 있는 첫 모델로 만듦
+QB_SCHOOL_DNA_OUT = 20000  # 비용 추정용 출력 토큰 (학교 하나, 생각 토큰 포함)
+
+def gq_school_dump(full_doc: Dict, marks_doc: Dict, school: str):
+    """→ (AI에 줄 글, 시험 id 목록, 첫 연도, 마지막 연도) 최근 시험 먼저 · 지문은 표시 있는 문장만 · 학생이 틀린 문항 표시"""
+    exams = [(k, e) for k, e in _gq_exams(full_doc).items() if e.get("school") == school]
+    exams.sort(key=lambda kv: (gq_year(kv[1].get("exam_name")), str(kv[1].get("exam_name", "")), str(kv[1].get("grade", ""))), reverse=True)
+    marks = _gq_exams(marks_doc)
+    out, years = [], []
+    for k, e in exams:
+        years.append(gq_year(e.get("exam_name")))
+        mk = {str(q.get("no", "")): q for q in (marks.get(k) or {}).get("questions", [])}
+        out.append(f"## {e.get('display', '')}")
+        for q in e.get("questions") or []:
+            wrong = (mk.get(str(q.get("no", ""))) or {}).get("graded") == "X"
+            lines = [f"[{q.get('no', '')}번 · {q.get('q_type', '')} · {q.get('points', '')}{' · 학생 오답' if wrong else ''}]",
+                     "발문: " + " ".join(str(q.get("stem") or "").split())]
+            if str(q.get("given") or "").strip():
+                lines.append("주어진: " + " ".join(str(q["given"]).split()[:60]))
+            sp = _gq_short_passage(q.get("passage"))
+            if sp:
+                lines.append("지문: " + sp)
+            if str(q.get("box") or "").strip():
+                lines.append("박스: " + str(q["box"]).strip())
+            ch = [str(c).strip() for c in (q.get("choices") or []) if str(c).strip()]
+            if ch:
+                lines.append("선지: " + " | ".join(f"{CIRCLED[i]} {c}" for i, c in enumerate(ch[:5])))
+            lines.append("정답: " + str(q.get("answer", "")).strip()[:200])
+            out.append("\n".join(lines))
+    ys = [y for y in years if y]
+    return "\n".join(out), [k for k, _ in exams], (min(ys) if ys else 0), (max(ys) if ys else 0)
+
+def school_dna_model() -> str:
+    return next((m for m in QB_SCHOOL_DNA_MODELS if AI_KEYS.get(split_model_spec(m)[0])), "")
+
+def school_dna_cost_krw(model: str, dump: str) -> float:
+    """대략 (글자 수 ÷ 2.25 = 입력 토큰 — 2026-11-10 운양고 49만 자가 Claude 22만 토큰)"""
+    p_in, _, p_out = ai_price(model)
+    return (len(dump) / 2.25 * p_in + QB_SCHOOL_DNA_OUT * p_out) / 1_000_000 * 1400
+
+def gq_len_table(full_doc: Dict, school: str) -> str:
+    """최근 3개년 영어 선지(<보기>는 진술) 한 개 단어 수 — 10~90% 범위와 가운데 값 (학교별 DNA를 만들 때 숫자를 지어내지 않게 함께 줌)"""
+    exams = [e for e in _gq_exams(full_doc).values() if e.get("school") == school]
+    ys = [gq_year(e.get("exam_name")) for e in exams if gq_year(e.get("exam_name"))]
+    cut = (max(ys) - QB_REAL_RECENT + 1) if ys else 0
+    lines = []
+    for t in QB_REAL_LEN_TYPES + ("<보기> 일치 조합형",):
+        w = []
+        for e in exams:
+            if gq_year(e.get("exam_name")) < cut:
+                continue
+            for q in e.get("questions") or []:
+                if q.get("q_type") != t:
+                    continue
+                ch = [str(c) for c in (q.get("choices") or []) if str(c).strip()]
+                if t == "<보기> 일치 조합형":
+                    ch = [x for x in re.split(r"\n+|(?=[ⓐ-ⓗ])", str(q.get("box") or "")) if re.search(r"[A-Za-z]{3}", x)]
+                if not ch or any(gq_is_korean(c) for c in ch):
+                    continue
+                w += [len(re.findall(r"[A-Za-z][A-Za-z'’\-]*", re.sub(r"<[^>]+>", " ", c))) for c in ch]
+        if len(w) >= 10:
+            w.sort()
+            lines.append(f"- {t}: 영어 {'진술' if t.startswith('<보기>') else '선지'} 한 개 {w[len(w) // 10]}~{w[min(len(w) - 1, len(w) * 9 // 10)]}단어"
+                         f"(가운데 {w[len(w) // 2]}단어, {len(w)}개)")
+    return "\n".join(lines)
+
+def school_dna_prompt(school: str, dump: str, n: int, y0: int, y1: int, measured: str = "") -> str:
+    cut = max(y0, y1 - QB_REAL_RECENT + 1)
+    return f"""너는 {school} 영어 내신 시험을 오래 분석해 온 출제 전문가다. 아래는 {school} 실제 시험지 {n}개({y0}~{y1}년)의 전 문항이다.
+(최근 시험 먼저 · 지문은 밑줄·번호 같은 표시가 있는 문장만 줄여 실음 · '학생 오답' = 학생 시험지에 틀린 표시가 있던 문항 · 정답은 AI가 풀어 적은 것이라 드물게 틀릴 수 있음)
+다른 출제위원이 이 정리만 보고 변형문제를 내도 {school} 학생이 '우리 학교 시험과 똑같다'고 느끼도록, 이 학교만의 출제 DNA를 정리하라.
+- 최근 3개년({cut}~{y1}년) 시험을 기준으로 쓰고, 예전과 달라진 점은 '최근:'으로 밝힌다.
+- 수능·다른 학교에도 다 해당되는 일반론은 쓰지 않는다. 이 학교 시험지에서 실제로 확인되는 것만 쓰고, 가능하면 '몇 문항 중 몇'처럼 세어서 쓴다.
+- 짧은 실제 표현(발문 문구, 선지 한 구절)은 예로 넣되 지문 문장을 길게 옮기지 않는다.
+- common(1,200자 이내): 문항 수·배점 범위, 유형 구성, 선택지 언어(영어/한국어)와 길이, 재진술 수준, 정답·오답을 만드는 방식, 학생이 실제로 많이 틀린 문항의 공통점, 발문 말투.
+- grade_1·grade_2·grade_3(각 600자 이내): 그 학년 시험만의 차이(유형 비중·난이도·선지 언어·변별 문항). 그 학년 자료가 없으면 빈 문자열.
+- types: 이 학교 시험에 나온 유형마다 하나씩(q_type은 주어진 목록 이름 그대로, 각 350자 이내): 실제 발문 말투, 선택지 모양·길이·언어, 정답을 만드는 방식, 오답·함정을 만드는 방식, 학생이 틀린 문항의 함정.
+- summary: 이번 정리의 핵심 3줄.
+- 선택지·진술 단어 수는 아래 [실측 단어 수]만 쓰고 따로 지어내지 않는다(실제보다 길게 쓰면 변형문제 선지가 학교 시험보다 길어진다).
+
+[실측 단어 수 — 최근 3개년, 프로그램이 직접 셈]
+{measured or "(자료 없음)"}
+
+[{school} 시험지 전 문항]
+{dump}"""
+
+def school_dna_build(gclient, model: str, full_doc: Dict, marks_doc: Dict, school: str, logs: List[str]) -> Dict:
+    """학교 하나의 실제 기출 DNA를 AI로 정리 → 출제 DNA 문서 school_rules[학교]에 넣을 기록 (실패하면 None)"""
+    dump, ids, y0, y1 = gq_school_dump(full_doc, marks_doc, school)
+    if not ids:
+        return None
+    out = _qb_call(gclient, model, school_dna_prompt(school, dump, len(ids), y0, y1, gq_len_table(full_doc, school)), SCHEMA_SCHOOL_DNA, 0.2, logs,
+                   f"{school} 학교별 DNA")
+    if not isinstance(out, dict) or not str(out.get("common", "")).strip():
+        return None
+    types = {}
+    for t in out.get("types") or []:
+        if isinstance(t, dict) and t.get("q_type") in QB_TYPES and str(t.get("text", "")).strip():
+            types[t["q_type"]] = str(t["text"]).strip()
+    return {"common": str(out["common"]).strip(), "summary": str(out.get("summary", "")).strip(),
+            "grades": {g: str(out.get(f"grade_{g[-1]}", "") or "").strip() for g in ("고1", "고2", "고3")},
+            "types": types, "n_exams": len(ids), "exam_ids": ids, "years": f"{y0}~{y1}년", "at": time.strftime("%Y-%m-%d %H:%M"), "model": model}
+
+def qb_school_pack_load(sb, dna: Dict = None) -> Dict:
+    """작업을 시작할 때 한 번: 기출 전 문항·채점 흔적을 읽어 꾸러미로 (자료가 없거나 읽기 실패면 None → v1.1과 같은 프롬프트)"""
+    try:
+        full = _store_get(sb, GICHUL_FULL_FILE, {}) or {}
+        if not full.get("exams"):
+            return None
+        return qb_school_pack(full, _store_get(sb, GICHUL_MARKS_FILE, {}) or {}, dna)
+    except Exception:
+        return None
+
+
 # ---- 출제 규칙 버전 (2026-11-10): 학교 스타일을 담는 규칙을 바꿀 때마다 올리고, 만든 문제에 그때 버전을 남김 ----
 #   버전 기록이 없는 예전 문제는 v1.0으로 봄 (저장된 문제를 고치지 않고 읽을 때만 판단). 실제 기출은 버전 없음
-QB_RULES_VERSION = "1.1"
+QB_RULES_VERSION = "1.2"
 QB_RULES_HISTORY = [
     ("1.0", "~2026-11-09", "학교 스타일·지문 변형 비율·어법 출제 빈도·헷갈림 장치·난이도 판정 (선지 길이 기준 없음)"),
     ("1.1", "2026-11-10", "학년 반영 · 학교·학년·유형별 선지 길이(24~26년 실제 기출 30개 측정) · 상·최상 선지 어휘 기준"),
+    ("1.2", "2026-11-10", "학교별 실제 기출 DNA(시험지 52개 전 문항·학생 채점 흔적) · 학교·학년별 수치(선지 길이·배점·오답률) 자동 계산 · "
+                          "같은 학교·유형 실제 기출 예시 · 학교 실제 발문 말투"),
 ]
 
 def qb_ver(r: Dict) -> str:
@@ -5659,8 +6075,9 @@ def qb_ver_mix(qs: List[Dict]) -> str:
 
 def qb_build_prompt(label: str, text: str, q_type: str, level: str, school: str, count: int,
                     avoid: List[str], dna_rules: str, essay_rules: str, existing: List[Dict] = None, underline: str = "mix",
-                    yt_points: List[Dict] = None, yt_focus: bool = False, unit_other: str = "", grade: str = ""):
+                    yt_points: List[Dict] = None, yt_focus: bool = False, unit_other: str = "", grade: str = "", pack: Dict = None):
     """→ (공통 앞부분, 이번 출제 부분, 문항별 계획). grade: '고1'·'고2' (비우면 지문 이름으로 판단)
+    pack: v1.2 학교별 실제 기출 꾸러미 (qb_school_pack) — 없으면 v1.1과 같은 프롬프트
     프롬프트 앞부분(출제 DNA + 공통 규칙)은 모든 호출에서 글자 하나까지 같게 두어 캐시로 읽히게 하고,
     학교·유형·난이도·지문처럼 호출마다 다른 내용은 뒤에 붙임"""
     avoid_str = ""
@@ -5701,12 +6118,17 @@ def qb_build_prompt(label: str, text: str, q_type: str, level: str, school: str,
 - explanation은 한국어 2~4줄: 근거(영어 원문 일부) + 오답 이유.
 - 서식 태그는 <u>, <b>만 쓴다."""
     grade = grade or qb_passage_grade(label)
-    len_rule = qb_choice_len_rule(school, grade, q_type, level) if q_type in QB_CHOICE_TYPES else ""
+    try:
+        len_rule = qb_choice_len_rule(school, grade, q_type, level, pack) if q_type in QB_CHOICE_TYPES else ""
+        school_block = qb_school_block(pack, school, grade, q_type, level, label, text) if pack else ""
+    except Exception:  # 기출 자료가 이상해도 문제 만들기는 멈추지 않게 (v1.1과 같은 프롬프트로)
+        len_rule = qb_choice_len_rule(school, grade, q_type, level) if q_type in QB_CHOICE_TYPES else ""
+        school_block = ""
     task = f"""[이번 출제] {school}{(" " + grade) if grade else ""} 스타일 · [{q_type}] 유형 · 난이도 [{level}] · {count}문항
 
 [{school} 출제 스타일]
 {QB_SCHOOL_STYLE.get(school, '')}
-{len_rule}
+{len_rule}{school_block}
 
 [난이도 {level} 기준]
 {QB_LEVEL_RULES[level]}
@@ -5723,10 +6145,10 @@ def qb_build_prompt(label: str, text: str, q_type: str, level: str, school: str,
 
 def qb_generate(gclient, model: str, label: str, text: str, q_type: str, level: str, school: str, count: int,
                 avoid: List[str], dna_rules: str, essay_rules: str, logs: List[str], existing: List[Dict] = None, underline: str = "mix",
-                yt_points: List[Dict] = None, yt_focus: bool = False, unit_other: str = "", grade: str = "") -> List[Dict]:
+                yt_points: List[Dict] = None, yt_focus: bool = False, unit_other: str = "", grade: str = "", pack: Dict = None) -> List[Dict]:
     """변형문제 count개 생성 (형식이 맞지 않는 문항은 버림)"""
     shared, task, plans = qb_build_prompt(label, text, q_type, level, school, count, avoid, dna_rules, essay_rules, existing, underline,
-                                          yt_points, yt_focus, unit_other, grade)
+                                          yt_points, yt_focus, unit_other, grade, pack)
     out = _qb_call(gclient, model, [shared, task], SCHEMA_QBANK, 0.7, logs, f"{label} {q_type} {level} 생성", cache_first=True)
     return qb_parse(out, q_type, count, plans, text)
 
@@ -5876,9 +6298,10 @@ def qb_delete(sb, ids: List[str]):
         json.dump([r for r in _qb_local_load() if r.get("id") not in drop], f, ensure_ascii=False)
 
 def _generate_qbank_item(sb_factory, gclient, item: Dict, opts: Dict, dna_rules: str, essay_rules: str, logs: List[str],
-                         yt_points: List[Dict] = None) -> (bool, str):
+                         yt_points: List[Dict] = None, pack: Dict = None) -> (bool, str):
     """작업 목록의 변형문제 1건(지문·유형·난이도) 생성 → 정답 검증 → 문제 표에 저장"""
     sb = sb_factory()
+    item = {**item, "ver": QB_RULES_VERSION if pack else "1.1"}  # 학교별 기출 자료를 못 읽었으면 v1.1 방식이므로 그대로 표시
     label, q_type, level, school = item["passage_label"], item["q_type"], item["difficulty"], item.get("school", "운양고")
     count = int(item.get("count", 2))
     model = job_item_model(item, opts)
@@ -5889,14 +6312,14 @@ def _generate_qbank_item(sb_factory, gclient, item: Dict, opts: Dict, dna_rules:
         time.sleep(opts.get("api_delay", 3))
         questions = qb_generate(gclient, model, label, item["text"], q_type, level, school, count, avoid, dna_rules, essay_rules, logs,
                                 existing, item.get("underline", "mix"), yt_points, bool(item.get("yt_focus")), item.get("unit_other", ""),
-                                item.get("grade", ""))
+                                item.get("grade", ""), pack)
         if questions:
             break
         if round_idx < len(GEN_RETRY_WAITS):
             time.sleep(GEN_RETRY_WAITS[round_idx])
     if not questions:
         return False, "변형문제 생성 실패"
-    return qb_save_questions(sb, gclient, model, item, questions, logs, existing)
+    return qb_save_questions(sb, gclient, model, item, questions, logs, existing, pack)
 
 _QB_SIG_KEYS = ("stem", "given", "passage", "box", "choices", "answer", "target")
 
@@ -5920,9 +6343,16 @@ def qb_dedupe_rows(rows: List[Dict]) -> List[Dict]:
         out.append(r)
     return out
 
-def qb_save_questions(sb, gclient, model: str, item: Dict, questions: List[Dict], logs: List[str], existing: List[Dict] = None) -> (bool, str):
+def qb_save_questions(sb, gclient, model: str, item: Dict, questions: List[Dict], logs: List[str], existing: List[Dict] = None,
+                      pack: Dict = None) -> (bool, str):
     """정답 검증 → 통과한 문제만 문제 표에 저장. 이미 있는 문제와 내용이 똑같은 문제는 저장하지 않음 (검증 비용도 아낌)"""
     label, q_type, level, school = item["passage_label"], item["q_type"], item["difficulty"], item.get("school", "운양고")
+    if pack and str(item.get("ver") or QB_RULES_VERSION) not in ("1.0", "1.1"):  # v1.2부터: 학교 실제 발문처럼 부정어에 밑줄
+        for q in questions:
+            try:
+                q["stem"] = qb_stem_style(pack, school, q.get("_q_type") or q_type, q.get("stem"))
+            except Exception:
+                pass
     if existing is None:
         try:
             existing = [r for r in qb_fetch(sb, [label], "q_type,school,content") if r.get("q_type") == q_type]
@@ -5946,7 +6376,7 @@ def qb_save_questions(sb, gclient, model: str, item: Dict, questions: List[Dict]
         if not ok:
             continue
         q["verified"] = bool(item.get("verify", True)) and not q.pop("_unverified", False)
-        q["ver"] = QB_RULES_VERSION  # 이 문제를 만든 출제 규칙 버전 (시험지 문항 위에 표시)
+        q["ver"] = str(item.get("ver") or QB_RULES_VERSION)  # 이 문제를 만든 출제 규칙 버전 (시험지 문항 위에 표시)
         qt = q.pop("_q_type", q_type)
         lv = level
         jl, why = q.pop("_judged", (None, ""))
@@ -5971,7 +6401,8 @@ QB_BATCH_POLL_SEC = 120      # 반값 결과만 기다릴 때 확인 간격
 QB_BATCH_POLL_BUSY_SEC = 600 # 일반 작업을 하는 중일 때 확인 간격
 QB_BATCH_GIVEUP_SEC = 30 * 3600  # 이만큼 지나도 안 끝나면 실패로 (회사 약속은 24시간)
 
-def qb_batch_submit(sb, items: List[Dict], opts: Dict, dna_rules: str, essay_rules: str, claim, yt_points: List[Dict] = None, write=None):
+def qb_batch_submit(sb, items: List[Dict], opts: Dict, dna_rules: str, essay_rules: str, claim, yt_points: List[Dict] = None, write=None,
+                    pack: Dict = None):
     """반값 모드 건들의 프롬프트를 만들어 모델별로 한 번에 제출 → 'waiting'. 제출이 안 되면 그 건들은 일반 모드로 바로 생성"""
     groups, upd, new_batches, notes = {}, {}, [], []
     for it in items:
@@ -5980,7 +6411,7 @@ def qb_batch_submit(sb, items: List[Dict], opts: Dict, dna_rules: str, essay_rul
             avoid = [str((r.get("content") or {}).get("focus", "")) for r in existing if (r.get("content") or {}).get("focus")]
             shared, task, plans = qb_build_prompt(it["passage_label"], it["text"], it["q_type"], it["difficulty"], it.get("school", "운양고"),
                                                   int(it.get("count", 2)), avoid, dna_rules, essay_rules, existing, it.get("underline", "mix"),
-                                                  yt_points, bool(it.get("yt_focus")), it.get("unit_other", ""), it.get("grade", ""))
+                                                  yt_points, bool(it.get("yt_focus")), it.get("unit_other", ""), it.get("grade", ""), pack)
             groups.setdefault(job_item_model(it, opts), []).append((it, shared, task, plans))
         except Exception as e:
             upd[it["id"]] = {"batch": False}
@@ -5991,7 +6422,8 @@ def qb_batch_submit(sb, items: List[Dict], opts: Dict, dna_rules: str, essay_rul
             now = time.time()
             new_batches.append({"id": bid, "model": m, "ts": now, "n": len(lst)})
             for it, _, _, plans in lst:
-                upd[it["id"]] = {"state": "waiting", "batch_id": bid, "batch_model": m, "batch_ts": now, "plans": plans}
+                upd[it["id"]] = {"state": "waiting", "batch_id": bid, "batch_model": m, "batch_ts": now, "plans": plans,
+                                 "ver": QB_RULES_VERSION if pack else "1.1"}
             notes.append(f"💸 반값 모드로 {len(lst)}건 제출 · {ai_model_label(m)} (보통 몇 분~몇 시간, 길면 24시간)")
         except Exception as e:
             for it, *_ in lst:
@@ -6009,7 +6441,7 @@ def qb_batch_submit(sb, items: List[Dict], opts: Dict, dna_rules: str, essay_rul
         claim(j)
     (write or (lambda fn: _job_update_retry(sb, fn)))(apply)
 
-def qb_batch_poll(sb, gclient, job: Dict, claim, write=None):
+def qb_batch_poll(sb, gclient, job: Dict, claim, write=None, pack: Dict = None):
     """기다리는 반값 묶음마다 끝났는지 확인 → 끝난 묶음은 결과를 받아 건마다 정답 검증·저장"""
     waiting = [job_item_full(job, it) for it in job.get("items", []) if it.get("state") == "waiting"]
     by_batch = {}
@@ -6052,7 +6484,9 @@ def qb_batch_poll(sb, gclient, job: Dict, claim, write=None):
             out = res.get(it["id"])
             try:
                 qs = qb_parse(out, it["q_type"], int(it.get("count", 2)), it.get("plans") or [], it["text"]) if out else []
-                ok, err = qb_save_questions(sb, gclient, it.get("batch_model") or model, it, qs, logs) if qs else \
+                # v1.2 이전에 낸 반값 묶음(ver 기록 없음)은 v1.1 프롬프트로 만든 것이라 v1.1로 저장
+                ok, err = qb_save_questions(sb, gclient, it.get("batch_model") or model, {**it, "ver": it.get("ver") or "1.1"}, qs, logs,
+                                            None, pack) if qs else \
                     (False, f"반값 모드 결과가 없거나 형식이 맞지 않음 ({note})")
             except Exception as e:
                 ok, err = False, f"반값 결과 처리 중 오류: {str(e)[:150]}"
@@ -8315,11 +8749,11 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
             g_cols = _qb_row("학년").columns([3.2, 4.8], vertical_alignment="center")
             gen_grade = g_cols[0].segmented_control("학년", ["지문 따라"] + QB_GRADES, default="지문 따라", key="qb_gen_grade",
                                                     label_visibility="collapsed",
-                                                    help="선지 길이를 이 학교·학년의 24~26년 실제 기출에 맞춰요. '지문 따라'는 모의고사 학년, 교과서 이름(공통영어 = 고1, 영어Ⅰ·Ⅱ = 고2)으로 정해요.") or "지문 따라"
+                                                    help="선지 길이·학년별 DNA·실제 기출 예시를 이 학교·학년의 실제 기출(최근 3개년 먼저)에 맞춰요. '지문 따라'는 모의고사 학년, 교과서 이름(공통영어 = 고1, 영어Ⅰ·Ⅱ = 고2)으로 정해요.") or "지문 따라"
             g_cols[1].markdown("<div class='qb-note' style='margin-top:0'>" + (
-                ("고른 지문: " + " · ".join(f"{g_} <b>{n_}개</b>" for g_, n_ in sorted(g_found.items())) + " → 선지 길이를 그 학년 실제 기출에 맞춰요"
+                ("고른 지문: " + " · ".join(f"{g_} <b>{n_}개</b>" for g_, n_ in sorted(g_found.items())) + " → 선지 길이·학년별 DNA·실제 기출 예시를 그 학년에 맞춰요"
                  + (" (모름은 학교 전체 평균)" if "모름" in g_found else "")) if gen_grade == "지문 따라"
-                else f"모든 지문을 <b>{school} {gen_grade}</b> 실제 기출 선지 길이에 맞춰요") + "</div>", unsafe_allow_html=True)
+                else f"모든 지문을 <b>{school} {gen_grade}</b> 실제 기출(선지 길이·학년별 DNA·예시)에 맞춰요") + "</div>", unsafe_allow_html=True)
             _v, _d, _what = QB_RULES_HISTORY[-1]
             st.caption(f"📌 지금 출제 규칙 **v{_v}** ({_d}): {_what} — 만드는 문제마다 이 버전이 붙고, 시험지 문항 위에 'v{_v}'로 보여요. "
                        "버전이 없는 예전 문제는 v1.0이에요.")
@@ -10618,8 +11052,84 @@ def page_voca():
     render_library_manager("w", "Anatomy Voca", VOCA_FILE, CSS_VOCA, "voca", text_model, api_delay, academy_name, school_name, h_url, f_url)
 
 
+def render_school_dna():
+    """🏫 학교별 실제 기출 DNA (v1.2): 학교마다 상태·내용 보기 + 시험지 전 문항으로 다시 만들기 (AI 1회)"""
+    st.markdown("#### 🏫 학교별 실제 기출 DNA (v1.2 · 문제 만들 때마다 반영)")
+    st.caption("변형문제를 만들 때마다 ① 아래 학교별 DNA(학교 공통 · 그 학년 · 그 유형) ② 기출 전 문항에서 직접 센 수치(선지 길이 · 배점 · 학생 오답률) "
+               "③ 같은 학교·유형의 실제 기출 예시 2개(같은 학년·최근 3개년 먼저, 같은 지문으로 나온 기출은 빼고)를 함께 넣어요. "
+               "②③은 '🧩 변형문제 은행·시험지 → 🏫 기출 표시'에 시험지를 올리면 저절로 바뀌고, ①은 아래 버튼으로 다시 만들어요.")
+    sb_ = supabase if IS_CLOUD_DB else None
+    try:
+        full = _store_get(sb_, GICHUL_FULL_FILE, {}) or {}
+        marks = _store_get(sb_, GICHUL_MARKS_FILE, {}) or {}
+    except Exception as e:
+        st.warning(f"⚠️ 기출 전 문항 자료를 읽지 못했어요. 잠시 뒤 다시 열어 주세요. ({str(e)[:80]})")
+        return
+    rules = st.session_state.exam_dna.get("school_rules")
+    rules = rules if isinstance(rules, dict) else {}
+    model = school_dna_model()
+    for col, school in zip(st.columns(len(QB_SCHOOLS)), QB_SCHOOLS):
+        with col:
+            try:
+                _render_school_dna_one(school, rules, full, marks, model)
+            except Exception as e:
+                st.warning(f"⚠️ {school} 학교별 DNA를 보여 주지 못했어요. 문제 만들기에는 영향이 없어요. ({str(e)[:80]})")
+
+
+def _render_school_dna_one(school: str, rules: Dict, full: Dict, marks: Dict, model: str):
+    """학교 칸 하나: DNA 상태·내용 보기 + 다시 만들기"""
+    rec = rules.get(school) if isinstance(rules.get(school), dict) else {}
+    ids = [k for k, e in _gq_exams(full).items() if e.get("school") == school]
+    new = [k for k in ids if k not in set(str(x) for x in (rec.get("exam_ids") if isinstance(rec.get("exam_ids"), list) else []))]
+    if rec.get("common"):
+        st.markdown(f"**{school}** · 시험지 {rec.get('n_exams', '')}개({rec.get('years', '')}) 전 문항 분석 · {rec.get('at', '')}")
+        if new:
+            st.warning(f"새로 올린 시험지 {len(new)}개는 아직 이 DNA 글에 안 들어갔어요 (②수치·③예시에는 이미 들어가요). 아래 버튼으로 다시 만들 수 있어요.")
+        with st.expander("내용 보기"):
+            if rec.get("summary"):
+                st.info(rec["summary"])
+            st.markdown("**학교 공통**")
+            st.write(rec["common"])
+            for g, t in (rec.get("grades") if isinstance(rec.get("grades"), dict) else {}).items():
+                if str(t).strip():
+                    st.markdown(f"**{g}**")
+                    st.write(t)
+            for t, txt in (rec.get("types") if isinstance(rec.get("types"), dict) else {}).items():
+                st.markdown(f"**{t}**")
+                st.write(txt)
+            st.caption(f"만든 모델: {ai_model_label(rec.get('model', ''))}")
+    else:
+        st.markdown(f"**{school}** · 아직 만들지 않았어요 (②수치·③예시는 이미 반영돼요)")
+    if not ids:
+        st.caption("올린 시험지가 없어요.")
+        return
+    dump = gq_school_dump(full, marks, school)[0]
+    cost = school_dna_cost_krw(model, dump) if model else 0
+    with st.popover(f"🔄 시험지 {len(ids)}개 전 문항으로 다시 만들기 (약 {cost:,.0f}원)", use_container_width=True, disabled=not model):
+        st.caption(f"{school} 시험지 {len(ids)}개의 전 문항을 {ai_model_label(model)}이 한 번에 읽고 정리해요. 3~6분 걸리고, 끝날 때까지 이 창을 닫지 마세요. "
+                   "지금 DNA는 새 DNA가 저장될 때만 바뀌어요.")
+        if st.button("다시 만들기 확정", type="primary", use_container_width=True, key=f"school_dna_go_{school}"):
+            logs = []
+            with st.spinner(f"{school} 시험지 전 문항을 읽고 정리하는 중이에요..."):
+                rec_new = school_dna_build(client, model, full, marks, school, logs)
+            if not rec_new:
+                st.error("❌ 만들지 못했어요. 지금 DNA는 그대로예요. " + " / ".join(logs[-2:]))
+            else:
+                saved = False
+                for attempt in range(3):  # 비용을 낸 결과라 DB 읽기가 잠깐 실패해도 몇 번 더 저장해 봄
+                    if exam_dna_update(lambda d, s_=school, r_=rec_new: d.setdefault("school_rules", {}).__setitem__(s_, r_)):
+                        saved = True
+                        break
+                    time.sleep(3)
+                if saved:
+                    st.success(f"✅ {school} 학교별 DNA를 새로 만들었어요. 다음에 시작하는 문제 만들기 작업부터 반영돼요 (이미 돌고 있는 작업은 끝날 때까지 예전 DNA).")
+                    st.rerun()
+
+
 def page_dna():
     render_dna_board()
+    st.divider()
+    render_school_dna()
     st.divider()
     st.markdown("#### ➕ 기출 시험지 PDF로 출제 규칙 더 학습시키기")
     st.info(
