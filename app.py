@@ -7141,17 +7141,101 @@ def qb_existing_gichul_keys(rows: List[Dict]) -> set:
 
 # ---- 시험지 구성 ----
 def qb_set_key(r: Dict):
-    """실제 기출 중 같은 시험·같은 지문에 딸린 문제 묶음 표시 (변형문제는 None)"""
-    if r.get("difficulty") != QB_GICHUL_LEVEL:
-        return None
+    """같은 지문에 딸린 문제 묶음 표시: 실제 기출은 같은 시험·같은 지문 · 가져온 TEST는 같은 수록 시험지·같은 지문 (그 밖 변형문제는 None)
+    (2026-11-12: 가져온 TEST도 원래 시험지처럼 한 지문에 여러 문제를 세트로 — 짝 없이 실리면 지문에 짝 문제의 밑줄·빈칸이 남았음)"""
     c = r.get("content") or {}
-    eid = (c.get("source") or {}).get("exam_id")
-    p = re.sub(r"\s+", " ", str(c.get("passage", ""))).strip()
-    return (eid, p) if eid and p else None
+    if r.get("difficulty") == QB_GICHUL_LEVEL:
+        eid = (c.get("source") or {}).get("exam_id")
+        p = re.sub(r"\s+", " ", str(c.get("passage", ""))).strip()
+        if eid and p:
+            return (eid, p)
+    imp = c.get("import") if isinstance(c, dict) else None
+    if isinstance(imp, dict) and str(imp.get("set") or "").strip():
+        p = re.sub(r"[\W_]", "", str(c.get("passage", ""))).lower()  # 띄어쓰기·문장부호·밑줄 기호 차이는 같은 지문으로
+        return ("TEST", str(imp["set"]).strip(), r.get("passage_label", ""), p) if p else None
+    return None
 
 def _qb_src_no(r: Dict) -> int:
-    m = re.match(r"\d+", str(((r.get("content") or {}).get("source") or {}).get("no", "")))
+    """묶음 안 순서: 실제 기출은 시험 번호 · 가져온 TEST는 원래 번호(없으면 유형 순서)"""
+    c = r.get("content") or {}
+    imp = c.get("import") if isinstance(c, dict) else None
+    if isinstance(imp, dict) and not (c.get("source") or {}).get("no"):
+        m = re.match(r"\d+", str(imp.get("no") or ""))
+        if m:
+            return int(m.group(0))
+        return 500 + (QB_TYPE_NAMES.index(r.get("q_type")) if r.get("q_type") in QB_TYPE_NAMES else 99)
+    m = re.match(r"\d+", str((c.get("source") or {}).get("no", "")))
     return int(m.group(0)) if m else 999
+
+def _qb_set_note(added: List[Dict], extra: int, removed: int, total_now: int) -> str:
+    """묶음을 붙였다는 안내 (실제 기출만이면 예전 문구 그대로)"""
+    test = any((qb_set_key(r) or ("",))[0] == "TEST" for r in added)
+    real = any((qb_set_key(r) or ("",))[0] != "TEST" for r in added)
+    who = "실제 기출·TEST에서" if (test and real) else ("TEST에서" if test else "실제 기출에서")
+    return (f"{who} 한 지문에 함께 나온 문제 {extra}개를 묶어서 넣었습니다"
+            + (f" (대신 변형문제 {removed}개를 빼서 문항 수 유지)." if removed == extra else f" (총 {total_now}문항)."))
+
+def qb_complete_sets(picked: List[Dict], rows: List[Dict], total: int = None) -> (List[Dict], List[str]):
+    """뽑힌 문제 중 묶음 문제가 있으면 같은 묶음 문제를 모두 그 자리에 이어 붙임 (문제 id로 비교 — 시험지용으로 정리한 사본도 같은 문제)
+    난이도마다 따로 뽑으면 난이도가 다른 짝이 빠지거나 떨어져 놓여서, 다 뽑은 뒤 한 번 더 맞춤. total을 주면 늘어난 만큼 묶음이 아닌 변형문제를 뺌"""
+    sets = {}
+    for r in rows:
+        k = qb_set_key(r)
+        if k:
+            sets.setdefault(k, []).append(r)
+    if not any(len(v) > 1 for v in sets.values()):
+        return picked, []
+    by_id = {q.get("id"): q for q in picked}
+    out, seen, added = [], set(), []
+    for q in picked:
+        if q.get("id") in seen:
+            continue
+        k = qb_set_key(q)
+        members = sorted(sets[k], key=_qb_src_no) if k and len(sets.get(k, [])) > 1 else [q]
+        for g in members:
+            if g.get("id") in seen:
+                continue
+            seen.add(g.get("id"))
+            if g.get("id") in by_id:
+                out.append(by_id[g.get("id")])
+            else:
+                out.append(qb_display_fix([g])[0])
+                added.append(g)
+    removed = 0
+    if total is not None:
+        in_set = lambda r: bool(qb_set_key(r)) and len(sets.get(qb_set_key(r), [])) > 1
+        while len(out) > total:
+            var = [i for i, r in enumerate(out) if r.get("difficulty") != QB_GICHUL_LEVEL and not in_set(r)]
+            if not var:
+                break
+            cnt = {}
+            for i in var:
+                cnt[out[i]["passage_label"]] = cnt.get(out[i]["passage_label"], 0) + 1
+            top = max(cnt, key=cnt.get)
+            out.pop(max(i for i in var if out[i]["passage_label"] == top))
+            removed += 1
+    if not added:
+        return out, []
+    return out, [_qb_set_note(added, len(added), removed, len(out))]
+
+def qb_drop_partial_sets(rows: List[Dict], all_rows: List[Dict]) -> (List[Dict], List[str]):
+    """가져온 TEST 세트 중 일부 문제만 조건(유형·난이도·이미 낸 문항 등)에 남은 세트는 통째로 뺌 → (남은 문제, 안내)
+    (짝 없이 실리면 지문에 짝 문제의 밑줄·빈칸·틀리게 바꾼 표현이 남아서)"""
+    full, have = {}, {}
+    for r in all_rows:
+        k = qb_set_key(r)
+        if k and k[0] == "TEST":
+            full.setdefault(k, set()).add(r.get("id"))
+    for r in rows:
+        k = qb_set_key(r)
+        if k and k[0] == "TEST":
+            have.setdefault(k, set()).add(r.get("id"))
+    bad = {k for k, ids in have.items() if len(full.get(k, ids)) > 1 and not full[k] <= ids}
+    if not bad:
+        return rows, []
+    out = [r for r in rows if qb_set_key(r) not in bad]
+    n = len(rows) - len(out)
+    return out, [f"가져온 TEST에서 한 지문에 함께 나온 문제 중 짝이 지금 조건(유형·난이도·이미 낸 문항)에 맞지 않는 {n}문제는 뺐어요 (짝 없이 실으면 지문에 짝 문제 표시가 남아서)."]
 
 def qb_keep_sets(picked: List[Dict], rows: List[Dict]) -> (List[Dict], List[str]):
     """실제 기출에서 한 지문에 여러 문제가 나온 경우, 하나가 뽑히면 같은 묶음 문제도 함께(시험 번호순으로 연달아) 넣음.
@@ -7174,8 +7258,10 @@ def qb_keep_sets(picked: List[Dict], rows: List[Dict]) -> (List[Dict], List[str]
                 out.append(g)
                 seen.add(id(g))
     extra, removed = len(out) - len(picked), 0
+    in_set = lambda r: bool(qb_set_key(r)) and len(sets.get(qb_set_key(r), [])) > 1  # 묶음 문제(TEST 세트 포함)는 빼지 않음
+    added = [g for g in out if id(g) not in {id(q) for q in picked}]
     while removed < extra:
-        var = [i for i, r in enumerate(out) if r.get("difficulty") != QB_GICHUL_LEVEL]
+        var = [i for i, r in enumerate(out) if r.get("difficulty") != QB_GICHUL_LEVEL and not in_set(r)]
         if not var:
             break
         cnt = {}
@@ -7186,8 +7272,7 @@ def qb_keep_sets(picked: List[Dict], rows: List[Dict]) -> (List[Dict], List[str]
         removed += 1
     if not extra:
         return out, []
-    return out, [f"실제 기출에서 한 지문에 함께 나온 문제 {extra}개를 묶어서 넣었습니다"
-                 + (f" (대신 변형문제 {removed}개를 빼서 문항 수 유지)." if removed == extra else f" (총 {len(out)}문항).")]
+    return out, [_qb_set_note(added, extra, removed, len(out))]
 
 def qb_pick(rows: List[Dict], labels: List[str], total: int, seed: int) -> (List[Dict], List[str]):
     """고른 지문에서 골고루(같은 개수씩) 뽑고, 지문 안에서는 유형을 돌아가며 뽑음. 부족한 지문 몫은 남는 지문이 채움."""
@@ -7296,7 +7381,7 @@ def qb_pick_levels(rows: List[Dict], labels: List[str], total: int, seed: int, w
     모자란 난이도 몫은 비율을 준 다른 난이도에서 채우고 알려 줌. 지문 순서로 합치고, 한 지문 안에서는 난이도를 번갈아 놓음"""
     rows = qb_dedupe_rows(rows)  # 난이도 이름만 다르게 두 번 저장된 문제가 두 난이도에서 함께 뽑히지 않게
     want = qb_level_counts(total, weights)
-    keep_note = lambda nt: [x for x in nt if x.startswith("실제 기출에서 한 지문에")]
+    keep_note = lambda nt: [x for x in nt if x.startswith(("실제 기출에서 한 지문에", "TEST에서 한 지문에", "실제 기출·TEST에서 한 지문에"))]
     picked, notes, lack = [], [], []
     for i, (lv, n) in enumerate(want.items()):
         if n <= 0:
@@ -7337,7 +7422,8 @@ def qb_pick_levels(rows: List[Dict], labels: List[str], total: int, seed: int, w
         turn[k] = turn.get(k, -1) + (0 if r.get("difficulty") == QB_GICHUL_LEVEL and k in turn else 1)
         keys.append((pos.get(r["passage_label"], 0), turn[k], lv_pos.get(r.get("difficulty"), 0)))
     order = sorted(range(len(picked)), key=lambda i: keys[i])
-    return [picked[i] for i in order], notes
+    out, nt = qb_complete_sets([picked[i] for i in order], rows, total)  # 난이도가 다른 TEST 세트 짝도 함께·붙여서
+    return out, notes + nt
 
 def qb_html(s) -> str:
     """AI가 쓴 글에서 <u>, <b>만 살리고 나머지는 글자로 표시"""
@@ -7529,20 +7615,31 @@ def render_vision_book(meta: Dict, stats: Dict, n_total: int, n_real: int, total
     gram_rows = "".join(f"<tr><td>{e(sc)}</td><td>{v[0]}개</td><td>{e(' · '.join(v[1]))}</td></tr>" for sc, v in gram.items())
     pass_rows = "".join(f"<tr><td>{t}</td><td>{u}</td><td>{j}</td></tr>" for t, u, j in QB_PASSAGE_MEASURE)
     title = e(meta.get("title", ""))
+    answer_book = meta.get("book_kind") == "answer"  # 정답·해설 합본 (표지 문구와 사용법만 다르고 나머지 쪽은 시험지 책과 같음)
     time_li = (f"<li><b>문항마다 적힌 ⏱ 권장 시간 안에 푸세요.</b><br>지문 단어 수와 유형(어법·조합형·순서·삽입 등)으로 계산한 시간이에요. "
                f"이 시험지 전체 권장 시간은 <b>약 {total_min}분</b>이에요. 시간 안에 못 푼 문제는 번호에 표시해 두었다가 해설로 다시 확인하세요.</li>"
                if total_min else "<li><b>실제 시험처럼 시간을 재고 푸세요.</b></li>")
+    answer_howto = f"""<div class='vpage'>
+  <div class='kicker'>HOW TO USE</div><h2>이 해설지 사용법</h2>
+  <ol class='howto'>
+    <li><b>먼저 권마다 맨 앞의 정답표로 채점하세요.</b><br>문항 번호는 시험지와 같아요. 틀린 문제 번호에 표시해 두고, 그 문제의 해설부터 봅니다.</li>
+    <li><b>해설의 '근거'를 지문에서 직접 찾아 밑줄 치세요.</b><br>재진술 문제는 해설 끝 '원문 표현 → 바꾼 표현'을 외우는 것이 핵심이에요.</li>
+    <li><b>'헷갈리는 포인트'로 내가 고른 오답이 왜 끌렸는지 확인하세요.</b><br>같은 함정에 두 번 걸리지 않는 것이 점수를 올리는 가장 빠른 길이에요.</li>
+    {"<li><b>선지 해석으로 모르는 선지 단어를 정리하세요.</b><br>선택지 영어 → 우리말과 단어 뜻이 함께 있어요. 순서·삽입·어법처럼 선지가 번호인 문항은 해설만 있어요.</li>" if meta.get("with_trans") else ""}
+    <li><b>정답표의 '구분'을 보세요.</b><br>기출 = 실제 기출문제 · 변(운)·변(제) = 운양고·제일고 스타일 변형문제 · 🎣 = 영쌤 출제 포인트 문항이에요.</li>
+  </ol>
+</div>""" if answer_book else ""
     front = f"""
 <div class='vcover'><div class='bar'></div><div class='inner'>
   <div class='top'><span>PQRS YOUNG ENGLISH CURRICULUM SERIES</span><span>ANATOMY SERIES</span></div>
   <div>
     <div class='pill'>REAL EXAM DNA EDITION &bull; 운양고 &middot; 제일고</div>
     <h1>ANATOMY <span>VISION</span></h1>
-    <div class='en'>School-Specific Variant Exam System &mdash; Built from Real Exam DNA</div>
-    <div class='ko'>운양고·제일고 실제 기출을 해부해, 출제자의 눈으로 다시 만든 변형문제</div>
+    <div class='en'>{'Answer Key &amp; Explanations &mdash; Built from Real Exam DNA' if answer_book else 'School-Specific Variant Exam System &mdash; Built from Real Exam DNA'}</div>
+    <div class='ko'>{'정답·해설과 선지 해석으로, 틀린 이유를 근거 문장에서 찾는다' if answer_book else '운양고·제일고 실제 기출을 해부해, 출제자의 눈으로 다시 만든 변형문제'}</div>
     <div class='rule'></div>
     <div class='ttl'>{title}</div>
-    <div class='meta'>총 {n_total}문항{f' · 실제 기출 {n_real}문항 포함' if n_real else ''}{f' · 권장 풀이 시간 약 {total_min}분' if total_min else ''}</div>
+    <div class='meta'>{e(meta.get('cover_line', '')) if answer_book else f"총 {n_total}문항{f' · 실제 기출 {n_real}문항 포함' if n_real else ''}{f' · 권장 풀이 시간 약 {total_min}분' if total_min else ''}"}</div>
     <div class='credit'>Created &amp; Designed by <b>PQRS Young</b> &times; {acad}</div>
   </div>
   <div class='bottom'>
@@ -7550,7 +7647,7 @@ def render_vision_book(meta: Dict, stats: Dict, n_total: int, n_real: int, total
     <div class='student'><div><span>SCHOOL</span><span style='font-weight:500;color:#64748b'>{e(meta.get('kind', ''))}</span></div><div><span>GRADE / CLASS</span><span></span></div><div><span>STUDENT NAME</span><span></span></div></div>
   </div>
 </div></div>
-<div class='vpage'>
+{answer_howto if answer_book else f"""<div class='vpage'>
   <div class='kicker'>HOW TO USE</div><h2>이 교재 사용법</h2>
   <ol class='howto'>
     {time_li}
@@ -7558,7 +7655,7 @@ def render_vision_book(meta: Dict, stats: Dict, n_total: int, n_real: int, total
     <li><b>'기출 이력'을 꼭 보세요.</b><br>같은 지문이 운양고·제일고 어느 시험 몇 번에 나왔는지 적혀 있어요. 굵게 표시된 것은 같은 유형으로 나온 문제예요.</li>
     <li><b>틀린 문제는 해설의 '근거'를 지문에서 직접 찾아 밑줄 치세요.</b><br>재진술 문제는 해설 끝 '원문 표현 → 바꾼 표현'을 외우는 것이 핵심이에요.</li>
   </ol>
-</div>
+</div>"""}
 <div class='vpage'>
   <div class='kicker'>HOW ANATOMY VISION WAS MADE</div><h2>ANATOMY VISION은 이렇게 만들었습니다</h2>
   <div class='lead'>"외운 지문으로는 풀 수 없게, 그러나 우리 학교 시험과 똑같이."</div>
@@ -8079,7 +8176,8 @@ def render_qbank_exam(qs: List[Dict], meta: Dict, gidx: Dict[str, List[Dict]]) -
          f"""<div class='head'><div class='top'><div class='brand'><b>PQRS</b>영T {html.escape(meta.get('brand', '변형문제 TEST'))}</div><div class='kind'>{html.escape(meta.get('kind', ''))}</div></div>
 <h1>{html.escape(meta.get('title', ''))}</h1><div class='sub'>{html.escape(meta.get('sub', ''))}</div>
 <div class='info'><div>반 :</div><div>번호 :</div><div>이름 :</div><div>점수 :</div></div></div><div class='cols'>"""]
-    keys = [qb_set_key(r) for r in qs]
+    # 가져온 TEST 세트 묶기는 2026-11-12부터 만든 시험지(meta['test_sets'])만 — 예전에 만든 시험지는 다시 받아도 처음 모양 그대로
+    keys = [k if (k is None or k[0] != "TEST" or meta.get("test_sets")) else None for k in (qb_set_key(r) for r in qs)]
     for n, r in enumerate(qs, 1):
         c = r["content"]
         k = keys[n - 1]
@@ -8328,9 +8426,19 @@ def render_answer_book(sets: List[Dict], meta: Dict) -> str:
 
 
 def _qb_answer_book_page(sets: List[Dict], meta: Dict, body: List[str], with_ans: bool, with_tr: bool, how: str) -> str:
-    """합본 첫머리(제목·목차) + 본문 → HTML 한 장"""
+    """합본 첫머리(제목·목차) + 본문 → HTML 한 장. meta['book_stats']가 있으면 시험지처럼 ANATOMY VISION 앞뒤 쪽을 붙임"""
     e = html.escape
     what = " · ".join(x for x, on in (("정답·해설", with_ans), ("선지 해석", with_tr)) if on)
+    book = meta.get("book_stats")
+    front = back = blank_toggle = ""
+    if book:
+        n_all = sum(len(x.get("qs") or []) for x in sets)
+        vmeta = {"title": meta.get("title") or what + " 합본", "academy": meta.get("academy", ""), "kind": meta.get("kind", ""), "book_kind": "answer",
+                 "with_trans": with_tr, "cover_line": f"{what} · 시험지 {len(sets)}권 · 총 {n_all}문항"}
+        front, back = render_vision_book(vmeta, book, n_all, 0, 0)
+        blank_toggle = ("<label title='양면 인쇄 때 뒤표지가 맨 뒷면에 오게 하려면 전체 쪽수가 짝수여야 해요'>"
+                        "<input type='checkbox' onchange=\"document.body.classList.toggle('addblank', this.checked)\"> "
+                        "인쇄 미리보기 쪽수가 홀수면 체크 → 뒤표지 앞에 빈 쪽 넣기</label>")
     toc = "".join(f"<tr><td class='n'>{k}</td><td>{e(x.get('title') or f'시험지 {k}')}</td><td class='n'>{len(x.get('qs') or [])}문항</td></tr>"
                   for k, x in enumerate(sets, 1))
     cover = (f"<div class='ab-cover'><div class='top'><div><b>PQRS</b>영T {e(what)} 합본</div><div>{e(meta.get('academy', ''))}</div></div>"
@@ -8339,11 +8447,11 @@ def _qb_answer_book_page(sets: List[Dict], meta: Dict, body: List[str], with_ans
              f"<table class='ab-toc'><tr><th>순서</th><th>시험지</th><th>문항</th></tr>{toc}</table>"
              "<div class='foot'>PQRS 영T 자체제작 · 장기동 포피엠입시영어 031-991-1199</div></div>")  # 맨 뒤에 두면 한 줄만 다음 쪽으로 넘어가기도 해서 목차 칸 안에
     return (f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>{e(meta.get('title') or what + ' 합본')}</title>"
-            f"<style>{QB_EXAM_CSS}{QB_ANSBOOK_CSS}</style></head><body>"
-            f"<div class='printbar'><button onclick='window.print()'>🖨️ 인쇄 / PDF로 저장</button></div><div class='sheet'>{cover}{''.join(body)}</div></body></html>")
+            f"<style>{QB_EXAM_CSS}{QB_ANSBOOK_CSS}{QB_BOOK_CSS if book else ''}</style></head><body>"
+            f"<div class='printbar'>{blank_toggle}<button onclick='window.print()'>🖨️ 인쇄 / PDF로 저장</button></div>{front}<div class='sheet'>{cover}{''.join(body)}</div>{back}</body></html>")
 
 
-def render_answer_book_ui(sb, text_model: str, academy_name: str, school_name: str):
+def render_answer_book_ui(sb, text_model: str, academy_name: str, school_name: str, labels_all: set = None):
     """📚 정답·해설·해석 합본: 보관함의 시험지를 여러 개 골라 정답·해설과 선지 해석을 한 권으로 (만들기는 AI 비용 없음)"""
     try:
         items = [("s", r) for r in qb_exam_saved(sb)] + [("l", r) for r in qb_exam_log(sb) if r.get("qids")]
@@ -8377,6 +8485,7 @@ def render_answer_book_ui(sb, text_model: str, academy_name: str, school_name: s
                                          help="종류별로 모아서: 두 권의 정답·해설을 다 실은 뒤 해석 · 시험지마다 이어서: 1권 정답·해설 → 1권 해석 → 2권 … · "
                                               "문항마다 해설 + 해석: 권마다 정답표를 싣고, 문항마다 해설 바로 아래에 그 문항 선지 해석"), "kind")
         title = st.text_input("합본 제목", placeholder="예: 제일고1학년 기말대비 VISION 정답·해설·해석", key="qb_ab_title")
+        as_book = st.checkbox("ANATOMY VISION 책으로 (시험지와 같은 앞표지·사용법·제작 소개·출제자의 시선·뒤표지)", value=True, key="qb_ab_book")
         if not pick:
             return
         qids_all = [q for k in pick for q in recs[k][1].get("qids", [])]
@@ -8421,7 +8530,12 @@ def render_answer_book_ui(sb, text_model: str, academy_name: str, school_name: s
                 tr = qb_choice_trans(sb, [x for x in raw if qb_trans_cached(x) is not None], model, []) if want_tr else {}  # 저장된 해석만 (AI 호출 없음)
                 sets.append({"title": r.get("title") or r.get("name") or "시험지", "qs": qb_display_fix(raw), "qs_tr": raw,
                              "meta": r.get("meta") or {}, "trans": tr})
-            page = render_answer_book(sets, {"title": title.strip(), "academy": academy_name, "answers": want_ans, "trans": want_tr, "layout": layout})
+            bmeta = {"title": title.strip(), "academy": academy_name, "answers": want_ans, "trans": want_tr, "layout": layout,
+                     "kind": next((str((x.get("meta") or {}).get("kind") or "") for x in sets if (x.get("meta") or {}).get("kind")), "")}
+            if as_book:
+                gmap = load_gichul_map()
+                bmeta["book_stats"] = qb_book_stats(gmap, gichul_index(gmap, labels_all or set()))
+            page = render_answer_book(sets, bmeta)
             st.session_state.qb_ab_out = (sig, page, title.strip() or "정답·해설 합본", sum(len(x["qs"]) for x in sets))
         out = st.session_state.get("qb_ab_out")
         if out and out[0] == sig:
@@ -8723,7 +8837,7 @@ def qb_import_parse(sb, data: bytes, fname: str, mock_lib: List[Dict]) -> Dict:
                    "explanation": [x for x in str(r.get("해설", "")).split("\n") if x.strip()], "focus": focus,
                    "import": {"set": str(r.get("수록 시험지", "")).strip(), "kind": kind, "id": imp_id, "date": str(r.get("제작일", "")).strip(),
                               "file": fname, "batch": batch, "orig_type": str(r.get("유형", "")).strip(), "points": str(r.get("배점", "")).strip(),
-                              "grade": str(r.get("학년", "")).strip(), "match": how}}
+                              "grade": str(r.get("학년", "")).strip(), "match": how, "no": str(r.get("번호", "")).strip()}}
         if not qb_shape_ok(content, qt):
             skipped.append((r, "문제 형식이 맞지 않음 (지문 속 ①~⑤·선택지를 확인해 주세요)"))
             continue
@@ -9012,6 +9126,7 @@ def qb_clinic_pick(rows: List[Dict], labels: List[str], mix: Dict[str, int], see
             short[lv] = n - len(got)
     pos = {l: i for i, l in enumerate(labels)}
     picked.sort(key=lambda r: pos.get(r["passage_label"], 0))
+    picked = qb_complete_sets(picked, rows, len(picked))[0]  # 가져온 TEST 세트는 난이도가 달라도 짝과 함께·붙여서 (세트가 없으면 그대로)
     return picked, short
 
 def qb_clinic_plan(summary: List[Dict], passages: List[Dict], short: Dict[str, int], school: str, types: List[str], seed: int) -> List[tuple]:
@@ -9145,15 +9260,17 @@ def render_weekly_clinic(sb, mock_lib: List[Dict], by_label: Dict, summary: List
     make = b1.button("📄 클리닉 만들기", type="primary", use_container_width=True, key="qb_clinic_btn", disabled=not labels)
     again = b2.button("🔀 다른 조합으로", use_container_width=True, key="qb_clinic_again", disabled="qb_clinic_html" not in st.session_state)
     if make or again:
-        rows = [r for r in qb_fetch(sb, labels_all) if r.get("school") == school and r["difficulty"] in mix and r["q_type"] in types
+        all_rows = qb_fetch(sb, labels_all)
+        rows = [r for r in all_rows if r.get("school") == school and r["difficulty"] in mix and r["q_type"] in types
                 and not (skip_used and r["id"] in set(w.get("used", []))) and qb_yt_keep(r, c_yt)
                 and (use_imp or not (r.get("content") or {}).get("import"))]
+        rows = qb_drop_partial_sets(rows, all_rows)[0]  # 가져온 TEST 세트 일부만 남으면 통째로 뺌
         picked, short2 = qb_clinic_pick(rows, labels_all, mix, random.randint(1, 10**9))
         if not picked:
             st.session_state.pop("qb_clinic_html", None)
             st.warning("이 주차 지문으로 만든 문제가 없어요. 위에서 '모자란 문제 만들기'를 먼저 눌러 주세요.")
         else:
-            meta = {"brand": "클리닉 미니모의고사", "kind": school_name, "title": title or f"{w['name']} 클리닉",
+            meta = {"brand": "클리닉 미니모의고사", "kind": school_name, "test_sets": True, "title": title or f"{w['name']} 클리닉",
                     "sub": f"{school} 스타일 · " + " · ".join(f"{lv} {sum(1 for r in picked if r['difficulty'] == lv)}" for lv in mix) + f" · 총 {len(picked)}문항",
                     "show_tag": True, "show_gichul": False, "with_answers": True, "academy": academy_name, "show_style": False, "show_time": True}
             if want_vocab:
@@ -9426,7 +9543,7 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
         st.caption("🧭 이럴 때: 지문·유형·문항 수를 마음대로 정해 시험지를 만들 때 · 매주 같은 구성은 '📅 주간 클리닉', 학교 실제 시험과 같은 구성·배점은 왼쪽 '🏁 영T FINAL 모의고사'")
         render_exam_archive(sb, set(by_label), text_model, academy_name, school_name)
         try:
-            render_answer_book_ui(sb, text_model, academy_name, school_name)
+            render_answer_book_ui(sb, text_model, academy_name, school_name, set(by_label))
         except Exception as ex:  # 합본 칸이 이상해도 시험지 만들기는 그대로
             st.warning(f"⚠️ 정답·해설 합본 칸을 보여 주지 못했어요. 시험지 만들기에는 영향이 없어요. ({str(ex)[:80]})")
         sel_e = _qb_passage_picker("qb_exam_labels", mock_lib, label_counts)
@@ -9557,7 +9674,8 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
                 if (e_imp == "빼기" and imp) or (e_imp == "이것만" and (not imp or (imp_sets and imp.get("set") not in imp_sets))):
                     return False
                 return r["q_type"] in e_types and (e_school == "전체" or r.get("school") == e_school) and r["id"] not in excl
-            rows = [r for r in qb_fetch(sb, labels_ordered) if wanted(r)]
+            all_rows = qb_fetch(sb, labels_ordered)
+            rows, set_drop_note = qb_drop_partial_sets([r for r in all_rows if wanted(r)], all_rows)
             if split:
                 # 학교마다 따로 골고루 뽑은 뒤 지문 순서대로 합침 (이미 불러온 문제 안에서만 계산 · DB·AI 호출 추가 없음)
                 picked, notes = [], []
@@ -9579,10 +9697,11 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
                 picked, notes = qb_pick_levels(rows, labels_ordered, int(total), seed, lv_mix)
             else:
                 picked, notes = qb_pick(rows, labels_ordered, int(total), seed)
+            notes = set_drop_note + notes
             if picked:
                 labels_all = set(by_label)
                 lv_got = _qb_chip_counts(picked, "difficulty")
-                meta = {"brand": "변형문제 TEST", "kind": kind, "title": title or default_title,
+                meta = {"brand": "변형문제 TEST", "kind": kind, "test_sets": True, "title": title or default_title,
                         "sub": " · ".join(x for x in [
                             f"실제 기출 {sum(1 for r in picked if r['difficulty'] == QB_GICHUL_LEVEL)}" if e_real != "빼기" else "",
                             f"변형 {sum(1 for r in picked if r['difficulty'] != QB_GICHUL_LEVEL)} ("
