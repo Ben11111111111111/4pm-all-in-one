@@ -7251,19 +7251,25 @@ def qb_pick(rows: List[Dict], labels: List[str], total: int, seed: int) -> (List
             seen[c] = seen.get(c, 0) + 1
     picked, set_note = qb_keep_sets(picked, rows)
     notes += set_note
-    # 예전에 쌓인 순서 변형문제도(실제 기출 문항은 그대로) 시험지에는 수능식 고정 선택지로 (저장된 문제는 그대로, 문항마다 같은 결과가 나오게 id로 고정)
+    return qb_display_fix(picked), notes
+
+
+def qb_display_fix(rows: List[Dict]) -> List[Dict]:
+    """시험지에 싣기 전 정리 (저장된 문제는 그대로, 문항마다 같은 결과가 나오게 id로 고정) — 처음 만들 때와 보관함에서 다시 만들 때 똑같이
+    - 예전에 쌓인 순서 변형문제도(실제 기출 문항은 그대로) 수능식 고정 선택지로
+    - 예전에 <보기> 조합형과 섞여 나온 변형문제도 정리해서"""
+    picked = list(rows)
     for i, q in enumerate(picked):
         if q.get("q_type") == "순서" and q.get("difficulty") != QB_GICHUL_LEVEL and isinstance(q.get("content"), dict):
             c = copy.deepcopy(q["content"])
             if qb_fix_order(c, random.Random(str(q.get("id", ""))), only_if_needed=True):
                 picked[i] = {**q, "content": c}
-        # 예전에 <보기> 조합형과 섞여 나온 변형문제도 시험지에는 정리해서 (저장된 문제는 그대로)
         elif q.get("q_type") in QB_ONE_CHOICE_TYPES and q.get("difficulty") != QB_GICHUL_LEVEL and isinstance(q.get("content"), dict):
             c = copy.deepcopy(q["content"])
             fx = qb_fix_combo(c, q["q_type"])
             if fx:
                 picked[i] = {**q, "q_type": fx, "content": c}
-    return picked, notes
+    return picked
 
 # 시험지 난이도 비율 (2026-11-09 선생님 요청: 최상·상·중 비중을 직접 정하기) — '비율 정하기'를 처음 켤 때 기본값(%)
 QB_LEVEL_RATIO_DEFAULT = {"최상": 30, "상": 40, "중": 30, "하": 0, QB_GICHUL_LEVEL: 10}
@@ -7820,8 +7826,8 @@ body { font-family: 'Noto Sans KR', sans-serif; font-size: 9.6pt; line-height: 1
 @media print { .printbar { display: none; } }
 """
 
-def render_choice_trans(qs: List[Dict], trans: Dict[str, List[Dict]], meta: Dict) -> str:
-    """선지 해석본 HTML (문항 번호는 시험지와 같음, 해석이 없는 유형은 건너뜀)"""
+def qb_trans_body(qs: List[Dict], trans: Dict[str, List[Dict]]) -> str:
+    """선지 해석본 본문 HTML (문항 번호는 시험지와 같음, 해석이 없는 유형은 건너뜀) — 해석본과 정답·해설 합본이 함께 씀"""
     o = []
     for n, r in enumerate(qs, 1):
         lines = trans.get(r.get("id"))
@@ -7837,7 +7843,12 @@ def render_choice_trans(qs: List[Dict], trans: Dict[str, List[Dict]], meta: Dict
             o.append(f"<div class='tl'><div class='en'>{en}</div><div class='ko'>→ {html.escape(x['ko'])}</div>"
                      + (f"<div class='wd'>{wd}</div>" if wd else "") + "</div>")
         o.append("</div>")
-    body = "".join(o) or "<p>해석할 선지가 있는 문항이 없어요 (순서·삽입·어법·낱말 등은 선지가 번호라서 빠져요).</p>"
+    return "".join(o)
+
+
+def render_choice_trans(qs: List[Dict], trans: Dict[str, List[Dict]], meta: Dict) -> str:
+    """선지 해석본 HTML (문항 번호는 시험지와 같음, 해석이 없는 유형은 건너뜀)"""
+    body = qb_trans_body(qs, trans) or "<p>해석할 선지가 있는 문항이 없어요 (순서·삽입·어법·낱말 등은 선지가 번호라서 빠져요).</p>"
     return (f"<!doctype html><html><head><meta charset='utf-8'><title>{html.escape(meta.get('title', ''))} 선지 해석</title>"
             f"<style>{QB_TRANS_CSS}</style></head><body><div class='printbar'><button onclick='window.print()'>🖨️ 인쇄 / PDF로 저장</button></div>"
             f"<div class='sheet'><div class='head'><h1>{html.escape(meta.get('title', ''))} · 선지 해석</h1>"
@@ -7979,6 +7990,37 @@ def render_choice_trans_ui(sb, key: str, qids: List[str], title: str, text_model
             with st.expander("해석본 미리 보기", expanded=False):
                 components.html(page, height=700, scrolling=True)
 
+def qb_answer_parts(qs: List[Dict], meta: Dict, head: str = "정답 및 해설") -> List[str]:
+    """시험지 끝 '정답 및 해설'(정답표 + 문항별 해설) HTML 조각 — 시험지와 정답·해설 합본이 함께 씀. head는 HTML로 넣음(부르는 쪽에서 escape)"""
+    def kind_short(r):
+        if r["difficulty"] == QB_GICHUL_LEVEL:
+            return "기출"
+        return (f"변({(r.get('school') or '?')[:1]})" if meta.get("show_style", True) else "변형") + ("🎣" if qb_is_yt(r) else "")
+
+    o = []
+    o.append(f"<div class='ans-page'><div class='anshead'>{head}</div>")
+    for i in range(0, len(qs), 10):
+        part = qs[i:i + 10]
+        pad = "<td></td>" * (10 - len(part))  # 마지막 줄도 10칸 너비로 맞춤
+        o.append("<table class='key'><tr><th>번호</th>" + "".join(f"<th>{i + k + 1}</th>" for k in range(len(part))) + pad.replace("td", "th") + "</tr><tr><th>정답</th>"
+                 + "".join(f"<td><b>{'서술형' if r['q_type'] in QB_ESSAY_TYPES else html.escape(r['content'].get('answer', ''))}</b></td>" for r in part) + pad
+                 + "</tr><tr><th>구분</th>" + "".join(f"<td>{html.escape(kind_short(r))}</td>" for r in part) + pad + "</tr></table>")
+    o.append("<div class='keynote'>구분: 기출 = 실제 기출문제 · " + ("변(운) = 운양고 스타일 변형 · 변(제) = 제일고 스타일 변형" if meta.get("show_style", True) else "변형 = 변형문제")
+             + (" · 🎣 = 영쌤 출제 포인트 문항" if any(qb_is_yt(r) for r in qs) else "") + " · 굵은 기출 이력 = 같은 유형으로 출제됨</div>")
+    o.append("<div class='cols'>")
+    for n, r in enumerate(qs, 1):
+        c = r["content"]
+        ans = qb_html(c.get("answer", ""))
+        src = c.get("source") if r["difficulty"] == QB_GICHUL_LEVEL else None
+        kind = (f"실제 기출 {src.get('short', '')} {src.get('no', '')}번" if src else
+                (f"{r.get('school') or ''} 스타일 변형 · {r['difficulty']}" if meta.get("show_style", True) else f"변형 · {r['difficulty']}")
+                + (" · 🎣 영쌤 포인트" if qb_is_yt(r) else ""))
+        note = f"<li><b>⚠️ {qb_html(c['answer_note'])}</b></li>" if c.get("answer_note") else ""
+        o.append(f"<div class='exp'><h3>{n}번 정답 {ans}<span>({html.escape(r['passage_label'])} · {html.escape(r['q_type'])} · {html.escape(kind)})</span></h3><ul>"
+                 + note + "".join(f"<li>{qb_html(e)}</li>" for e in (c.get("explanation") or [])) + "</ul></div>")
+    o.append("</div></div>")
+    return o
+
 def render_qbank_exam(qs: List[Dict], meta: Dict, gidx: Dict[str, List[Dict]]) -> str:
     def tag_of(r):
         """1줄: 지문 · 유형 + [실제 기출]/[변형 · ○○고 스타일 · 난이도]  2줄: 기출 이력 (같은 시험은 번호를 묶고, 같은 유형은 굵게)"""
@@ -8013,11 +8055,6 @@ def render_qbank_exam(qs: List[Dict], meta: Dict, gidx: Dict[str, List[Dict]]) -
                     items.append(f"<b>{one}</b>" if g["same"] else one)
                 t += f"<br><span class='hist'>{'다른 ' if src else ''}기출 이력: {' · '.join(items)}</span>"
         return t
-
-    def kind_short(r):
-        if r["difficulty"] == QB_GICHUL_LEVEL:
-            return "기출"
-        return (f"변({(r.get('school') or '?')[:1]})" if meta.get("show_style", True) else "변형") + ("🎣" if qb_is_yt(r) else "")
 
     total_min = round(sum(qb_time_sec(r) for r in qs) / 60)
     if meta.get("show_time", True):
@@ -8065,27 +8102,7 @@ def render_qbank_exam(qs: List[Dict], meta: Dict, gidx: Dict[str, List[Dict]]) -
         o.append("</div>")
     o.append("</div>")
     if meta.get("with_answers"):
-        o.append("<div class='ans-page'><div class='anshead'>정답 및 해설</div>")
-        for i in range(0, len(qs), 10):
-            part = qs[i:i + 10]
-            pad = "<td></td>" * (10 - len(part))  # 마지막 줄도 10칸 너비로 맞춤
-            o.append("<table class='key'><tr><th>번호</th>" + "".join(f"<th>{i + k + 1}</th>" for k in range(len(part))) + pad.replace("td", "th") + "</tr><tr><th>정답</th>"
-                     + "".join(f"<td><b>{'서술형' if r['q_type'] in QB_ESSAY_TYPES else html.escape(r['content'].get('answer', ''))}</b></td>" for r in part) + pad
-                     + "</tr><tr><th>구분</th>" + "".join(f"<td>{html.escape(kind_short(r))}</td>" for r in part) + pad + "</tr></table>")
-        o.append("<div class='keynote'>구분: 기출 = 실제 기출문제 · " + ("변(운) = 운양고 스타일 변형 · 변(제) = 제일고 스타일 변형" if meta.get("show_style", True) else "변형 = 변형문제")
-                 + (" · 🎣 = 영쌤 출제 포인트 문항" if any(qb_is_yt(r) for r in qs) else "") + " · 굵은 기출 이력 = 같은 유형으로 출제됨</div>")
-        o.append("<div class='cols'>")
-        for n, r in enumerate(qs, 1):
-            c = r["content"]
-            ans = qb_html(c.get("answer", ""))
-            src = c.get("source") if r["difficulty"] == QB_GICHUL_LEVEL else None
-            kind = (f"실제 기출 {src.get('short', '')} {src.get('no', '')}번" if src else
-                    (f"{r.get('school') or ''} 스타일 변형 · {r['difficulty']}" if meta.get("show_style", True) else f"변형 · {r['difficulty']}")
-                    + (" · 🎣 영쌤 포인트" if qb_is_yt(r) else ""))
-            note = f"<li><b>⚠️ {qb_html(c['answer_note'])}</b></li>" if c.get("answer_note") else ""
-            o.append(f"<div class='exp'><h3>{n}번 정답 {ans}<span>({html.escape(r['passage_label'])} · {html.escape(r['q_type'])} · {html.escape(kind)})</span></h3><ul>"
-                     + note + "".join(f"<li>{qb_html(e)}</li>" for e in (c.get("explanation") or [])) + "</ul></div>")
-        o.append("</div></div>")
+        o += qb_answer_parts(qs, meta)
     if meta.get("vocab"):
         # 선지 어휘 정리 (주간 클리닉): 문항 순서대로, 2단 표
         vs = meta["vocab"]
@@ -8223,6 +8240,159 @@ def qb_exam_sub(qs: List[Dict]) -> str:
             ([f"변형 {len(var)} (" + " · ".join(f"{lv} {cnt[lv]}" for lv in QB_LEVELS if cnt.get(lv)) + ")"] if var else [])
     return " · ".join(parts + [f"총 {len(qs)}문항"])
 
+# ---- 정답·해설·선지 해석 합본 (2026-11-11): 보관함의 시험지 여러 개(예: VISION 1권·2권)의 정답·해설과 선지 해석을 한 권으로 (AI 비용 없음) ----
+#   해석은 문항에 저장된 것만 씀 (안 된 문항은 이 칸의 '선지 해석 시작'으로 서버 작업 · 비용은 버튼에 표시)
+QB_ANSBOOK_CSS = """
+.ab-cover { border: 2px solid #111; padding: 10px 14px; margin-bottom: 10px; }
+.ab-cover .top { display: flex; justify-content: space-between; font-family: 'Noto Sans KR'; font-size: 9pt; border-bottom: 1px solid #111; padding-bottom: 4px; }
+.ab-cover h1 { font-family: 'Noto Sans KR'; font-weight: 900; font-size: 19pt; text-align: center; margin: 10px 0 4px; }
+.ab-cover .sub { text-align: center; font-family: 'Noto Sans KR'; font-size: 10pt; margin-bottom: 8px; }
+table.ab-toc { width: 100%; border-collapse: collapse; font-family: 'Noto Sans KR'; font-size: 9.5pt; }
+table.ab-toc th, table.ab-toc td { border: 1px solid #111; padding: 4px 6px; }
+table.ab-toc th { background: #e8e8e8; }
+table.ab-toc td.n { text-align: center; width: 18%; }
+.ab-cover .foot { margin: 6px 0 0; }
+.ab-cover + .ans-page { break-before: auto; page-break-before: auto; }  /* 목차 바로 아래에서 첫 칸 시작 (첫 쪽이 비지 않게) */
+.trsec .tq { margin: 0 0 10px; }
+.trsec .tq .no { font-family: 'Noto Sans KR'; font-weight: 900; font-size: 10.5pt; break-after: avoid; border-bottom: 1px solid #111; margin-bottom: 4px; }
+.trsec .tq .no span { font-weight: 400; font-size: 8.3pt; color: #555; margin-left: 4px; }
+.trsec .tl { break-inside: avoid; margin: 0 0 6px; font-family: 'Noto Sans KR'; font-size: 9.4pt; line-height: 1.5; }
+.trsec .tl .en { font-family: 'Noto Serif KR', serif; padding-left: 1.3em; text-indent: -1.3em; }
+.trsec .tl .ko { color: #0b3d91; padding-left: 1.3em; }
+.trsec .tl .wd { font-size: 8.4pt; color: #333; padding-left: 1.3em; }
+.trsec .tl .wd b { font-family: 'Noto Serif KR', serif; color: #111; }
+"""
+
+
+def render_answer_book(sets: List[Dict], meta: Dict) -> str:
+    """정답·해설·선지 해석 합본 HTML. sets: [{'title', 'qs', 'qs_tr', 'meta', 'trans'}] (시험지 순서대로)
+    qs: 시험지에 실린 모양(qb_display_fix) — 정답·해설용 · qs_tr: 저장된 문항 그대로 — 선지 해석용 (기존 해석본과 같게, 없으면 qs)
+    meta: title, academy, answers(정답·해설 넣기), trans(선지 해석 넣기), by_kind(True: 정답·해설을 모두 → 해석을 모두 / False: 시험지마다 이어서)"""
+    e = html.escape
+    with_ans, with_tr = meta.get("answers", True), meta.get("trans", True)
+    parts_ans, parts_tr = [], []
+    for k, st_ in enumerate(sets, 1):
+        t = e(st_.get("title") or f"시험지 {k}")
+        qs = st_.get("qs") or []
+        if with_ans:
+            parts_ans.append(qb_answer_parts(qs, {**QB_EXAM_META_DEFAULT, **(st_.get("meta") or {})}, head=f"{t} · 정답 및 해설"))
+        if with_tr:
+            tr = st_.get("trans") or {}
+            qt_ = st_.get("qs_tr") or qs
+            n_has = sum(1 for r in qt_ if qb_trans_parts(r))
+            n_miss = sum(1 for r in qt_ if qb_trans_parts(r) and not tr.get(r.get("id")))
+            body = qb_trans_body(qt_, tr) or "<p>해석할 선지가 있는 문항이 없어요 (순서·삽입·어법·낱말 등은 선지가 번호라서 빠져요).</p>"
+            note = "문항 번호는 시험지와 같아요 · 순서·삽입·어법·낱말처럼 선지가 번호인 문항은 빠져요" + (
+                f" · 아직 해석하지 않은 {n_miss}문항(선지가 문장인 {n_has}문항 중)은 빠졌어요" if n_miss else "")
+            parts_tr.append([f"<div class='ans-page trsec'><div class='anshead'>{t} · 선지 해석</div><div class='keynote'>{e(note)}</div>"
+                             f"<div class='cols'>{body}</div></div>"])
+    body = []
+    if meta.get("by_kind", True):
+        for x in parts_ans + parts_tr:
+            body += x
+    else:
+        for i in range(len(sets)):
+            body += (parts_ans[i] if with_ans else []) + (parts_tr[i] if with_tr else [])
+    what = " · ".join(x for x, on in (("정답·해설", with_ans), ("선지 해석", with_tr)) if on)
+    toc = "".join(f"<tr><td class='n'>{k}</td><td>{e(x.get('title') or f'시험지 {k}')}</td><td class='n'>{len(x.get('qs') or [])}문항</td></tr>"
+                  for k, x in enumerate(sets, 1))
+    cover = (f"<div class='ab-cover'><div class='top'><div><b>PQRS</b>영T {e(what)} 합본</div><div>{e(meta.get('academy', ''))}</div></div>"
+             f"<h1>{e(meta.get('title') or what + ' 합본')}</h1><div class='sub'>시험지 {len(sets)}권 · 총 {sum(len(x.get('qs') or []) for x in sets)}문항 · "
+             f"{'종류별로 모아서' if meta.get('by_kind', True) else '시험지마다 이어서'} 실었어요</div>"
+             f"<table class='ab-toc'><tr><th>순서</th><th>시험지</th><th>문항</th></tr>{toc}</table>"
+             "<div class='foot'>PQRS 영T 자체제작 · 장기동 포피엠입시영어 031-991-1199</div></div>")  # 맨 뒤에 두면 한 줄만 다음 쪽으로 넘어가기도 해서 목차 칸 안에
+    return (f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>{e(meta.get('title') or what + ' 합본')}</title>"
+            f"<style>{QB_EXAM_CSS}{QB_ANSBOOK_CSS}</style></head><body>"
+            f"<div class='printbar'><button onclick='window.print()'>🖨️ 인쇄 / PDF로 저장</button></div><div class='sheet'>{cover}{''.join(body)}</div></body></html>")
+
+
+def render_answer_book_ui(sb, text_model: str, academy_name: str, school_name: str):
+    """📚 정답·해설·해석 합본: 보관함의 시험지를 여러 개 골라 정답·해설과 선지 해석을 한 권으로 (만들기는 AI 비용 없음)"""
+    try:
+        items = [("s", r) for r in qb_exam_saved(sb)] + [("l", r) for r in qb_exam_log(sb) if r.get("qids")]
+    except Exception as ex:
+        st.caption(f"⚠️ 보관된 시험지를 읽지 못했어요 ({str(ex)[:80]}).")
+        return
+    seen, recs = set(), {}
+    for src, r in items:  # 다운로드 보관(📥)과 문항 기록(💾)이 같은 시험지면 하나만
+        sig = tuple(r.get("qids") or [])
+        if not sig or sig in seen or not r.get("id"):
+            continue
+        seen.add(sig)
+        recs[f"{src}:{r['id']}"] = (src, r)
+    with st.expander(f"📚 정답·해설·해석 합본 — 여러 시험지를 한 권으로 · 고를 수 있는 시험지 {len(recs)}개", expanded=bool(st.session_state.get("qb_ab_out"))):
+        if not recs:
+            st.caption("아직 보관된 시험지가 없어요. 시험지를 다운로드하거나 '💾 문항 기록 저장'을 하면 여기서 고를 수 있어요.")
+            return
+        st.caption("예: VISION 1권·2권 시험지를 고르면 두 권의 정답·해설과 선지 해석을 한 파일로 만들어요. 문항 번호는 각 시험지와 같아요. 만들기는 AI 비용 0원.")
+        names = {k: f"{'📥' if src == 's' else '💾'} {r.get('title') or r.get('name') or '시험지'} · {r.get('date', '')} · {r.get('n', len(r.get('qids', [])))}문항"
+                 for k, (src, r) in recs.items()}
+        st.session_state["qb_ab_pick"] = [k for k in st.session_state.get("qb_ab_pick", []) if k in recs]
+        pick = st.multiselect("합본에 넣을 시험지 (고른 순서대로 실려요)", list(recs), format_func=names.get, key="qb_ab_pick")
+        if pick:  # 칩에서는 이름이 잘려 보여서 실리는 순서를 풀어서 한 번 더
+            st.caption("실리는 순서: " + " → ".join(f"{i}) {recs[k][1].get('title') or recs[k][1].get('name') or '시험지'} ({len(recs[k][1].get('qids', []))}문항)"
+                                                for i, k in enumerate(pick, 1)))
+        o1, o2, o3 = st.columns([1.2, 1.2, 2.4], vertical_alignment="center")
+        want_ans = o1.checkbox("정답·해설", value=True, key="qb_ab_ans")
+        want_tr = o2.checkbox("선지 해석", value=True, key="qb_ab_tr")
+        by_kind = o3.radio("싣는 순서", ["종류별로 모아서 (정답·해설 → 해석)", "시험지마다 이어서"], key="qb_ab_order",
+                           horizontal=True, label_visibility="collapsed").startswith("종류별")
+        title = st.text_input("합본 제목", placeholder="예: 제일고1학년 기말대비 VISION 정답·해설·해석", key="qb_ab_title")
+        if not pick:
+            return
+        qids_all = [q for k in pick for q in recs[k][1].get("qids", [])]
+        sig = tuple(pick)
+        job = load_gen_job()
+        n_wait = qb_trans_queued(job, qids_all) if want_tr else 0
+        cached = st.session_state.get("qb_ab_rows")
+        if not cached or cached[0] != sig or n_wait or st.session_state.pop("qb_ab_refresh", False):
+            got = {}
+            for i in range(0, len(qids_all), 300):
+                got.update({r["id"]: r for r in qb_fetch_ids(sb, qids_all[i:i + 300])})
+            st.session_state["qb_ab_rows"] = (sig, got)
+        got = st.session_state["qb_ab_rows"][1]
+        n_gone = sum(1 for q in qids_all if q not in got)
+        model = light_model_for(text_model)
+        if want_tr:
+            uniq = list({q: got[q] for q in qids_all if q in got}.values())
+            n_todo, won = qb_trans_estimate(uniq, model)
+            n_has = sum(1 for r in uniq if qb_trans_parts(r))
+            t1, t2 = st.columns([2, 3], vertical_alignment="center")
+            if n_wait:
+                t1.button("🔄 진행 상황 새로 보기", use_container_width=True, key="qb_ab_refresh_btn",
+                          on_click=lambda: st.session_state.__setitem__("qb_ab_refresh", True))
+                t2.caption(f"⏳ 서버에서 선지 해석 중 · 기다리는 {n_wait}문항 · 창을 닫아도 계속돼요")
+            elif n_todo:
+                if t1.button(f"📝 남은 {n_todo}문항 선지 해석 시작", use_container_width=True, key="qb_ab_trans_go"):
+                    n = enqueue_trans([r for r in uniq if qb_trans_parts(r) and qb_trans_cached(r) is None], text_model, api_delay,
+                                      academy_name, school_name, title or "정답·해설 합본")
+                    st.session_state.gen_flash = f"✅ 선지 해석 {n}문항을 서버 작업에 넣었어요. 다 되면 여기서 합본을 만들면 해석까지 들어가요."
+                    st.rerun()
+                t2.caption(f"선지가 문장인 문항 {n_has}개 중 아직 해석 안 된 {n_todo}문항 · 해석 예상 약 {max(1, round(won)):,}원 "
+                           "(해석하지 않고 만들면 그 문항만 해석에서 빠져요)")
+            else:
+                t2.caption(f"선지가 문장인 문항 {n_has}개 모두 해석돼 있어요 · 만들기는 AI 비용 0원")
+        if n_gone:
+            st.warning(f"고른 시험지의 {n_gone}문항은 문제 은행에서 지워져서 빠져요.")
+        if st.button("📄 합본 만들기 (AI 비용 없음)", type="primary", key="qb_ab_make", disabled=not (want_ans or want_tr)):
+            sets = []
+            for k in pick:
+                src, r = recs[k]
+                raw = [got[q] for q in r.get("qids", []) if q in got]
+                tr = qb_choice_trans(sb, [x for x in raw if qb_trans_cached(x) is not None], model, []) if want_tr else {}  # 저장된 해석만 (AI 호출 없음)
+                sets.append({"title": r.get("title") or r.get("name") or "시험지", "qs": qb_display_fix(raw), "qs_tr": raw,
+                             "meta": r.get("meta") or {}, "trans": tr})
+            page = render_answer_book(sets, {"title": title.strip(), "academy": academy_name, "answers": want_ans, "trans": want_tr, "by_kind": by_kind})
+            st.session_state.qb_ab_out = (sig, page, title.strip() or "정답·해설 합본", sum(len(x["qs"]) for x in sets))
+        out = st.session_state.get("qb_ab_out")
+        if out and out[0] == sig:
+            _, page, fname, n = out
+            safe = re.sub(r'[\\/:*?"<>|]', "", fname).strip() or "정답·해설 합본"
+            st.download_button(f"📥 합본 HTML 다운로드 (시험지 {len(pick)}권 · {n}문항) — 열어서 '인쇄 / PDF로 저장'", page, f"{safe}.html", "text/html",
+                               use_container_width=True, key="qb_ab_dl")
+            with st.expander("미리 보기", expanded=False):
+                components.html(page, height=850, scrolling=True)
+
 def render_exam_archive(sb, labels_all: set, text_model: str, academy_name: str, school_name: str):
     """📂 만든 시험지 다시 받기: 보관함(다운로드한 시험지) + 문항 기록 → 같은 문제·같은 순서로 시험지 HTML·선지 해석본"""
     items = [("s", r) for r in qb_exam_saved(sb)] + [("l", r) for r in qb_exam_log(sb) if r.get("qids")]
@@ -8241,7 +8411,7 @@ def render_exam_archive(sb, labels_all: set, text_model: str, academy_name: str,
         rec = next(r for s_, r in items if s_ == src and r["id"] == rid)
         if a2.button("📄 다시 만들기 (AI 비용 없음)", type="primary", use_container_width=True, key="qb_arch_make"):
             got = {r["id"]: r for r in qb_fetch_ids(sb, rec["qids"])}
-            qs = [got[i] for i in rec["qids"] if i in got]
+            qs = qb_display_fix([got[i] for i in rec["qids"] if i in got])  # 처음 시험지와 같은 정리 (순서 문항 선택지 등)
             meta = {**QB_EXAM_META_DEFAULT, **(rec.get("meta") or {})}
             meta["title"] = meta.get("title") or rec.get("title") or rec.get("name") or "변형문제"
             meta["academy"] = academy_name
@@ -8748,7 +8918,7 @@ def render_clinic_archive(sb, wid: str, labels_all: set, text_model: str, academ
         rec = next(r for r in recs if r["id"] == rid)
         if a2.button("📄 다시 만들기 (AI 비용 없음)", type="primary", use_container_width=True, key="qb_carch_make"):
             got = {r["id"]: r for r in qb_fetch_ids(sb, rec["qids"])}
-            qs = [got[i] for i in rec["qids"] if i in got]
+            qs = qb_display_fix([got[i] for i in rec["qids"] if i in got])  # 처음 클리닉과 같은 정리 (순서 문항 선택지 등)
             meta = {"brand": "클리닉 미니모의고사", "kind": school_name, "show_tag": True, "show_gichul": False, "with_answers": True,
                     "show_style": False, "show_time": True, **(rec.get("meta") or {})}
             meta["title"] = meta.get("title") or rec.get("title") or "클리닉"
@@ -9216,6 +9386,10 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
         st.caption("고른 번호에서 같은 개수씩 골고루 뽑고, 번호 안에서는 유형을 돌아가며 섞습니다.")
         st.caption("🧭 이럴 때: 지문·유형·문항 수를 마음대로 정해 시험지를 만들 때 · 매주 같은 구성은 '📅 주간 클리닉', 학교 실제 시험과 같은 구성·배점은 왼쪽 '🏁 영T FINAL 모의고사'")
         render_exam_archive(sb, set(by_label), text_model, academy_name, school_name)
+        try:
+            render_answer_book_ui(sb, text_model, academy_name, school_name)
+        except Exception as ex:  # 합본 칸이 이상해도 시험지 만들기는 그대로
+            st.warning(f"⚠️ 정답·해설 합본 칸을 보여 주지 못했어요. 시험지 만들기에는 영향이 없어요. ({str(ex)[:80]})")
         sel_e = _qb_passage_picker("qb_exam_labels", mock_lib, label_counts)
         with st.container(key="qb_card_exam_opts"):
             st.markdown("<div class='qb-title'>시험지 구성</div>", unsafe_allow_html=True)
