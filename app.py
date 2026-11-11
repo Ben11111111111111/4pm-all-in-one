@@ -7980,11 +7980,34 @@ def qb_rows_for_voca(_sb, labels: tuple) -> List[Dict]:
     links = [l for l in qb_link_labels(_sb) if set(qb_link_parts(l)[1]) & want]
     return qb_fetch(_sb, list(labels) + links, "id,passage_label,q_type,difficulty,content")
 
-def qb_voca_choice_words(rows: List[Dict], label: str, have: set) -> List[Dict]:
-    """한 지문의 변형·기출 문제 선지에 나온 단어 (해석본·선지 단어 뽑기로 저장된 것) → 단어장 행. 단어장에 이미 있는 단어는 뺌"""
+def _qb_grams4(text) -> set:
+    w = re.findall(r"[a-z']+", str(text or "").lower())
+    return {" ".join(w[i:i + 4]) for i in range(len(w) - 3)}
+
+def qb_voca_bank_labels(p: Dict, mock_lib: List[Dict], mock_grams: Dict[str, set] = None) -> List[str]:
+    """단어장 지문 → 문제 은행 지문 이름들 (2026-11-12: 옛 이름 단어장 46개가 문제 은행과 이름이 달라 선지 단어가 안 붙었음)
+    이름이 원문 라이브러리에 있으면 그 이름 그대로(예전과 같음). 없으면 단어장 글과 원문 글을 4단어 묶음으로 맞춤:
+    원문 지문이 단어장 글에 60% 이상 들어 있으면 그 지문(단락을 합친 단어장은 그 단락 모두), 없으면 단어장 글의 50% 이상이 겹치는 가장 비슷한 지문"""
+    label = p.get("label", "")
+    if not mock_lib or label in {m.get("label") for m in mock_lib}:
+        return [label]
+    g = _qb_grams4(p.get("body_text"))
+    if len(g) < 8:
+        return [label]
+    mg = mock_grams if mock_grams is not None else {m.get("label"): _qb_grams4(m.get("body_text")) for m in mock_lib}
+    hits = [l for l, x in mg.items() if l and len(x) >= 8 and len(g & x) / len(x) >= 0.6]
+    if not hits:
+        best = max(((len(g & x) / len(g), l) for l, x in mg.items() if l and x), default=(0, ""))
+        hits = [best[1]] if best[0] >= 0.5 else []
+    return hits or [label]
+
+def qb_voca_choice_words(rows: List[Dict], label, have: set) -> List[Dict]:
+    """한 지문의 변형·기출 문제 선지에 나온 단어 (해석본·선지 단어 뽑기로 저장된 것) → 단어장 행. 단어장에 이미 있는 단어는 뺌
+    label: 문제 은행 지문 이름 하나 또는 여러 개(단락을 합친 단어장)"""
+    want = {label} if isinstance(label, str) else set(label)
     out, seen = [], set(have)
     for r in rows:
-        if label not in qb_link_parts(r.get("passage_label", ""))[1]:
+        if not want & set(qb_link_parts(r.get("passage_label", ""))[1]):
             continue
         for x in qb_trans_cached(r) or []:
             for w in x.get("words") or []:
@@ -8000,21 +8023,35 @@ def qb_voca_choice_words(rows: List[Dict], label: str, have: set) -> List[Dict]:
 def render_voca_choice_option(prefix: str, sel_passages: List[Dict], text_model: str) -> List[Dict]:
     """Anatomy Voca 출력: 그 지문 변형문제 선지 단어를 넣을지 고르기 (넣으면 출력용 사본에만 붙이고 저장된 단어장은 그대로)"""
     sb = supabase if IS_CLOUD_DB else None
-    labels = tuple(p.get("label", "") for p in sel_passages)
+    try:  # 옛 이름 단어장은 글 내용으로 문제 은행 지문을 찾음 (이름이 맞는 단어장은 예전과 같음)
+        mock_lib = [m for m in (st.session_state.get("saved_mock") or []) if isinstance(m, dict)]
+        mock_grams = None
+        lab_map = {}
+        for p in sel_passages:
+            if mock_lib and p.get("label", "") not in {m.get("label") for m in mock_lib} and mock_grams is None:
+                mock_grams = {m.get("label"): _qb_grams4(m.get("body_text")) for m in mock_lib}
+            lab_map[p.get("label", "")] = qb_voca_bank_labels(p, mock_lib, mock_grams)
+    except Exception:
+        lab_map = {p.get("label", ""): [p.get("label", "")] for p in sel_passages}
+    labels = tuple(dict.fromkeys(l for p in sel_passages for l in lab_map.get(p.get("label", ""), [p.get("label", "")])))
     try:
         rows = qb_rows_for_voca(sb, labels)
     except Exception:
         return sel_passages
     with st.container(border=True):
-        on = st.checkbox("➕ 변형문제 선지에 나온 단어도 같이 넣기 (지문마다 '변형 선지' 표시로 맨 뒤에)", key=f"{prefix}_with_choice")
-        added = {p.get("label", ""): qb_voca_choice_words(rows, p.get("label", ""),
-                                                          {str(w.get("word", "")).strip().lower() for w in (p.get("data") or {}).get("voca_list", [])})
+        mode = st.radio("➕ 변형문제 선지에 나온 단어", ["넣지 않기", "단어장 뒤에 붙이기", "선지 단어만"], horizontal=True, key=f"{prefix}_choice_mode",
+                        help="단어장 뒤에 붙이기: 지문마다 원래 단어 뒤에 '변형 선지' 표시로 (단어장에 이미 있는 단어는 뺌) · "
+                             "선지 단어만: 그 지문 문제 선지에 나온 단어만 따로 실은 단어장 (엑셀·CSV·단행본 모두 같은 목록) · 저장된 단어장은 어느 쪽이든 그대로")
+        on = mode != "넣지 않기"
+        only = mode == "선지 단어만"
+        added = {p.get("label", ""): qb_voca_choice_words(rows, lab_map.get(p.get("label", ""), [p.get("label", "")]),
+                                                          set() if only else {str(w.get("word", "")).strip().lower() for w in (p.get("data") or {}).get("voca_list", [])})
                  for p in sel_passages}
         todo = [r for r in rows if qb_trans_parts(r) and qb_trans_cached(r) is None]
         model = light_model_for(text_model)
         n_todo, won = qb_trans_estimate(todo, model)
         c1, c2 = st.columns([3, 2], vertical_alignment="center")
-        c1.caption(f"선지 단어 {sum(len(v) for v in added.values())}개 (단어장에 이미 있는 단어는 뺌) · "
+        c1.caption(f"선지 단어 {sum(len(v) for v in added.values())}개 ({'지문마다 그 지문 선지 단어만' if only else '단어장에 이미 있는 단어는 뺌'}) · "
                    f"선지 단어를 아직 안 뽑은 문제 {n_todo}개" + (f" → 뽑으면 약 {max(1, round(won)):,}원" if n_todo else ""))
         n_wait = qb_trans_queued(load_gen_job(), [r["id"] for r in todo]) if n_todo else 0
         if n_wait:
@@ -8034,10 +8071,21 @@ def render_voca_choice_option(prefix: str, sel_passages: List[Dict], text_model:
     out = []
     for p in sel_passages:
         extra = added.get(p.get("label", ""), [])
-        if extra:
+        if only:
+            if not extra:
+                continue  # 선지 단어가 없는 지문은 '선지 단어만' 단어장에서 뺌
+            p = copy.deepcopy(p)
+            p.setdefault("data", {})["voca_list"] = list(extra)
+        elif extra:
             p = copy.deepcopy(p)
             p.setdefault("data", {})["voca_list"] = list(p["data"].get("voca_list", [])) + extra
         out.append(p)
+    if only:
+        n_skip = len(sel_passages) - len(out)
+        st.caption(f"📚 선지 단어만 실은 단어장: 지문 {len(out)}개 · 단어 {sum(len(x['data']['voca_list']) for x in out)}개"
+                   + (f" · 선지 단어가 없는 지문 {n_skip}개는 뺐어요" if n_skip else "") + " → 아래 '단행본 렌더링'으로 미리 보고 다운로드해요")
+        if not out:
+            return sel_passages[:0]
     return out
 
 def render_choice_trans_ui(sb, key: str, qids: List[str], title: str, text_model: str, academy_name: str, school_name: str):
