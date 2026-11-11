@@ -10126,6 +10126,42 @@ def mock_image_src(p: Dict) -> str:
         return f"{SUPABASE_URL}/storage/v1/object/public/image_assets/{fn}"
     return ""
 
+_PUBLIC_IMG_OK: Dict[str, bool] = {}  # 저장소 공개 주소가 열리는 이미지 파일 (한 번 확인한 결과 기억)
+
+def _public_image_url(fn: str) -> str:
+    return f"{SUPABASE_URL}/storage/v1/object/public/image_assets/{fn}"
+
+def _public_image_check(fn: str) -> bool:
+    """저장소 공개 주소가 열리는지 (HEAD 요청, 5초) — 열리면 기억해 두고 다시 묻지 않음"""
+    if _PUBLIC_IMG_OK.get(fn):
+        return True
+    try:
+        import urllib.request
+        req = urllib.request.Request(_public_image_url(fn), method="HEAD")
+        ok = urllib.request.urlopen(req, timeout=5).status == 200
+    except Exception:
+        ok = False
+    if ok:
+        _PUBLIC_IMG_OK[fn] = True
+    return ok
+
+def mock_image_display_srcs(ps: List[Dict]) -> Dict[str, str]:
+    """화면에 띄울 이미지 위치 {지문 id: 위치}. 배포 서버에서는 서버 안 파일 대신 저장소 공개 주소
+    (서버 안 파일로 띄운 이미지가 깨져 보인 일이 있었음). 주소가 안 열리는 이미지(올리기 실패 등)만 서버 안 파일"""
+    out = {p.get("id"): mock_image_src(p) for p in ps}
+    if not IS_CLOUD_DB:
+        return out
+    local = {pid: os.path.basename(src) for pid, src in out.items() if src and not str(src).startswith("http")}
+    todo = sorted({fn for fn in local.values() if not _PUBLIC_IMG_OK.get(fn)})
+    if todo:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            list(ex.map(_public_image_check, todo))
+    for pid, fn in local.items():
+        if _PUBLIC_IMG_OK.get(fn):
+            out[pid] = _public_image_url(fn)
+    return out
+
 def shrink_image_bytes(raw: bytes, max_side: int = 1024) -> bytes:
     """스타일 참고용 이미지를 작게 줄여 요청 용량을 줄임 (기존 교재 이미지는 장당 7~9MB)"""
     from PIL import Image
@@ -10308,9 +10344,13 @@ def render_mock_image_section(selected: List[Dict]):
 
         st.markdown(f"**🖼️ 선택 지문 이미지 ({sum(1 for p in selected if mock_image_src(p))}/{len(selected)}개)** · 마음에 안 드는 이미지는 '📤 내 이미지로 교체'로 직접 올릴 수 있습니다.")
         g_cols = st.columns(3)
+        try:
+            show_src = mock_image_display_srcs(selected)
+        except Exception:
+            show_src = {p.get("id"): mock_image_src(p) for p in selected}
         for i, p in enumerate(selected):
             with g_cols[i % 3]:
-                src = mock_image_src(p)
+                src = show_src.get(p.get("id")) or mock_image_src(p)
                 if src:
                     st.image(src, caption=p["label"], width="stretch")
                 else:
