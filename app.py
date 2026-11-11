@@ -7833,16 +7833,23 @@ def qb_trans_body(qs: List[Dict], trans: Dict[str, List[Dict]]) -> str:
         lines = trans.get(r.get("id"))
         if not lines:
             continue
-        box = r.get("q_type") == "<보기> 일치 조합형"
         o.append(f"<div class='tq'><div class='no'>{n}. <span>{html.escape(r['q_type'])}</span></div>")
-        for j, x in enumerate(lines):
-            en = html.escape(x["en"])
-            if not box and not re.match(r"^[①-⑤]", x["en"]):
-                en = f"{CIRCLED[j]} {en}"
-            wd = " · ".join(f"<b>{html.escape(w['word'])}</b> {html.escape(w['meaning'])}" for w in x.get("words") or [])
-            o.append(f"<div class='tl'><div class='en'>{en}</div><div class='ko'>→ {html.escape(x['ko'])}</div>"
-                     + (f"<div class='wd'>{wd}</div>" if wd else "") + "</div>")
+        o.append(qb_trans_lines(r, lines))
         o.append("</div>")
+    return "".join(o)
+
+
+def qb_trans_lines(r: Dict, lines: List[Dict]) -> str:
+    """한 문항의 선지 해석 줄 HTML (영어 → 우리말 · 단어) — 해석본과 합본 '문항마다 해설 + 해석'이 함께 씀"""
+    box = r.get("q_type") == "<보기> 일치 조합형"
+    o = []
+    for j, x in enumerate(lines):
+        en = html.escape(x["en"])
+        if not box and not re.match(r"^[①-⑤]", x["en"]):
+            en = f"{CIRCLED[j]} {en}"
+        wd = " · ".join(f"<b>{html.escape(w['word'])}</b> {html.escape(w['meaning'])}" for w in x.get("words") or [])
+        o.append(f"<div class='tl'><div class='en'>{en}</div><div class='ko'>→ {html.escape(x['ko'])}</div>"
+                 + (f"<div class='wd'>{wd}</div>" if wd else "") + "</div>")
     return "".join(o)
 
 
@@ -7990,8 +7997,9 @@ def render_choice_trans_ui(sb, key: str, qids: List[str], title: str, text_model
             with st.expander("해석본 미리 보기", expanded=False):
                 components.html(page, height=700, scrolling=True)
 
-def qb_answer_parts(qs: List[Dict], meta: Dict, head: str = "정답 및 해설") -> List[str]:
-    """시험지 끝 '정답 및 해설'(정답표 + 문항별 해설) HTML 조각 — 시험지와 정답·해설 합본이 함께 씀. head는 HTML로 넣음(부르는 쪽에서 escape)"""
+def qb_answer_parts(qs: List[Dict], meta: Dict, head: str = "정답 및 해설", after: Dict[str, str] = None) -> List[str]:
+    """시험지 끝 '정답 및 해설'(정답표 + 문항별 해설) HTML 조각 — 시험지와 정답·해설 합본이 함께 씀. head는 HTML로 넣음(부르는 쪽에서 escape)
+    after: 문항 id → 그 문항 해설 바로 뒤에 붙일 HTML (합본 '문항마다 해설 + 해석'용, 안 주면 시험지와 똑같음)"""
     def kind_short(r):
         if r["difficulty"] == QB_GICHUL_LEVEL:
             return "기출"
@@ -8018,6 +8026,8 @@ def qb_answer_parts(qs: List[Dict], meta: Dict, head: str = "정답 및 해설")
         note = f"<li><b>⚠️ {qb_html(c['answer_note'])}</b></li>" if c.get("answer_note") else ""
         o.append(f"<div class='exp'><h3>{n}번 정답 {ans}<span>({html.escape(r['passage_label'])} · {html.escape(r['q_type'])} · {html.escape(kind)})</span></h3><ul>"
                  + note + "".join(f"<li>{qb_html(e)}</li>" for e in (c.get("explanation") or [])) + "</ul></div>")
+        if after and after.get(r.get("id")):
+            o.append(after[r["id"]])
     o.append("</div></div>")
     return o
 
@@ -8253,6 +8263,8 @@ table.ab-toc th { background: #e8e8e8; }
 table.ab-toc td.n { text-align: center; width: 18%; }
 .ab-cover .foot { margin: 6px 0 0; }
 .ab-cover + .ans-page { break-before: auto; page-break-before: auto; }  /* 목차 바로 아래에서 첫 칸 시작 (첫 쪽이 비지 않게) */
+.trsec.tr-item { margin: -3px 0 10px; padding: 2px 0 0 8px; border-left: 2px solid #9db4dc; }  /* 문항마다: 해설 바로 아래 그 문항 선지 해석 */
+.trsec.tr-item .lab { font-family: 'Noto Sans KR'; font-size: 7.8pt; font-weight: 700; color: #0b3d91; margin-bottom: 2px; }
 .trsec .tq { margin: 0 0 10px; }
 .trsec .tq .no { font-family: 'Noto Sans KR'; font-weight: 900; font-size: 10.5pt; break-after: avoid; border-bottom: 1px solid #111; margin-bottom: 4px; }
 .trsec .tq .no span { font-weight: 400; font-size: 8.3pt; color: #555; margin-left: 4px; }
@@ -8267,9 +8279,28 @@ table.ab-toc td.n { text-align: center; width: 18%; }
 def render_answer_book(sets: List[Dict], meta: Dict) -> str:
     """정답·해설·선지 해석 합본 HTML. sets: [{'title', 'qs', 'qs_tr', 'meta', 'trans'}] (시험지 순서대로)
     qs: 시험지에 실린 모양(qb_display_fix) — 정답·해설용 · qs_tr: 저장된 문항 그대로 — 선지 해석용 (기존 해석본과 같게, 없으면 qs)
-    meta: title, academy, answers(정답·해설 넣기), trans(선지 해석 넣기), by_kind(True: 정답·해설을 모두 → 해석을 모두 / False: 시험지마다 이어서)"""
+    meta: title, academy, answers(정답·해설 넣기), trans(선지 해석 넣기),
+          layout: 'kind'(정답·해설을 모두 → 해석을 모두) / 'set'(시험지마다 이어서) / 'item'(문항마다 해설 바로 아래 그 문항 해석) — 없으면 by_kind로"""
     e = html.escape
     with_ans, with_tr = meta.get("answers", True), meta.get("trans", True)
+    layout = meta.get("layout") or ("kind" if meta.get("by_kind", True) else "set")
+    if layout == "item" and not (with_ans and with_tr):
+        layout = "set"  # 둘 중 하나만 넣으면 시험지마다 이어서와 같음
+    if layout == "item":
+        body = []
+        for k, st_ in enumerate(sets, 1):
+            t = e(st_.get("title") or f"시험지 {k}")
+            qs, tr = st_.get("qs") or [], st_.get("trans") or {}
+            qt_ = st_.get("qs_tr") or qs
+            after = {r["id"]: f"<div class='trsec tr-item'><div class='lab'>선지 해석</div>{qb_trans_lines(r, tr[r['id']])}</div>"
+                     for r in qt_ if r.get("id") and tr.get(r.get("id"))}
+            n_has = sum(1 for r in qt_ if qb_trans_parts(r))
+            n_miss = sum(1 for r in qt_ if qb_trans_parts(r) and not tr.get(r.get("id")))
+            part = qb_answer_parts(qs, {**QB_EXAM_META_DEFAULT, **(st_.get("meta") or {})}, head=f"{t} · 정답·해설·선지 해석", after=after)
+            note = "문항마다 해설 아래에 그 문항 선지 해석 · 순서·삽입·어법·낱말처럼 선지가 번호인 문항은 해설만" + (
+                f" · 아직 해석하지 않은 {n_miss}문항(선지가 문장인 {n_has}문항 중)은 해설만" if n_miss else "")
+            body += part[:1] + [f"<div class='keynote'>{e(note)}</div>"] + part[1:]
+        return _qb_answer_book_page(sets, meta, body, with_ans, with_tr, "문항마다 해설과 해석을 붙여")
     parts_ans, parts_tr = [], []
     for k, st_ in enumerate(sets, 1):
         t = e(st_.get("title") or f"시험지 {k}")
@@ -8287,18 +8318,24 @@ def render_answer_book(sets: List[Dict], meta: Dict) -> str:
             parts_tr.append([f"<div class='ans-page trsec'><div class='anshead'>{t} · 선지 해석</div><div class='keynote'>{e(note)}</div>"
                              f"<div class='cols'>{body}</div></div>"])
     body = []
-    if meta.get("by_kind", True):
+    if layout == "kind":
         for x in parts_ans + parts_tr:
             body += x
     else:
         for i in range(len(sets)):
             body += (parts_ans[i] if with_ans else []) + (parts_tr[i] if with_tr else [])
+    return _qb_answer_book_page(sets, meta, body, with_ans, with_tr, "종류별로 모아서" if layout == "kind" else "시험지마다 이어서")
+
+
+def _qb_answer_book_page(sets: List[Dict], meta: Dict, body: List[str], with_ans: bool, with_tr: bool, how: str) -> str:
+    """합본 첫머리(제목·목차) + 본문 → HTML 한 장"""
+    e = html.escape
     what = " · ".join(x for x, on in (("정답·해설", with_ans), ("선지 해석", with_tr)) if on)
     toc = "".join(f"<tr><td class='n'>{k}</td><td>{e(x.get('title') or f'시험지 {k}')}</td><td class='n'>{len(x.get('qs') or [])}문항</td></tr>"
                   for k, x in enumerate(sets, 1))
     cover = (f"<div class='ab-cover'><div class='top'><div><b>PQRS</b>영T {e(what)} 합본</div><div>{e(meta.get('academy', ''))}</div></div>"
              f"<h1>{e(meta.get('title') or what + ' 합본')}</h1><div class='sub'>시험지 {len(sets)}권 · 총 {sum(len(x.get('qs') or []) for x in sets)}문항 · "
-             f"{'종류별로 모아서' if meta.get('by_kind', True) else '시험지마다 이어서'} 실었어요</div>"
+             f"{how} 실었어요</div>"
              f"<table class='ab-toc'><tr><th>순서</th><th>시험지</th><th>문항</th></tr>{toc}</table>"
              "<div class='foot'>PQRS 영T 자체제작 · 장기동 포피엠입시영어 031-991-1199</div></div>")  # 맨 뒤에 두면 한 줄만 다음 쪽으로 넘어가기도 해서 목차 칸 안에
     return (f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>{e(meta.get('title') or what + ' 합본')}</title>"
@@ -8335,8 +8372,10 @@ def render_answer_book_ui(sb, text_model: str, academy_name: str, school_name: s
         o1, o2, o3 = st.columns([1.2, 1.2, 2.4], vertical_alignment="center")
         want_ans = o1.checkbox("정답·해설", value=True, key="qb_ab_ans")
         want_tr = o2.checkbox("선지 해석", value=True, key="qb_ab_tr")
-        by_kind = o3.radio("싣는 순서", ["종류별로 모아서 (정답·해설 → 해석)", "시험지마다 이어서"], key="qb_ab_order",
-                           horizontal=True, label_visibility="collapsed").startswith("종류별")
+        AB_LAYOUTS = {"종류별로 모아서 (정답·해설 → 해석)": "kind", "시험지마다 이어서": "set", "문항마다 해설 + 해석": "item"}
+        layout = AB_LAYOUTS.get(o3.radio("싣는 순서", list(AB_LAYOUTS), key="qb_ab_order", horizontal=True, label_visibility="collapsed",
+                                         help="종류별로 모아서: 두 권의 정답·해설을 다 실은 뒤 해석 · 시험지마다 이어서: 1권 정답·해설 → 1권 해석 → 2권 … · "
+                                              "문항마다 해설 + 해석: 권마다 정답표를 싣고, 문항마다 해설 바로 아래에 그 문항 선지 해석"), "kind")
         title = st.text_input("합본 제목", placeholder="예: 제일고1학년 기말대비 VISION 정답·해설·해석", key="qb_ab_title")
         if not pick:
             return
@@ -8382,7 +8421,7 @@ def render_answer_book_ui(sb, text_model: str, academy_name: str, school_name: s
                 tr = qb_choice_trans(sb, [x for x in raw if qb_trans_cached(x) is not None], model, []) if want_tr else {}  # 저장된 해석만 (AI 호출 없음)
                 sets.append({"title": r.get("title") or r.get("name") or "시험지", "qs": qb_display_fix(raw), "qs_tr": raw,
                              "meta": r.get("meta") or {}, "trans": tr})
-            page = render_answer_book(sets, {"title": title.strip(), "academy": academy_name, "answers": want_ans, "trans": want_tr, "by_kind": by_kind})
+            page = render_answer_book(sets, {"title": title.strip(), "academy": academy_name, "answers": want_ans, "trans": want_tr, "layout": layout})
             st.session_state.qb_ab_out = (sig, page, title.strip() or "정답·해설 합본", sum(len(x["qs"]) for x in sets))
         out = st.session_state.get("qb_ab_out")
         if out and out[0] == sig:
