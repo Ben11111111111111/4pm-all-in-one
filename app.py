@@ -8044,6 +8044,28 @@ def render_voca_choice_option(prefix: str, sel_passages: List[Dict], text_model:
                              "선지 단어만: 그 지문 문제 선지에 나온 단어만 따로 실은 단어장 (엑셀·CSV·단행본 모두 같은 목록) · 저장된 단어장은 어느 쪽이든 그대로")
         on = mode != "넣지 않기"
         only = mode == "선지 단어만"
+        if on:  # 어느 시험지 문항의 선지 단어만 넣을지 (비우면 그 지문의 해석된 문제 전부 — 예전과 같음)
+            try:
+                recs = ([("s", r) for r in qb_exam_saved(sb)] + [("l", r) for r in qb_exam_log(sb) if r.get("qids")]
+                        + [("c", r) for r in qb_clinic_saved(sb)])
+            except Exception:
+                recs = []
+            t_opts, seen_q = {}, set()
+            for src, r in recs:
+                sig = tuple(r.get("qids") or [])
+                if not sig or sig in seen_q or not r.get("id"):
+                    continue
+                seen_q.add(sig)
+                t_opts[f"{src}:{r['id']}"] = (f"{ {'s': '📥', 'l': '💾', 'c': '📅'}[src]} {r.get('title') or r.get('name') or '시험지'} · {r.get('date', '')} · {len(sig)}문항", set(sig))
+            tk = f"{prefix}_choice_tests"
+            st.session_state[tk] = [k for k in st.session_state.get(tk, []) if k in t_opts]
+            pick_t = st.multiselect("어느 시험지 문항의 선지 단어만 넣을지 (비우면 이 지문들의 선지 해석된 문제 전부)", list(t_opts),
+                                    format_func=lambda k: t_opts[k][0], key=tk,
+                                    help="보관된 시험지(📥 다운로드 · 💾 문항 기록 · 📅 클리닉)를 고르면, 그 시험지에 실제로 들어간 문항의 선지 단어만 지문별로 들어가요")
+            if pick_t:
+                allow = set().union(*(t_opts[k][1] for k in pick_t))
+                rows = [r for r in rows if r.get("id") in allow]
+                st.caption(f"고른 시험지 {len(pick_t)}개 · 고른 단어장 지문에 든 그 시험지 문항 {len(rows)}개에서만 뽑아요")
         added = {p.get("label", ""): qb_voca_choice_words(rows, lab_map.get(p.get("label", ""), [p.get("label", "")]),
                                                           set() if only else {str(w.get("word", "")).strip().lower() for w in (p.get("data") or {}).get("voca_list", [])})
                  for p in sel_passages}
