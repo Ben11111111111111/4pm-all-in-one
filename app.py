@@ -8198,6 +8198,95 @@ def qb_answer_parts(qs: List[Dict], meta: Dict, head: str = "정답 및 해설",
     o.append("</div></div>")
     return o
 
+# ---- VISION 내지 쪽마다 머리말·꼬리말·로고 (2026-11-12) ----
+#   인쇄하면 문제·해설 쪽마다 위에 머리말 로고+머리말 글 | 학원명·머리말 오른쪽 칸·제목, 아래에 꼬리말 로고+꼬리말 글 | 쪽 번호
+#   크롬 인쇄 여백 칸(@page 머리·꼬리 칸, 크롬·엣지 131 이후)에 넣음 — 다른 교재처럼 표의 머리·꼬리 줄로 반복하면
+#   2단 문제 배치(column)가 든 표를 크롬이 끝에 빈 쪽 십여 장으로 늘려서 (2026-11-12 시험)
+#   표지·소개·뒤표지 쪽(@page vcover·vintro)에는 안 나옴 · 화면(미리 보기)에는 인쇄 칸이 안 보여서 같은 모양 띠를 화면에서만 보여 줌
+#   meta['run_head']가 없으면(예전 시험지) 예전과 글자 하나까지 같음
+QB_RUN_HEAD_DEFAULT = "PQRS영쌤 | ANATOMY VISION"
+QB_RUN_FOOT_DEFAULT = "PQRS 영T 자체제작 · 장기동 포피엠입시영어 031-991-1199"
+
+def qb_run_settings() -> Dict:
+    """⚙️ 설정의 VISION 머리말·꼬리말 글·쪽 번호 + 머리말·꼬리말 로고 (올린 로고만 — 기본 로고 주소는 열리지 않아서 로고 자리를 비움)"""
+    s = globals().get("app_settings") or {}
+    def logo(k):
+        v = str(s.get(k) or "")
+        return v if re.fullmatch(r"data:image/[a-z+.-]+;base64,[A-Za-z0-9+/=]+", v) else ""
+    return {"head": str(s.get("vision_head") or "").strip() or QB_RUN_HEAD_DEFAULT,
+            "foot": str(s.get("vision_foot") or "").strip() or QB_RUN_FOOT_DEFAULT,
+            "pageno": s.get("vision_pageno", True) is not False, "h_logo": logo("logo_h"), "f_logo": logo("logo_f")}
+
+def _qb_logo_ratio(data_url: str) -> float:
+    """로고 가로÷세로 (PNG 머리 정보로 · 모르면 1)"""
+    try:
+        raw = base64.b64decode(data_url.split(",", 1)[1][:64] + "==")
+        if raw[:8] == b"\x89PNG\r\n\x1a\n":
+            w, h = int.from_bytes(raw[16:20], "big"), int.from_bytes(raw[20:24], "big")
+            if w > 0 and h > 0:
+                return max(0.4, min(3.0, w / h))
+    except Exception:
+        pass
+    return 1.0
+
+def _css_q(t: str) -> str:
+    """CSS content 글자: 역슬래시·따옴표·꺾쇠는 이스케이프, 줄바꿈은 \\A"""
+    t = str(t).replace("\\", "\\\\").replace('"', '\\"').replace("<", "\\3c ").replace(">", "\\3e ").replace("\r", "")
+    return '"' + t.replace("\n", "\\A ") + '"'
+
+def qb_run_parts(meta: Dict, title: str = "") -> (str, str, str, str):
+    """(인쇄 칸 CSS, 화면용 머리 띠, 화면용 꼬리 띠, 인쇄 막대 안내) — meta['run_head']가 없으면 모두 빈 글자"""
+    if not meta.get("run_head"):
+        return "", "", "", ""
+    e = html.escape
+    cfg = qb_run_settings()
+    r1 = " | ".join(x for x in (str(meta.get("academy") or "").strip(), str(meta.get("kind") or "").strip()) if x)
+    r2 = str(title or meta.get("title") or "").strip()
+    right = "\n".join(x for x in (r1, r2) if x)
+    # 로고 그림은 :root 변수에 한 번만 (인쇄 칸·화면 띠가 같이 씀 — 그림을 두 번 넣으면 파일이 그만큼 커져서)
+    hl = fl = root = ""
+    hr_, fr_ = _qb_logo_ratio(cfg["h_logo"]) if cfg["h_logo"] else 1, _qb_logo_ratio(cfg["f_logo"]) if cfg["f_logo"] else 1
+    if cfg["h_logo"]:
+        root += f"--qb-hl: url('{cfg['h_logo']}'); "
+        hl = f"background-image: var(--qb-hl); background-repeat: no-repeat; background-position: left 0 bottom 1.4mm; background-size: auto 8mm; padding-left: {8 * hr_ + 2:.1f}mm;"
+    if cfg["f_logo"]:
+        root += f"--qb-fl: url('{cfg['f_logo']}'); "
+        fl = f"background-image: var(--qb-fl); background-repeat: no-repeat; background-position: left 0 top 1.2mm; background-size: auto 5mm; padding-left: {5 * fr_ + 2.6:.1f}mm;"
+    off = " ".join(f"@{b} {{ content: none; }}" for b in ("top-left", "top-center", "top-right", "bottom-left", "bottom-center", "bottom-right"))
+    top = "vertical-align: bottom; padding-bottom: 2.2mm; margin-bottom: 3mm; border-bottom: 1.6pt solid #0047AB; font-family: 'Noto Sans KR', sans-serif; color: #0047AB;"
+    bot = "vertical-align: top; margin-top: 3mm; padding-top: 1.6mm; border-top: .6pt solid #cbd5e1; font-family: 'Noto Sans KR', sans-serif;"
+    num = 'counter(page)' if cfg["pageno"] else '""'
+    css = (f":root {{ {root}}}" if root else "") + f"""
+@page {{ margin: 21mm 12mm 17mm 12mm;
+  @top-left {{ content: {_css_q(cfg['head'])}; {top} font-weight: 900; font-size: 11pt; white-space: pre-line; {hl} }}
+  @top-right {{ content: {_css_q(right)}; {top} font-weight: 700; font-size: 7.6pt; line-height: 1.35; text-align: right; white-space: pre-line; }}
+  @bottom-left {{ content: {_css_q(cfg['foot'])}; {bot} font-size: 7.3pt; color: #64748b; white-space: pre-line; {fl} }}
+  @bottom-right {{ content: {num}; {bot} font-family: 'Inter', 'Noto Sans KR', sans-serif; font-weight: 800; font-size: 8.5pt; color: #0047AB; text-align: right; }}
+}}
+@page vcover {{ {off} }}
+@page vintro {{ {off} }}
+.rs-head {{ display: flex; justify-content: space-between; align-items: flex-end; gap: 10px; border-bottom: 2px solid #0047AB; padding-bottom: 6px; margin: 0 0 10px;
+  font-family: 'Noto Sans KR', sans-serif; color: #0047AB; }}
+.rs-head .l {{ display: flex; align-items: flex-end; gap: 6px; font-weight: 900; font-size: 11pt; white-space: pre-line; }}
+.rs-head .l i {{ display: inline-block; height: 30px; width: {30 * hr_:.0f}px; background: var(--qb-hl) no-repeat center / contain; }}
+.rs-head .r {{ text-align: right; font-weight: 700; font-size: 7.6pt; line-height: 1.35; white-space: pre-line; }}
+.rs-foot {{ display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; border-top: 1px solid #cbd5e1; padding-top: 5px; margin: 14px 0 0;
+  font-family: 'Noto Sans KR', sans-serif; font-size: 7.3pt; color: #64748b; }}
+.rs-foot .l {{ display: flex; align-items: flex-start; gap: 5px; white-space: pre-line; }}
+.rs-foot .l i {{ display: inline-block; height: 19px; width: {19 * fr_:.0f}px; background: var(--qb-fl) no-repeat center / contain; }}
+.rs-foot .n {{ font-family: 'Inter', 'Noto Sans KR', sans-serif; font-weight: 800; font-size: 8.5pt; color: #0047AB; }}
+.rs-tip {{ display: block; text-align: center; font-family: 'Noto Sans KR', sans-serif; font-size: 7.5pt; color: #94a3b8; margin: 2px 0 8px; }}
+.printbar .rs-note {{ font-family: 'Noto Sans KR', sans-serif; font-size: 11.5px; color: #64748b; margin-right: 10px; }}
+@media print {{ .rs-head, .rs-foot, .rs-tip {{ display: none !important; }} }}
+"""
+    head = (f"<div class='rs-head'><div class='l'>{'<i></i>' if cfg['h_logo'] else ''}<span>{e(cfg['head'])}</span></div>"
+            f"<div class='r'>{e(r1)}{'<br>' if r1 and r2 else ''}{e(r2)}</div></div>"
+            "<span class='rs-tip'>▲ 인쇄하면 문제·해설 쪽마다 맨 위에 이 머리말, 맨 아래에 꼬리말이 들어가요 (표지·소개 쪽은 빼고)</span>")
+    foot = (f"<div class='rs-foot'><div class='l'>{'<i></i>' if cfg['f_logo'] else ''}<span>{e(cfg['foot'])}</span></div>"
+            f"<div class='n'>{'쪽 번호' if cfg['pageno'] else ''}</div></div>")
+    note = "<span class='rs-note'>인쇄 창 '설정 더보기'에서 '머리글과 바닥글'은 꺼 주세요 (날짜·주소가 머리말과 겹쳐요)</span>"
+    return css, head, foot, note
+
 def render_qbank_exam(qs: List[Dict], meta: Dict, gidx: Dict[str, List[Dict]]) -> str:
     def tag_of(r):
         """1줄: 지문 · 유형 + [실제 기출]/[변형 · ○○고 스타일 · 난이도]  2줄: 기출 이력 (같은 시험은 번호를 묶고, 같은 유형은 굵게)"""
@@ -8242,7 +8331,8 @@ def render_qbank_exam(qs: List[Dict], meta: Dict, gidx: Dict[str, List[Dict]]) -
     blank_toggle = ("<label title='양면 인쇄 때 뒤표지가 맨 뒷면에 오게 하려면 전체 쪽수가 짝수여야 해요'>"
                     "<input type='checkbox' onchange=\"document.body.classList.toggle('addblank', this.checked)\"> "
                     "인쇄 미리보기 쪽수가 홀수면 체크 → 뒤표지 앞에 빈 쪽 넣기</label>") if book else ""
-    o = [f"<div class='printbar'>{blank_toggle}<button onclick='window.print()'>🖨️ 인쇄 / PDF로 저장</button></div>{front}<div class='sheet'>",
+    run_css, run_head, run_foot, run_note = qb_run_parts(meta)
+    o = [f"<div class='printbar'>{run_note}{blank_toggle}<button onclick='window.print()'>🖨️ 인쇄 / PDF로 저장</button></div>{front}<div class='sheet'>{run_head}",
          f"""<div class='head'><div class='top'><div class='brand'><b>PQRS</b>영T {html.escape(meta.get('brand', '변형문제 TEST'))}</div><div class='kind'>{html.escape(meta.get('kind', ''))}</div></div>
 <h1>{html.escape(meta.get('title', ''))}</h1><div class='sub'>{html.escape(meta.get('sub', ''))}</div>
 <div class='info'><div>반 :</div><div>번호 :</div><div>이름 :</div><div>점수 :</div></div></div><div class='cols'>"""]
@@ -8291,9 +8381,9 @@ def render_qbank_exam(qs: List[Dict], meta: Dict, gidx: Dict[str, List[Dict]]) -
         o.append("<div class='ans-page vocab-page'><div class='anshead'>선지 어휘 정리</div>"
                  "<div class='keynote'>문제 선택지·&lt;보기&gt;에 나온 어휘 · 오른쪽 숫자 = 나온 문항 번호</div>"
                  f"<div class='vocab-cols'>{tbl(vs[:half])}{tbl(vs[half:])}</div></div>")
-    o.append("<div class='foot'>PQRS 영T 자체제작 · 장기동 포피엠입시영어 031-991-1199</div></div>")
+    o.append(f"{run_foot}</div>" if run_css else "<div class='foot'>PQRS 영T 자체제작 · 장기동 포피엠입시영어 031-991-1199</div></div>")
     o.append(back)
-    css = QB_EXAM_CSS + (QB_BOOK_CSS if book else "") + (QB_VOCAB_CSS if meta.get("vocab") else "")
+    css = QB_EXAM_CSS + (QB_BOOK_CSS if book else "") + (QB_VOCAB_CSS if meta.get("vocab") else "") + run_css
     return f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>{html.escape(meta.get('title', '변형문제'))}</title><style>{css}</style></head><body>{''.join(o)}</body></html>"
 
 # ---- 화면 ----
@@ -8511,14 +8601,15 @@ def _qb_answer_book_page(sets: List[Dict], meta: Dict, body: List[str], with_ans
                         "인쇄 미리보기 쪽수가 홀수면 체크 → 뒤표지 앞에 빈 쪽 넣기</label>")
     toc = "".join(f"<tr><td class='n'>{k}</td><td>{e(x.get('title') or f'시험지 {k}')}</td><td class='n'>{len(x.get('qs') or [])}문항</td></tr>"
                   for k, x in enumerate(sets, 1))
+    run_css, run_head, run_foot, run_note = qb_run_parts(meta, meta.get("title") or what + " 합본")
     cover = (f"<div class='ab-cover'><div class='top'><div><b>PQRS</b>영T {e(what)} 합본</div><div>{e(meta.get('academy', ''))}</div></div>"
              f"<h1>{e(meta.get('title') or what + ' 합본')}</h1><div class='sub'>시험지 {len(sets)}권 · 총 {sum(len(x.get('qs') or []) for x in sets)}문항 · "
              f"{how} 실었어요</div>"
              f"<table class='ab-toc'><tr><th>순서</th><th>시험지</th><th>문항</th></tr>{toc}</table>"
              "<div class='foot'>PQRS 영T 자체제작 · 장기동 포피엠입시영어 031-991-1199</div></div>")  # 맨 뒤에 두면 한 줄만 다음 쪽으로 넘어가기도 해서 목차 칸 안에
     return (f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>{e(meta.get('title') or what + ' 합본')}</title>"
-            f"<style>{QB_EXAM_CSS}{QB_ANSBOOK_CSS}{QB_BOOK_CSS if book else ''}</style></head><body>"
-            f"<div class='printbar'>{blank_toggle}<button onclick='window.print()'>🖨️ 인쇄 / PDF로 저장</button></div>{front}<div class='sheet'>{cover}{''.join(body)}</div>{back}</body></html>")
+            f"<style>{QB_EXAM_CSS}{QB_ANSBOOK_CSS}{QB_BOOK_CSS if book else ''}{run_css}</style></head><body>"
+            f"<div class='printbar'>{run_note}{blank_toggle}<button onclick='window.print()'>🖨️ 인쇄 / PDF로 저장</button></div>{front}<div class='sheet'>{run_head}{cover}{''.join(body)}{run_foot}</div>{back}</body></html>")
 
 
 def render_answer_book_ui(sb, text_model: str, academy_name: str, school_name: str, labels_all: set = None):
@@ -8556,6 +8647,8 @@ def render_answer_book_ui(sb, text_model: str, academy_name: str, school_name: s
                                               "문항마다 해설 + 해석: 권마다 정답표를 싣고, 문항마다 해설 바로 아래에 그 문항 선지 해석"), "kind")
         title = st.text_input("합본 제목", placeholder="예: 제일고1학년 기말대비 VISION 정답·해설·해석", key="qb_ab_title")
         as_book = st.checkbox("ANATOMY VISION 책으로 (시험지와 같은 앞표지·사용법·제작 소개·출제자의 시선·뒤표지)", value=True, key="qb_ab_book")
+        ab_run = st.checkbox("쪽마다 머리말·꼬리말·로고", value=True, key="qb_ab_run",
+                             help="인쇄하면 해설 쪽마다 위에 머리말 로고·머리말, 아래에 꼬리말 로고·꼬리말·쪽 번호 (표지·소개 쪽은 빼고). 글은 ⚙️ 설정 → 'VISION 문제지·해설지 머리말·꼬리말', 로고는 ⚙️ 설정 → 로고")
         if not pick:
             return
         qids_all = [q for k in pick for q in recs[k][1].get("qids", [])]
@@ -8600,7 +8693,7 @@ def render_answer_book_ui(sb, text_model: str, academy_name: str, school_name: s
                 tr = qb_choice_trans(sb, [x for x in raw if qb_trans_cached(x) is not None], model, []) if want_tr else {}  # 저장된 해석만 (AI 호출 없음)
                 sets.append({"title": r.get("title") or r.get("name") or "시험지", "qs": qb_display_fix(raw), "qs_tr": raw,
                              "meta": r.get("meta") or {}, "trans": tr})
-            bmeta = {"title": title.strip(), "academy": academy_name, "answers": want_ans, "trans": want_tr, "layout": layout,
+            bmeta = {"title": title.strip(), "academy": academy_name, "answers": want_ans, "trans": want_tr, "layout": layout, "run_head": bool(ab_run),
                      "kind": next((str((x.get("meta") or {}).get("kind") or "") for x in sets if (x.get("meta") or {}).get("kind")), "")}
             if as_book:
                 gmap = load_gichul_map()
@@ -8632,6 +8725,8 @@ def render_exam_archive(sb, labels_all: set, text_model: str, academy_name: str,
         pick = a1.selectbox("시험지 고르기 (📥 다운로드해서 보관된 것 · 💾 문항 기록 저장한 것)", list(names), format_func=names.get, key="qb_arch_pick")
         src, rid = pick.split(":", 1)
         rec = next(r for s_, r in items if s_ == src and r["id"] == rid)
+        arch_run = st.checkbox("쪽마다 머리말·꼬리말·로고", value=bool((rec.get("meta") or {}).get("run_head")), key=f"qb_arch_run_{pick}",
+                               help="처음 만들 때 켰던 시험지는 켜진 채로 보여요. 이 기능 전에 만든 시험지는 꺼져 있어서 처음 모양 그대로 나오고, 켜면 머리말·꼬리말을 넣어 다시 만들어요")
         if a2.button("📄 다시 만들기 (AI 비용 없음)", type="primary", use_container_width=True, key="qb_arch_make"):
             got = {r["id"]: r for r in qb_fetch_ids(sb, rec["qids"])}
             qs = qb_display_fix([got[i] for i in rec["qids"] if i in got])  # 처음 시험지와 같은 정리 (순서 문항 선택지 등)
@@ -8639,6 +8734,7 @@ def render_exam_archive(sb, labels_all: set, text_model: str, academy_name: str,
             meta["title"] = meta.get("title") or rec.get("title") or rec.get("name") or "변형문제"
             meta["academy"] = academy_name
             meta["sub"] = meta.get("sub") or qb_exam_sub(qs)
+            meta["run_head"] = bool(arch_run)
             gmap = load_gichul_map()
             gidx = gichul_index(gmap, labels_all)
             if meta.pop("as_book", True):
@@ -9719,12 +9815,15 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
                                                 label_visibility="collapsed")
             kind = _qb_row("머리말 오른쪽").text_input("머리말 오른쪽", value=school_name, key="qb_exam_kind", label_visibility="collapsed")
             o1, o2, o3, o4 = _qb_row("표시").columns(4)
-            o5, o6, _ = _qb_row("").columns([1, 1, 2])
+            o5, o6, o7, _ = _qb_row("").columns([1, 1, 1, 1])
             show_tag = o1.checkbox("문항 아래 출처·구분", value=True, key="qb_exam_tag", help="실제 기출/변형, 학교 스타일, 난이도")
             show_gichul = o2.checkbox("같은 지문 기출 이력", value=True, key="qb_exam_gichul", help="운양고·제일고에서 이 지문이 나온 시험·번호 전부")
             with_answers = o3.checkbox("마지막에 정답·해설", value=True, key="qb_exam_ans")
             show_style = o5.checkbox("변형문제에 학교 스타일 표시", value=True, key="qb_exam_style", help="끄면 '변형 · 상'처럼 난이도만 나와요")
             show_time = o6.checkbox("문항별 권장 풀이 시간", value=True, key="qb_exam_time", help="지문 단어 수·유형으로 계산 (AI 비용 없음)")
+            run_head = o7.checkbox("쪽마다 머리말·꼬리말·로고", value=True, key="qb_exam_run",
+                                   help="인쇄하면 문제·해설 쪽마다 위에 머리말 로고·머리말과 학원명·머리말 오른쪽·제목, 아래에 꼬리말 로고·꼬리말·쪽 번호 (표지·소개 쪽은 빼고). "
+                                        "글은 ⚙️ 설정 → 'VISION 문제지·해설지 머리말·꼬리말', 로고는 ⚙️ 설정 → 로고")
             as_book = o4.checkbox("ANATOMY VISION 책으로", value=True, key="qb_exam_book",
                                   help="앞표지·사용법·제작 소개 2쪽을 앞에, 저작권·뒤표지를 뒤에 붙여 양면 인쇄하면 한 권의 책처럼 나와요")
         b1, b2 = st.columns([2, 1])
@@ -9778,7 +9877,7 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
                             + (" · ".join(f"{lv} {lv_got[lv]}" for lv in QB_LEVELS if lv_got.get(lv)) if lv_mix else ", ".join(e_levels))
                             + ")" if e_real != "기출만" else "",
                             f"총 {len(picked)}문항"] if x), "show_tag": show_tag, "show_gichul": show_gichul, "with_answers": with_answers,
-                        "academy": academy_name, "show_style": show_style, "show_time": show_time}
+                        "academy": academy_name, "show_style": show_style, "show_time": show_time, "run_head": bool(run_head)}
                 gmap = load_gichul_map()
                 gidx = gichul_index(gmap, labels_all)
                 if as_book:
@@ -12523,6 +12622,23 @@ def page_settings():
                     app_settings.pop(f"logo_{s}_hash", None)
                 save_app_settings(app_settings)
                 st.rerun()
+
+    with st.container(border=True):
+        st.markdown("##### 📄 VISION 문제지·해설지 머리말·꼬리말")
+        st.caption("ANATOMY VISION 시험지와 정답·해설 합본에서 '쪽마다 머리말·꼬리말·로고'를 켜면, 인쇄할 때 문제·해설 쪽마다 위에 머리말 로고와 아래 글, "
+                   "아래에 꼬리말 로고와 아래 글이 들어가요 (표지·소개 쪽은 빼고). 머리말 오른쪽에는 학원명 | 머리말 오른쪽 칸 글과 시험지 제목이 저절로 들어가요. "
+                   "비워 두면 기본 문구가 들어가요.")
+        v1, v2 = st.columns(2)
+        new_vh = v1.text_input("머리말 (로고 옆)", app_settings.get("vision_head", ""), placeholder=QB_RUN_HEAD_DEFAULT, key="set_vision_head")
+        new_vf = v2.text_input("꼬리말", app_settings.get("vision_foot", ""), placeholder=QB_RUN_FOOT_DEFAULT, key="set_vision_foot")
+        new_vp = st.checkbox("꼬리말 오른쪽에 쪽 번호 (표지부터 센 번호)", value=app_settings.get("vision_pageno", True) is not False, key="set_vision_pageno")
+        for k, v in [("vision_head", new_vh.strip()), ("vision_foot", new_vf.strip())]:
+            if app_settings.get(k, "") != v:
+                app_settings[k] = v
+                settings_changed = True
+        if (app_settings.get("vision_pageno", True) is not False) != new_vp:
+            app_settings["vision_pageno"] = bool(new_vp)
+            settings_changed = True
 
     with st.container(border=True):
         st.markdown("##### ⏱️ 생성 속도")
