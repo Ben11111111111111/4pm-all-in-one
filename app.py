@@ -523,6 +523,9 @@ CORE_FILE = os.path.join(BASE_DIR, "core_library.json")
 VOCA_FILE = os.path.join(BASE_DIR, "voca_library.json")
 PAST_VOCA_FILE = os.path.join(BASE_DIR, "past_voca_library.json")
 MOCK_FILE = os.path.join(BASE_DIR, "mock_exam_library.json")
+SUPP_TYPE = "supplement"   # 원문 라이브러리 부교재(올림포스 등) 지문의 source_type (2026-11-13~). 없음/'mock' = 모의고사, 'textbook' = 교과서
+SRC_KINDS = ["모의고사", "교과서", "부교재"]
+LABEL_RENAME_LOG_FILE = os.path.join(BASE_DIR, "label_rename_log.json")  # 지문 이름 바꾼 기록 (이어서 마치기·되돌리기)
 DNA_FILE = os.path.join(BASE_DIR, "exam_dna_rules.json")
 IMAGE_DIR = os.path.join(BASE_DIR, "image_assets")
 os.makedirs(IMAGE_DIR, exist_ok=True)
@@ -2650,6 +2653,8 @@ def render_voca(p):
 
         syn_chips = []
         for s in item.get("synonyms", []):
+            if not isinstance(s, dict):
+                continue   # AI가 낱말 대신 글자 하나('x')를 넣은 기록이 있었음 ([2026년 2월 고2] 19번 resist) → 그 칸만 건너뜀
             sw = esc(s.get("word", ""))
             spron = esc(s.get("pronunciation", ""))
             smean = esc(s.get("meaning", ""))
@@ -2663,6 +2668,8 @@ def render_voca(p):
 
         ant_chips = []
         for a in item.get("antonyms", []):
+            if not isinstance(a, dict):
+                continue
             aw = esc(a.get("word", ""))
             apron = esc(a.get("pronunciation", ""))
             amean = esc(a.get("meaning", ""))
@@ -6787,7 +6794,8 @@ QB_LINK_MODES = {"따로": "지문마다 따로", "join": "🔗 이어 붙이기
 def qb_link_label(labels: List[str], mode: str) -> str:
     sep = QB_LINK_PAIR if mode == "pair" else QB_LINK_JOIN
     ms = [re.match(r"^(\[[^\]]+\]\s*)(.+)$", l) for l in labels]
-    if all(ms) and len({m.group(1) for m in ms}) == 1:
+    # 부교재 번호가 '[문제-19] 11-8'처럼 [ 로 시작하면 줄여 쓰지 않음 (qb_link_parts가 [ 로 시작하는 조각은 완전한 이름으로 읽음)
+    if all(ms) and len({m.group(1) for m in ms}) == 1 and not any(m.group(2).startswith("[") for m in ms[1:]):
         return ms[0].group(1) + sep.join(m.group(2) for m in ms)
     return sep.join(labels)
 
@@ -9137,7 +9145,11 @@ def render_qb_import(sb, mock_lib: List[Dict]):
 
 
 def _qb_is_mock(p: Dict) -> bool:
-    return bool(p.get("year") and p.get("month"))
+    return bool(p.get("year") and p.get("month")) and p.get("source_type") not in ("textbook", SUPP_TYPE)
+
+def _qb_src(p: Dict) -> str:
+    """지문 고르기의 '출처': 모의고사·교과서·부교재 (예전엔 교과서·부교재를 한 칸으로 보였음)"""
+    return "모의고사" if _qb_is_mock(p) else ("부교재" if p.get("source_type") == SUPP_TYPE else "교과서")
 
 def _qb_group_name(ps: List[Dict]) -> str:
     p = ps[0]
@@ -9497,18 +9509,26 @@ def _qb_passage_picker(key: str, mock_lib: List[Dict], counts: Dict[str, int]) -
         set_chosen([l for l in st.session_state[key] if l not in opts] + list(st.session_state.get(pkey) or []))
 
     with st.container(key=f"qb_card_{key}"):
-        srcs = [s for s in ("모의고사", "교과서·부교재") if any(_qb_is_mock(ps[0]) == (s == "모의고사") for ps in groups.values())]
+        srcs = [s for s in SRC_KINDS if any(_qb_src(ps[0]) == s for ps in groups.values())]
         st.markdown("<div class='qb-title'>지문 고르기<span>번호 옆 작은 숫자 = 쌓인 문제 수 (이어 붙인 지문 문제 포함)</span></div>", unsafe_allow_html=True)
+        if st.session_state.get(f"{key}_src") not in srcs:
+            st.session_state.pop(f"{key}_src", None)   # 예전 '교과서·부교재' 칸을 고른 채 남아 있던 창
         src = _qb_row("출처").segmented_control("출처", srcs, default=srcs[0], key=f"{key}_src", label_visibility="collapsed") or srcs[0]
-        gks = [g for g, ps in groups.items() if _qb_is_mock(ps[0]) == (src == "모의고사")]
+        gks = [g for g, ps in groups.items() if _qb_src(ps[0]) == src]
         grade = ""
-        if src == "모의고사":
+        if src in ("모의고사", "부교재"):
             grades = sorted({str(groups[g][0].get("grade", "")) for g in gks})
-            grade = _qb_row("학년").segmented_control("학년", grades, default=grades[0], key=f"{key}_grade", label_visibility="collapsed") or grades[0]
-            gks = sorted([g for g in gks if str(groups[g][0].get("grade", "")) == grade],
-                         key=lambda g: (int(groups[g][0]["year"]), int(groups[g][0]["month"])), reverse=True)
+            gkey = f"{key}_grade" if src == "모의고사" else f"{key}_grade_supp"
+            if st.session_state.get(gkey) not in grades:
+                st.session_state.pop(gkey, None)
+            grade = _qb_row("학년").segmented_control("학년", grades, default=grades[0], key=gkey, label_visibility="collapsed") or grades[0]
+            gks = [g for g in gks if str(groups[g][0].get("grade", "")) == grade]
+            if src == "모의고사":
+                gks.sort(key=lambda g: (int(groups[g][0]["year"]), int(groups[g][0]["month"])), reverse=True)
+            else:
+                gks.sort(key=natural_sort_key)
         chosen = st.session_state[key]
-        exam = _qb_row("시험" if src == "모의고사" else "단원").pills(
+        exam = _qb_row({"모의고사": "시험", "부교재": "교재"}.get(src, "단원")).pills(
             "시험", gks, default=gks[0], key=f"{key}_exam_{src}_{grade}", label_visibility="collapsed",
             format_func=lambda g: _qb_group_name(groups[g])) or gks[0]
 
@@ -10064,7 +10084,40 @@ def pdf_to_part(uploaded):
     """업로드한 PDF를 AI에 보낼 파일로 (큰 PDF는 Gemini일 때 자동으로 파일 업로드 방식으로 보냄)"""
     return AiFile(uploaded.getvalue(), "application/pdf", uploaded.name)
 
-def extract_mock_exam_passages(pdf_file, answer_file, model_name: str) -> Dict:
+SUPP_RESTORE_PROMPT = """너는 대한민국 고등학교 영어 부교재(EBS 올림포스·수능특강, 학교·학원 프린트 등) 원문 복원 전문가다.
+업로드된 부교재 PDF{answer_note}에 실린 **모든 영어 독해 지문**을 교재에 실린 순서대로 꺼내, 문제로 변형되기 전의 **정답이 모두 반영된 원래 영어 원문**으로 복원해 JSON으로 반환하라. 듣기 문항, 단어 목록, 해설·정답 쪽의 글은 제외한다.
+
+[번호]
+- number에는 교재에 적힌 문항 번호를 그대로 적는다 (예: 1, 2, 01, 3-2). 번호가 안 보이면 1부터 차례대로 적는다.
+- 지문 하나로 여러 문항을 푸는 장문은 지문 하나로 만들고 number를 '41~42'처럼 적는다.
+- 지문 옆에 원래 출처(예: 2023년 9월 고2 29번)가 적혀 있으면 note 맨 앞에 그 출처를 적는다.
+
+[정답 출처]
+- 별도 정답표 파일이 있으면 그 정답을 최우선으로 사용하라.
+- 정답표 파일이 없으면 PDF 안(보통 뒤쪽)의 정답·해설을 찾아 사용하라.
+- 어디에도 정답이 없으면 직접 풀어서 복원하되, 해당 문항의 needs_review를 true로 하고 answer_key_found는 false로 하라.
+
+[유형별 복원 규칙]
+- 빈칸 추론: 빈칸 자리에 정답 선지의 표현을 문법적으로 자연스럽게 넣는다.
+- 무관한 문장: 정답에 해당하는 흐름과 무관한 문장을 삭제한다.
+- 글의 순서: 주어진 글 뒤에 (A)(B)(C)를 정답 순서대로 이어 붙인다.
+- 문장 삽입: 주어진 문장을 정답 위치(①~⑤)에 넣는다.
+- 요약문: 본문만 원문으로 남기고 요약문 문장은 넣지 않는다. (A)(B) 정답은 note에 적는다.
+- 어법: 틀린 밑줄 표현을 올바른 형태로 고친다. 나머지 밑줄 표현은 그대로 둔다.
+- 어휘: 문맥상 부적절한 낱말을 문맥에 맞는 낱말로 바꾼다.
+- 함축 의미 등 밑줄 문항: 밑줄 표시만 없애고 문장은 그대로 둔다.
+- 장문(여러 단락 배열): (A) 다음에 (B)(C)(D)를 정답 순서대로 배열한다.
+- 도표·안내문·내용 일치 문항도 지문 텍스트를 그대로 복원한다.
+
+[공통 규칙]
+- 발문(문제 지시문), 선택지, 문항 번호, 원문자(①~⑤), (A)(B)(C)/(a)~(e) 표시, 밑줄, 하단 어휘 각주(*표시)는 모두 제거한다.
+- 원문 문장을 절대 요약·의역·생략하지 말고 철자와 구두점을 교재 그대로 옮긴다.
+- 문단 구분은 빈 줄로 표시한다.
+- note에는 어떤 정답을 어떻게 반영했는지 한국어로 짧게 적는다.
+- exam_year, exam_month는 빈 글자로 두고, grade는 표지에서 알 수 있으면 적는다 (예: 고2)."""
+
+def extract_mock_exam_passages(pdf_file, answer_file, model_name: str, prompt: str = None) -> Dict:
+    """prompt: 비우면 모의고사(18~45번) 복원 규칙, SUPP_RESTORE_PROMPT면 부교재(교재 번호 그대로·모든 독해 지문)"""
     contents = [pdf_to_part(pdf_file)]
     answer_note = ""
     if answer_file is not None:
@@ -10073,7 +10126,7 @@ def extract_mock_exam_passages(pdf_file, answer_file, model_name: str) -> Dict:
         answer_note = f"(파일명: {pdf_file.name})과 별도 정답표 파일(파일명: {answer_file.name})"
     else:
         answer_note = f"(파일명: {pdf_file.name})"
-    contents.append(MOCK_RESTORE_PROMPT.format(answer_note=answer_note))
+    contents.append((prompt or MOCK_RESTORE_PROMPT).format(answer_note=answer_note))
 
     for attempt in range(4):
         try:
@@ -10465,13 +10518,515 @@ def render_mock_image_section(selected: List[Dict]):
                         else:
                             st.error("❌ 이미지를 읽지 못했습니다.")
 
+# ---- 5-D. 부교재 (EBS 올림포스·수능특강·학교 프린트 등) — 2026-11-13 ----
+#   연도·월이 없는 지문 묶음: 교재 이름·학년을 직접 정하고, 지문 번호는 엑셀에서 복사해 한꺼번에 넣음 (나중에도 바꿀 수 있음)
+#   저장 칸: source_type=SUPP_TYPE, book(교재 이름), grade, number · 지문 이름 '[교재 이름] 번호' (번호가 숫자뿐이면 '번'을 붙임)
+#   예전 지문은 그대로: source_type 없음/'mock' = 모의고사, 'textbook' = 교과서
+def src_kind(p: Dict) -> str:
+    """원문 라이브러리 지문의 종류: 모의고사·교과서·부교재"""
+    t = p.get("source_type")
+    return "교과서" if t == "textbook" else ("부교재" if t == SUPP_TYPE else "모의고사")
+
+def supp_clean_name(name) -> str:
+    return re.sub(r"\s+", " ", str(name or "")).strip()
+
+def supp_exam_key(name) -> str:
+    return f"[{supp_clean_name(name)}]"
+
+def supp_clean_num(num) -> str:
+    """붙여넣은 번호 정리: 앞뒤 빈칸·겹친 빈칸을 없애고, '19번'·'41 ~ 42번'처럼 숫자뿐이면 '번'을 뗌 (이름에 붙일 때 다시 붙임)"""
+    n = re.sub(r"\s+", " ", str(num if num is not None else "")).strip()
+    if n.lower() in ("nan", "none"):
+        return ""
+    m = re.fullmatch(r"(\d+)(?:\s*~\s*(\d+))?\s*번", n)
+    return (m.group(1) + (f"~{m.group(2)}" if m.group(2) else "")) if m else n
+
+def supp_num_text(num) -> str:
+    """칩·이름에 보일 번호: 숫자뿐이면 '19번', 아니면 적은 그대로 ('[문제-19] 11-8')"""
+    n = str(num or "").strip()
+    return f"{n}번" if re.fullmatch(r"\d+(~\d+)?", n) else n
+
+def supp_label(ekey: str, num) -> str:
+    return f"{ekey} {supp_num_text(num)}"
+
+def supp_name_problem(name) -> str:
+    n = supp_clean_name(name)
+    if not n:
+        return "교재 이름을 적어 주세요."
+    if "[" in n or "]" in n:
+        return "교재 이름에는 [ ] 를 쓸 수 없어요."
+    if QB_LINK_JOIN in n or QB_LINK_PAIR in n:
+        return "교재 이름에는 ' + '·' & '를 쓸 수 없어요 (두 지문을 묶은 이름에 쓰는 글자예요)."
+    if len(n) > 40:
+        return "교재 이름은 40글자까지 쓸 수 있어요."
+    return ""
+
+def supp_num_problem(num) -> str:
+    n = str(num or "").strip()
+    if QB_LINK_JOIN in n or QB_LINK_PAIR in n:
+        return f"번호 '{n}' — ' + '·' & '는 번호에 쓸 수 없어요 (두 지문을 묶은 이름에 쓰는 글자예요)."
+    if len(n) > 40:
+        return f"번호 '{n[:20]}…' — 번호는 40글자까지 쓸 수 있어요."
+    return ""
+
+def parse_pasted_table(text) -> List[List[str]]:
+    """엑셀에서 복사한 글 → 줄마다 칸 목록 (탭으로 나뉨, 따옴표로 묶인 여러 줄 칸은 한 칸). 빈 줄은 뺌"""
+    import csv
+    t = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    try:
+        rows = list(csv.reader(io.StringIO(t), delimiter="\t"))
+        if any(len(c) > 8000 for r in rows for c in r):
+            raise ValueError("따옴표가 닫히지 않음")
+    except Exception:
+        rows = [l.split("\t") for l in t.split("\n")]
+    return [[c.strip() for c in r] for r in rows if any(c.strip() for c in r)]
+
+def _paste_grams(s, n: int = 4) -> set:
+    w = re.findall(r"[a-z0-9]+", str(s or "").lower())
+    return {tuple(w[i:i + n]) for i in range(len(w) - n + 1)} if len(w) >= n else ({tuple(w)} if w else set())
+
+_PASTE_NUM_HEADS = ("name", "번호", "문항번호", "문항 번호", "문항", "이름", "number", "no", "no.")
+
+def paste_numbers_resolve(text, texts: List[str], key: str):
+    """붙여넣은 엑셀 칸 → (지문마다 새 번호(None = 그대로 둠), 안내 글들, 문제 글들)
+    · 번호 칸만 복사 (한 줄에 하나, 또는 가로 한 줄) → 아래 표 순서대로 (개수가 같아야 함)
+    · 지문 칸과 번호 칸을 함께 복사 → 지문 글(4단어 묶음)로 찾아 맞춤 — 순서가 달라도 되고 일부만 붙여도 됨
+    여러 칸이면 '번호로 쓸 칸'을 고르는 칸을 보여 줌 (머리 줄이 name·번호면 그 칸이 기본)"""
+    n = len(texts)
+    out, notes, errs = [None] * n, [], []
+    rows = parse_pasted_table(text)
+    if not rows:
+        return out, notes, errs
+    width = max(len(r) for r in rows)
+    rows = [r + [""] * (width - len(r)) for r in rows]
+    avg = [sum(len(r[c]) for r in rows) / len(rows) for c in range(width)]
+    long_c = max(range(width), key=lambda c: avg[c])
+
+    def pick_col(cands, head, data):
+        dflt = next((c for c in cands if head and head[c].strip().lower() in _PASTE_NUM_HEADS), cands[-1])
+        ex = lambda c: next((r[c] for r in data if r[c]), "")
+        if len(cands) == 1:
+            return cands[0]
+        return st.selectbox("번호로 쓸 칸", cands, index=cands.index(dflt), key=f"{key}_col",
+                            format_func=lambda c: f"{c + 1}번째 칸" + (f" '{head[c]}'" if head and head[c] else "") + f" · 예: {ex(c)[:30]}")
+
+    if width > 1 and avg[long_c] >= 80:
+        # 지문 칸이 있음 → 글로 찾아 맞춤
+        head = rows[0] if len(rows[0][long_c]) < 40 else None
+        data = rows[1:] if head else rows
+        cands = [c for c in range(width) if c != long_c and any(r[c] for r in data) and max(len(r[c]) for r in data) <= 60]
+        if not data or not cands:
+            errs.append("번호로 쓸 칸을 찾지 못했어요. 엑셀에서 지문 칸과 번호 칸을 함께 복사해 붙여 주세요.")
+            return out, notes, errs
+        col = pick_col(cands, head, data)
+        grams = [_paste_grams(t) for t in texts]
+        hits, miss = {}, []
+        for r in data:
+            g = _paste_grams(r[long_c])
+            sc = sorted(((len(g & gi) / max(1, min(len(g), len(gi))), i) for i, gi in enumerate(grams) if gi), reverse=True)
+            if g and sc and sc[0][0] >= 0.5 and (len(sc) == 1 or sc[0][0] - sc[1][0] >= 0.2):
+                hits.setdefault(sc[0][1], []).append(r[col])
+            else:
+                miss.append(r[long_c][:40])
+        for i, vals in hits.items():
+            if len(vals) > 1:
+                errs.append(f"붙여넣은 표의 지문 {len(vals)}개가 같은 지문({i + 1}번째 줄)으로 찾아져요: {', '.join(vals)}")
+            elif vals[0].strip():
+                out[i] = vals[0]
+        notes.append(f"붙여넣은 표의 지문 {len(data)}개 중 {len(data) - len(miss)}개를 지문 글로 찾았어요.")
+        if miss:
+            notes.append("못 찾은 지문: " + " / ".join(f"'{m}…'" for m in miss[:5]) + (f" 외 {len(miss) - 5}개" if len(miss) > 5 else ""))
+        rest = sum(1 for v in out if v is None)
+        if rest:
+            notes.append(f"표에 없는 지문 {rest}개는 번호를 그대로 둬요.")
+    else:
+        # 번호만 → 차례대로
+        if len(rows) == 1 and width > 1:
+            cells = [c for c in rows[0] if c]
+        elif width == 1:
+            cells = [r[0] for r in rows]
+        else:
+            head = rows[0] if any(c.strip().lower() in _PASTE_NUM_HEADS for c in rows[0]) else None
+            data = rows[1:] if head else rows
+            cands = [c for c in range(width) if any(r[c] for r in data)]
+            col = pick_col(cands, head, data) if cands else 0
+            cells = [r[col] for r in data]
+        if len(cells) != n:
+            errs.append(f"붙여넣은 번호 {len(cells)}개 · 지문 {n}개 — 번호만 붙일 때는 개수가 같아야 표 순서대로 넣을 수 있어요. "
+                        "(엑셀에서 지문 칸도 함께 복사해 붙이면 개수·순서가 달라도 지문 글로 찾아 넣어요)")
+        else:
+            out = list(cells)
+            notes.append(f"번호 {n}개를 아래 표 순서대로 넣어요.")
+    out = [supp_clean_num(v) if v is not None else None for v in out]
+    out = [v if v else None for v in out]
+    errs += [p for v in out if v is not None and (p := supp_num_problem(v))]
+    return out, notes, errs
+
+# ---- 지문 이름 바꾸기: 원문 라이브러리 지문 이름이 바뀌면 그 이름을 쓰는 모든 곳을 같이 바꿈 ----
+#   문제 은행(passage_label, 묶은 지문 이름 포함) · 교재 4종(label) · 기출 연결(matched_label 등) · 주간 클리닉 · 시험지·FINAL 기록 …
+#   글 전체가 지문 이름과 똑같은 칸만 바꿈 (문장 속 글자는 건드리지 않음). 단계마다 기록(label_rename_log)에 남겨
+#   중간에 멈추면 '이어서 마치기'로 남은 곳만, 다 끝난 뒤엔 '되돌리기'로 예전 이름으로 돌릴 수 있음
+_RN_LIBS = [("saved_v", VICTORY_FILE), ("saved_a", ANATOMY_FILE), ("saved_c", CORE_FILE), ("saved_w", VOCA_FILE)]
+_RN_SKIP_DOCS = {"app_settings", "ai_usage", "gen_job", "backup_log", "exam_dna_rules", "past_voca_library", "label_rename_log",
+                 "mock_exam_library", "victory_library", "anatomy_library", "core_library", "voca_library", "question_bank"}
+
+def _rn_str(s: str, mp: Dict[str, str]) -> str:
+    if s in mp:
+        return mp[s]
+    if QB_LINK_JOIN in s or QB_LINK_PAIR in s:
+        mode, parts = qb_link_parts(s)
+        if mode and any(x in mp for x in parts):
+            return qb_link_label([mp.get(x, x) for x in parts], mode)
+    return s
+
+def _rn_walk(o, mp: Dict[str, str], cnt: List[int]):
+    """JSON 안에서 지문 이름과 똑같은 글(칸 값·사전 키)만 바꾼 새 값 (cnt[0]에 바꾼 수)"""
+    if isinstance(o, str):
+        v = _rn_str(o, mp)
+        if v != o:
+            cnt[0] += 1
+        return v
+    if isinstance(o, list):
+        return [_rn_walk(v, mp, cnt) for v in o]
+    if isinstance(o, dict):
+        return {(_rn_walk(k, mp, cnt) if isinstance(k, str) else k): _rn_walk(v, mp, cnt) for k, v in o.items()}
+    return o
+
+def _rn_doc_files(sb) -> List[str]:
+    """지문 이름이 들어 있을 수 있는 그 밖의 문서 (기출 연결·클리닉·시험지 기록 등 + DB에 있는 다른 문서)"""
+    fs = [GICHUL_FULL_FILE, GICHUL_FILE, GICHUL_MARKS_FILE, QB_CLINIC_FILE, QB_CLINIC_SAVED_FILE, QB_EXAM_LOG_FILE,
+          QB_EXAM_SAVED_FILE, QB_IMPORT_LOG_FILE, REVIEW_FILE, FINAL_FILE, FINAL_WORDS_FILE]
+    if sb is not None:
+        try:
+            known = {filepath_to_doc_key(f) for f in fs}
+            fs += [os.path.join(BASE_DIR, k + ".json") for k in sorted(_doc_versions()) if k not in known and k not in _RN_SKIP_DOCS]
+        except Exception:
+            pass
+    return fs
+
+def rename_log_load() -> List[Dict]:
+    d = _store_get(supabase if IS_CLOUD_DB else None, LABEL_RENAME_LOG_FILE, {}) or {}
+    return d.get("entries", []) if isinstance(d, dict) else []
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _rename_log_view(_v: int = 0) -> List[Dict]:
+    """화면 표시용 (1분 캐시 — 바꾸기를 하면 캐시를 비움). 바꾸기·이어서·되돌리기는 rename_log_load()로 새로 읽음"""
+    return rename_log_load()
+
+def _rn_log_save(entries: List[Dict]):
+    _store_put(supabase if IS_CLOUD_DB else None, LABEL_RENAME_LOG_FILE, {"entries": entries[-30:]})
+
+def _qb_all_labels(sb) -> set:
+    """문제 은행에 있는 지문 이름 전부 (지운 지문의 문제 이름까지 — 새 이름이 겹치지 않게 확인할 때만 읽음)"""
+    if sb is None:
+        return {r.get("passage_label", "") for r in _qb_local_load()}
+    out, start = set(), 0
+    while True:
+        res = sb.table(QB_TABLE).select("passage_label").order("id").range(start, start + 999).execute()
+        out |= {r["passage_label"] for r in (res.data or [])}
+        if len(res.data or []) < 1000:
+            return out
+        start += 1000
+
+def passage_rename_plan(changes: Dict[str, Dict]):
+    """changes {원문 지문 id: {칸: 새 값 (None = 칸을 지움)}} → (before, after, 이름 바뀜 {예전 이름: 새 이름}) — 실제로 바뀌는 지문만"""
+    by_id = {p.get("id"): p for p in st.session_state.saved_mock if isinstance(p, dict)}
+    before, after, mp = {}, {}, {}
+    for pid, ch in changes.items():
+        p = by_id.get(pid)
+        if not p or all(p.get(k) == v for k, v in ch.items()):
+            continue
+        before[pid] = {k: p.get(k) for k in ch}
+        after[pid] = dict(ch)
+        if ch.get("label") and ch["label"] != p.get("label"):
+            mp[p["label"]] = ch["label"]
+    return before, after, mp
+
+def passage_rename_check(after: Dict[str, Dict], mp: Dict[str, str], deep: bool = False) -> List[str]:
+    """바꾸기 전에 확인: 같은 새 이름 두 번 · 다른 지문이 이미 쓰는 이름 · 그 지문으로 만드는 작업이 남음 (deep: 문제 은행 이름까지)"""
+    errs = []
+    lib = st.session_state.saved_mock
+    news = [a.get("label") for a in after.values() if a.get("label")]
+    keep_labels = {p.get("label") for p in lib if p.get("id") not in after}
+    seen = set()
+    for l in news:
+        if l in seen:
+            errs.append(f"'{l}' 이름이 두 번 나와요. 번호가 겹치지 않게 해 주세요.")
+        seen.add(l)
+        if not re.match(r"^\[[^\]]+\]\s*\S", l):
+            errs.append(f"'{l}' — 이름 모양이 이상해요 ('[교재 이름] 번호').")
+    moving = {p.get("label") for p in lib if p.get("id") in after}
+    taken = set(keep_labels)
+    for skey, _ in _RN_LIBS:
+        taken |= {x.get("label") for x in (st.session_state.get(skey) or []) if isinstance(x, dict)}
+    if deep:
+        sb = supabase if IS_CLOUD_DB else None
+        for l in _qb_all_labels(sb):
+            taken |= set(qb_link_parts(l)[1])
+    taken -= moving
+    clash = sorted({l for l in mp.values() if l in taken})
+    if clash:
+        errs.append("이미 다른 지문(또는 그 교재·문제)이 쓰는 이름이에요: " + ", ".join(clash[:5]) + (f" 외 {len(clash) - 5}개" if len(clash) > 5 else ""))
+    if mp:
+        olds = set(mp)
+        job = load_gen_job()
+        busy = [it for it in job.get("items", []) if it.get("state") != "done"
+                and (it.get("passage_label") in olds or str(it.get("label", "")).split(" · ")[0] in olds
+                     or any(x in olds for x in qb_link_parts(it.get("passage_label") or "")[1]))]
+        if busy:
+            errs.append(f"이 지문으로 만드는 작업 {len(busy)}건이 작업 칸에 남아 있어요. 작업이 끝난 뒤(또는 그 작업을 지운 뒤) 바꿔 주세요.")
+    return errs
+
+def _rn_qb_targets(sb, mp: Dict[str, str]) -> Dict[str, List[str]]:
+    """문제 은행에서 이름이 바뀔 문제 → {새 이름: [문제 id]} (묶은 지문 문제 포함)"""
+    if not mp:
+        return {}
+    qb_link_labels.clear()
+    links = [l for l in qb_link_labels(sb) if any(x in mp for x in qb_link_parts(l)[1])]
+    out = {}
+    for r in qb_fetch(sb, list(mp) + links, "id,passage_label"):
+        new = _rn_str(r.get("passage_label") or "", mp)
+        if new != r.get("passage_label"):
+            out.setdefault(new, []).append(r["id"])
+    return out
+
+def _rn_qb_apply(sb, targets: Dict[str, List[str]]):
+    """문제 id로 이름을 바꿈 (같은 일을 다시 해도 결과가 같음 — 중간에 멈췄을 때 이어서 하기 안전)"""
+    if sb is None:
+        by = {i: n for n, ids in targets.items() for i in ids}
+        data = _qb_local_load()
+        for r in data:
+            if r.get("id") in by:
+                r["passage_label"] = by[r["id"]]
+        with open(QB_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        return
+    for new, ids in targets.items():
+        for i in range(0, len(ids), 100):
+            sb.table(QB_TABLE).update({"passage_label": new}, **_UPSERT_MIN).in_("id", ids[i:i + 100]).execute()
+
+def _rn_session_fix(mp: Dict[str, str]):
+    ss = st.session_state
+    if mp and isinstance(ss.get("shared_sel_labels"), list):
+        ss["shared_sel_labels"] = [mp.get(l, l) for l in ss["shared_sel_labels"]]
+    for k in [k for k in ss.keys() if str(k).startswith("mock_pick_")]:
+        del ss[k]
+    for k in ("final_built", "final_re"):
+        ss.pop(k, None)
+
+def _rn_run(entry: Dict, entries: List[Dict]):
+    """기록(entry)대로 바꿈: 문제 은행 → 그 밖의 문서 → 교재 4종 → 원문 라이브러리. 끝난 단계는 entry['done']에 남겨 다시 하지 않음"""
+    sb = supabase if IS_CLOUD_DB else None
+    mp = entry.get("map") or {}
+    stats = entry.setdefault("stats", {})
+    done = entry.setdefault("done", [])
+
+    def mark(step, n):
+        done.append(step)
+        stats[step] = n
+        _rn_log_save(entries)
+    try:
+        if mp and "qb" not in done:
+            _rn_qb_apply(sb, entry.get("qb") or {})
+            mark("qb", sum(len(v) for v in (entry.get("qb") or {}).values()))
+        if mp:
+            for fp in _rn_doc_files(sb):
+                k = filepath_to_doc_key(fp)
+                if k in done:
+                    continue
+                cur = _store_get(sb, fp, None)
+                cnt = [0]
+                new = _rn_walk(cur, mp, cnt) if cur is not None else None
+                if cnt[0]:
+                    _store_put(sb, fp, new)
+                mark(k, cnt[0])
+            for skey, fp in _RN_LIBS:
+                k = filepath_to_doc_key(fp)
+                if k in done:
+                    continue
+                lst = st.session_state.get(skey)
+                if lst is None:
+                    lst = load_from_file(fp)
+                cnt = [0]
+                new = _rn_walk(lst, mp, cnt)
+                if cnt[0]:
+                    st.session_state[skey] = new
+                    save_to_file(fp, st.session_state[skey])
+                mark(k, cnt[0])
+        if "mock" not in done:
+            for p in st.session_state.saved_mock:
+                a = (entry.get("after") or {}).get(p.get("id"))
+                if a:
+                    for k, v in a.items():
+                        if v is None:
+                            p.pop(k, None)
+                        else:
+                            p[k] = v
+            save_to_file(MOCK_FILE, st.session_state.saved_mock)
+            mark("mock", len(entry.get("after") or {}))
+        entry["state"] = "done"
+        entry["qb"] = {}   # 다 바꿨으면 문제 id 목록은 지움 (기록을 가볍게)
+        _rn_log_save(entries)
+    except Exception as e:
+        return False, f"바꾸는 중에 멈췄어요 ({e}). 원문 라이브러리의 '▶️ 이어서 마치기'를 누르면 남은 곳만 마저 바꿔요."
+    finally:
+        try:
+            st.cache_data.clear()
+        except Exception:
+            pass
+        _rn_session_fix(mp)
+    lib_n = sum(stats.get(filepath_to_doc_key(fp), 0) for _, fp in _RN_LIBS)
+    doc_n = sum(v for k, v in stats.items() if k not in ("qb", "mock") and k not in {filepath_to_doc_key(fp) for _, fp in _RN_LIBS})
+    return True, (f"{entry.get('what', '')} — 원문 지문 {stats.get('mock', 0)}개"
+                  + (f" · 이름 {len(mp)}개 → 문제 은행 문제 {stats.get('qb', 0):,}개 · 교재 {lib_n}개 · 기출 연결·클리닉·기록 {doc_n}곳도 같이 바꿨어요" if mp else " (이름은 그대로)"))
+
+def passage_rename_apply(changes: Dict[str, Dict], what: str):
+    """원문 라이브러리 지문 칸을 바꾸고, 지문 이름이 바뀌면 그 이름을 쓰는 모든 곳도 같이 바꿈 → (성공, 알림 글)"""
+    before, after, mp = passage_rename_plan(changes)
+    if not after:
+        return False, "바뀌는 것이 없어요."
+    try:
+        errs = passage_rename_check(after, mp, deep=True)
+    except Exception as e:
+        return False, f"바꾸기 전 확인을 하지 못했어요 ({e}). 아무것도 바뀌지 않았어요. 잠시 뒤 다시 해 주세요."
+    if errs:
+        return False, " / ".join(errs)
+    sb = supabase if IS_CLOUD_DB else None
+    try:
+        entries = rename_log_load()
+        entry = {"id": uuid.uuid4().hex[:10], "at": time.strftime("%Y-%m-%d %H:%M"), "what": what, "map": mp,
+                 "before": before, "after": after, "state": "running", "done": [], "qb": _rn_qb_targets(sb, mp)}
+        entries.append(entry)
+        _rn_log_save(entries)
+    except Exception as e:
+        return False, f"바꾸기를 시작하지 못했어요 ({e}). 아무것도 바뀌지 않았어요. 잠시 뒤 다시 해 주세요."
+    return _rn_run(entry, entries)
+
+def rename_resume(entry_id: str):
+    entries = rename_log_load()
+    entry = next((e for e in entries if e.get("id") == entry_id), None)
+    if not entry:
+        return False, "기록을 찾지 못했어요."
+    return _rn_run(entry, entries)
+
+def rename_undo(entry_id: str):
+    """마지막 바꾸기를 되돌림 = 예전 칸 값으로 다시 바꾸기 (그 뒤 새 이름으로 만든 문제도 예전 이름으로 같이 옮겨짐)"""
+    entries = rename_log_load()
+    entry = next((e for e in entries if e.get("id") == entry_id), None)
+    if not entry:
+        return False, "기록을 찾지 못했어요."
+    by_id = {p.get("id"): p for p in st.session_state.saved_mock}
+    if any(pid not in by_id or any(by_id[pid].get(k) != v for k, v in a.items()) for pid, a in (entry.get("after") or {}).items()):
+        return False, "그 뒤에 지문이 또 바뀌거나 지워져서 되돌릴 수 없어요."
+    ok, msg = passage_rename_apply(entry.get("before") or {}, f"되돌리기 · {entry.get('what', '')}")
+    if ok:
+        entries = rename_log_load()
+        for e in entries:
+            if e.get("id") == entry_id:
+                e["undone"] = True
+        _rn_log_save(entries)
+    return ok, msg
+
+def render_passage_rename_box(kind_label: str):
+    """원문 라이브러리 3️⃣ 아래: 부교재 이름·번호 바꾸기 / 모의고사 → 부교재 옮기기"""
+    supp = kind_label == "부교재"
+    try:
+        entries = _rename_log_view()
+    except Exception:
+        entries = []
+    run = next((e for e in reversed(entries) if e.get("state") == "running"), None)
+    if run:
+        st.warning(f"⚠️ 지문 이름 바꾸기가 끝나지 않았어요 ({run.get('at', '')} · {run.get('what', '')}). 아래 버튼을 누르면 남은 곳만 마저 바꿔요.")
+        if st.button("▶️ 이어서 마치기", type="primary", key="rn_resume"):
+            with st.spinner("남은 곳을 바꾸는 중이에요..."):
+                st.session_state.rn_flash = rename_resume(run["id"])
+            st.rerun()
+        return
+    groups = {}
+    for p in st.session_state.saved_mock:
+        if isinstance(p, dict) and src_kind(p) == kind_label:
+            groups.setdefault(p.get("exam_key") or extract_group_prefix(p["label"]), []).append(p)
+    last = next((e for e in reversed(entries) if e.get("state") == "done" and not e.get("undone")), None)
+    if not groups and not last:
+        return
+    title = ("✏️ 부교재 이름·지문 번호 바꾸기 (엑셀에서 복사해 한꺼번에)" if supp
+             else "📦 부교재로 옮기기 (올림포스처럼 연도·월이 없는 교재를 모의고사로 저장했을 때)")
+    with st.expander(title, expanded=False):
+        if groups:
+            ek = st.selectbox("부교재" if supp else "옮길 시험", sorted(groups, key=natural_sort_key), key=f"rn_pick_{kind_label}",
+                              format_func=lambda k: f"{k.strip('[]')} · 지문 {len(groups[k])}개")
+            items = sorted(groups[ek], key=lambda x: mock_number_sort_key(x.get("number", "")))
+            n1, n2 = st.columns([3, 1])
+            name = n1.text_input("교재 이름", value=items[0].get("book") or ek.strip("[]"), key=f"rn_name_{ek}",
+                                 help="지문 이름이 '[교재 이름] 번호'가 돼요. 예: 올림포스 고2")
+            g0 = qb_passage_grade(items[0])
+            grade = n2.selectbox("학년", ["고1", "고2", "고3"], index=["고1", "고2", "고3"].index(g0) if g0 in ("고1", "고2", "고3") else 1,
+                                 key=f"rn_grade_{ek}")
+            st.markdown("**새 번호 붙여넣기** · 엑셀에서 **번호 칸만** 복사하면 아래 표 순서대로 넣어요. "
+                        "**지문 칸과 번호 칸을 함께** 복사하면 지문 글로 찾아 넣어서 순서가 달라도 되고 일부만 붙여도 돼요. 비워 두면 번호는 그대로예요.")
+            paste = st.text_area("새 번호", key=f"rn_paste_{ek}", height=110, label_visibility="collapsed",
+                                 placeholder="예)\n[문제-19] 11-8\n[문제-20] 12-8\n…  (엑셀에서 복사해 붙여넣기)")
+            nums, notes, errs = paste_numbers_resolve(paste, [p.get("body_text", "") for p in items], f"rn_{ek}")
+            for m in notes:
+                st.caption("ℹ️ " + m)
+            new_ek = supp_exam_key(name)
+            changes, view = {}, []
+            for p, nn in zip(items, nums):
+                num = nn if nn is not None else str(p.get("number", ""))
+                ch = {"label": supp_label(new_ek, num), "exam_key": new_ek, "number": num, "book": supp_clean_name(name), "grade": grade}
+                if not supp:
+                    ch.update({"source_type": SUPP_TYPE, "year": None, "month": None})
+                changes[p["id"]] = ch
+                view.append({"지금 이름": p["label"], "바뀔 이름": ch["label"], "지문 첫머리": str(p.get("body_text", ""))[:70]})
+            st.dataframe(pd.DataFrame(view), hide_index=True, use_container_width=True, height=min(460, 40 + 35 * len(view)))
+            nm_err = supp_name_problem(name)
+            before, after, mp = passage_rename_plan(changes)
+            problems = ([nm_err] if nm_err else []) + errs
+            if not problems and after:
+                problems = passage_rename_check(after, mp)
+            for e in problems:
+                st.error(e)
+            if not after:
+                st.caption("바뀌는 것이 없어요.")
+            elif not problems:
+                n_lib = sum(1 for skey, _ in _RN_LIBS for x in (st.session_state.get(skey) or []) if isinstance(x, dict) and x.get("label") in mp)
+                st.info(f"지문 {len(after)}개를 바꿔요" + (f" · 이름이 바뀌는 지문 {len(mp)}개는 문제 은행 문제·교재 {n_lib}개·기출 연결·주간 클리닉·시험지 기록의 이름도 같이 바꿔요"
+                                                    if mp else " · 이름은 그대로예요 (종류·학년만 바뀜)") + ". 다 바꾼 뒤에도 '↩️ 마지막 바꾸기 되돌리기'로 되돌릴 수 있어요.")
+                with st.popover("💾 이대로 바꾸기" if supp else "📦 이대로 부교재로 옮기기", use_container_width=True):
+                    st.warning(f"{ek.strip('[]')} 지문 {len(after)}개를 '{new_ek.strip('[]')}'(으)로 바꿔요." + (" 문제 은행이 크면 1분쯤 걸려요." if mp else ""))
+                    if st.button("바꾸기 확정", type="primary", key=f"rn_go_{ek}"):
+                        what = f"{'부교재 이름·번호 바꾸기' if supp else '모의고사 → 부교재 옮기기'} · {ek.strip('[]')} → {new_ek.strip('[]')}"
+                        with st.spinner("지문 이름을 바꾸는 중이에요..."):
+                            st.session_state.rn_flash = passage_rename_apply(changes, what)
+                        if st.session_state.rn_flash[0]:
+                            for k in [k for k in st.session_state.keys() if str(k).startswith("rn_") and k != "rn_flash"]:
+                                del st.session_state[k]
+                        st.rerun()
+        if last:
+            with st.popover(f"↩️ 마지막 바꾸기 되돌리기 ({last.get('at', '')})", use_container_width=True):
+                st.caption(last.get("what", ""))
+                if st.button("되돌리기 확정", key="rn_undo"):
+                    with st.spinner("예전 이름으로 되돌리는 중이에요..."):
+                        st.session_state.rn_flash = rename_undo(last["id"])
+                    st.rerun()
+
 def render_mock_exam_tab(text_model: str, api_delay: int, academy_name: str, school_name: str):
-    kind_label = st.segmented_control("자료 종류", ["모의고사", "교과서"], default="모의고사", key="src_kind") or "모의고사"
+    flash = st.session_state.pop("rn_flash", None)
+    if flash:
+        (st.success if flash[0] else st.error)(("✅ " if flash[0] else "❌ ") + flash[1])
+    kind_label = st.segmented_control("자료 종류", SRC_KINDS, default="모의고사", key="src_kind") or "모의고사"
     is_textbook = kind_label == "교과서"
+    is_supp = kind_label == "부교재"
     if is_textbook:
         st.info(
             "💡 교과서 PDF를 올리면 AI가 **본문(Reading)을 단락별로 나눠** `공통영어2 능률(오) 4과 4-1, 4-2…`처럼 원문을 저장합니다. "
             "단원 하나만 담긴 PDF가 가장 정확하고, 교과서 전체 PDF도 올릴 수 있습니다(단원을 적어 주세요)."
+        )
+    elif is_supp:
+        st.info(
+            "💡 올림포스·수능특강처럼 **연도·월이 없는 부교재**예요. **교재 이름과 학년을 직접 정해** PDF를 올리면 AI가 모든 독해 지문을 정답이 반영된 원래 원문으로 복원해요. "
+            "지문 번호는 검수 표에서 **엑셀에서 복사해 한꺼번에 붙여넣을** 수 있고, 저장한 뒤에도 아래 **✏️ 부교재 이름·지문 번호 바꾸기**로 언제든 바꿀 수 있어요 "
+            "(바꾸면 그 지문으로 만든 교재·변형문제 이름도 같이 바뀌어요)."
         )
     else:
         st.info(
@@ -10516,7 +11071,43 @@ def render_mock_exam_tab(text_model: str, api_delay: int, academy_name: str, sch
                     }
                     st.rerun()
 
-    if not is_textbook:
+    if is_supp:
+        with st.container(border=True):
+            st.markdown("##### 1️⃣ 부교재 PDF 업로드 & 원문 복원")
+            s_col1, s_col2 = st.columns(2)
+            supp_pdf = s_col1.file_uploader("📗 부교재 PDF (올림포스 등)", type=["pdf"], key="supp_pdf_uploader")
+            supp_ans = s_col2.file_uploader("✅ 정답표 (PDF 또는 이미지, 부교재 PDF 안에 정답이 있으면 생략 가능)",
+                                            type=["pdf", "png", "jpg", "jpeg"], key="supp_ans_uploader")
+            n_col1, n_col2, n_col3 = st.columns([2.2, 1, 2])
+            supp_name = n_col1.text_input("교재 이름 (지문 이름 앞에 붙어요)", placeholder="예: 올림포스 고2", key="supp_in_name")
+            supp_grade = n_col2.selectbox("학년", ["고1", "고2", "고3"], index=1, key="supp_in_grade")
+            name_err = supp_name_problem(supp_name) if supp_name.strip() else "교재 이름을 적어 주세요."
+            if supp_name.strip() and name_err:
+                n_col1.caption("⚠️ " + name_err)
+            if supp_pdf and n_col3.button("🧠 정답 반영 원문 복원 시작", type="primary", use_container_width=True, key="supp_extract_btn",
+                                          disabled=bool(name_err), help=name_err or None):
+                with st.spinner(f"'{supp_pdf.name}'의 지문을 정답 반영 원문으로 복원 중입니다... (1~3분 소요)"):
+                    parsed = extract_mock_exam_passages(supp_pdf, supp_ans, text_model, SUPP_RESTORE_PROMPT)
+                if parsed:
+                    draft_rows = []
+                    for ps in sorted(parsed.get("passages", []), key=lambda x: mock_number_sort_key(x.get("number", ""))):
+                        num = supp_clean_num(ps.get("number", ""))
+                        if not num:
+                            continue
+                        draft_rows.append({
+                            "번호": num, "유형": ps.get("q_type", ""), "정답": ps.get("answer", ""),
+                            "확인필요": bool(ps.get("needs_review", False)) or not parsed.get("answer_key_found", False),
+                            "복원 원문": ps.get("restored_text", "").strip(), "복원 메모": ps.get("note", ""),
+                        })
+                    for k in ["mock_draft_editor", "supp_draft_name", "supp_draft_grade", "supp_draft_paste", "supp_draft_col"]:
+                        st.session_state.pop(k, None)
+                    st.session_state.mock_draft = {
+                        "kind": SUPP_TYPE, "name": supp_clean_name(supp_name), "grade": supp_grade,
+                        "answer_key_found": parsed.get("answer_key_found", False), "source": supp_pdf.name, "rows": draft_rows,
+                    }
+                    st.rerun()
+
+    if not is_textbook and not is_supp:
         with st.container(border=True):
             st.markdown("##### 1️⃣ 모의고사 PDF 업로드 & 원문 복원")
             u_col1, u_col2 = st.columns(2)
@@ -10567,10 +11158,22 @@ def render_mock_exam_tab(text_model: str, api_delay: int, academy_name: str, sch
     draft = st.session_state.get("mock_draft")
     if draft:
         draft_is_tb = draft.get("kind") == "textbook"
+        draft_is_supp = draft.get("kind") == SUPP_TYPE
         with st.container(border=True):
-            st.markdown("##### 2️⃣ " + ("교과서 본문 검수" if draft_is_tb else "복원 결과 검수") + " (셀을 더블클릭해 수정 → 저장)")
+            st.markdown("##### 2️⃣ " + ("교과서 본문 검수" if draft_is_tb else ("부교재 복원 결과 검수" if draft_is_supp else "복원 결과 검수")) + " (셀을 더블클릭해 수정 → 저장)")
             d_col1, d_col2, d_col3 = st.columns(3)
-            if draft_is_tb:
+            if draft_is_supp:
+                draft["name"] = d_col1.text_input("교재 이름", value=draft.get("name", ""), key="supp_draft_name")
+                draft["grade"] = d_col2.selectbox("학년", ["고1", "고2", "고3"], index=["고1", "고2", "고3"].index(draft.get("grade")) if draft.get("grade") in ("고1", "고2", "고3") else 1,
+                                                  key="supp_draft_grade")
+                name_err = supp_name_problem(draft["name"])
+                if name_err:
+                    d_col3.caption("⚠️ " + name_err)
+                meta_ok = not name_err
+                ekey = supp_exam_key(draft["name"])
+                if not draft.get("answer_key_found"):
+                    st.warning("⚠️ 정답표를 찾지 못해 AI가 직접 푼 정답으로 복원했습니다. **확인필요** 표시된 문항을 꼭 검토해주세요.")
+            elif draft_is_tb:
                 draft["subject"] = d_col1.text_input("과목", value=draft["subject"], key="tb_draft_subject")
                 draft["publisher"] = d_col2.text_input("출판사(저자)", value=draft["publisher"], key="tb_draft_publisher")
                 draft["unit"] = d_col3.text_input("단원", value=draft["unit"], key="tb_draft_unit")
@@ -10606,6 +11209,30 @@ def render_mock_exam_tab(text_model: str, api_delay: int, academy_name: str, sch
                 key="mock_draft_editor"
             )
 
+            if draft_is_supp:
+                with st.expander("📋 지문 번호 한꺼번에 붙여넣기 (엑셀에서 복사)", expanded=True):
+                    st.caption("엑셀에서 **번호 칸만** 복사하면 위 표 순서대로 넣어요. **지문 칸과 번호 칸을 함께** 복사하면 지문 글로 찾아 넣어서 순서가 달라도 되고 일부만 붙여도 돼요.")
+                    d_paste = st.text_area("번호 붙여넣기", key="supp_draft_paste", height=110, label_visibility="collapsed",
+                                           placeholder="예)\n[문제-19] 11-8\n[문제-20] 12-8\n…")
+                    d_texts = ["" if (isinstance(x, float) and x != x) else str(x) for x in edited["복원 원문"].tolist()]
+                    d_nums, d_notes, d_errs = paste_numbers_resolve(d_paste, d_texts, "supp_draft")
+                    for m in d_notes:
+                        st.caption("ℹ️ " + m)
+                    for e in d_errs:
+                        st.error(e)
+                    if any(v is not None for v in d_nums) and not d_errs and st.button("📥 이 번호로 표에 넣기", type="primary", key="supp_draft_apply"):
+                        rows_now = []
+                        for r, v in zip(edited.to_dict("records"), d_nums):
+                            r = {k: ("" if (isinstance(x, float) and x != x) else x) for k, x in r.items()}
+                            r["확인필요"] = bool(r.get("확인필요")) if r.get("확인필요") != "" else False
+                            if v is not None:
+                                r["번호"] = v
+                            rows_now.append(r)
+                        draft["rows"] = rows_now
+                        for k in ("mock_draft_editor", "supp_draft_paste", "supp_draft_col"):
+                            st.session_state.pop(k, None)
+                        st.rerun()
+
             with st.expander("🔍 지문 하나씩 크게 보기 (표에서 수정한 내용 반영)", expanded=False):
                 nums = [str(n) for n in edited["번호"].tolist() if str(n).strip() and str(n) != "nan"]
                 if nums:
@@ -10624,12 +11251,22 @@ def render_mock_exam_tab(text_model: str, api_delay: int, academy_name: str, sch
 
             s_col1, s_col2 = st.columns([3, 1])
             if s_col1.button(f"💾 {md_safe(ekey)} 원문 라이브러리에 저장", type="primary", use_container_width=True, key="mock_draft_save"):
+                supp_dups = []
+                if draft_is_supp:
+                    seen_n = {}
+                    for _, r in edited.iterrows():
+                        n_ = supp_clean_num(r.get("번호", ""))
+                        if n_ and str(r.get("복원 원문", "")).strip() not in ("", "nan"):
+                            seen_n[n_] = seen_n.get(n_, 0) + 1
+                    supp_dups = [n_ for n_, c in seen_n.items() if c > 1] + [p for n_ in seen_n if (p := supp_num_problem(n_))]
                 if not meta_ok:
-                    st.error("과목·출판사·단원을 모두 입력해주세요." if draft_is_tb else "연도·월·학년을 모두 입력해주세요.")
+                    st.error(name_err if draft_is_supp else ("과목·출판사·단원을 모두 입력해주세요." if draft_is_tb else "연도·월·학년을 모두 입력해주세요."))
+                elif supp_dups:
+                    st.error("번호가 겹치거나 쓸 수 없는 글자가 있어요: " + ", ".join(supp_dups[:8]) + " — 번호를 고친 뒤 저장해 주세요.")
                 else:
                     new_records = []
                     for _, r in edited.iterrows():
-                        num = str(r.get("번호", "")).strip()
+                        num = supp_clean_num(r.get("번호", "")) if draft_is_supp else str(r.get("번호", "")).strip()
                         body = str(r.get("복원 원문", "")).strip()
                         if not num or num == "nan" or not body or body == "nan":
                             continue
@@ -10642,7 +11279,11 @@ def render_mock_exam_tab(text_model: str, api_delay: int, academy_name: str, sch
                             "note": str(r.get("복원 메모", "") or ""),
                             "body_text": body,
                         }
-                        if draft_is_tb:
+                        if draft_is_supp:
+                            # 부교재: [올림포스 고2] 19번 · [올림포스 고2] [문제-19] 11-8
+                            rec.update({"label": supp_label(ekey, num), "source_type": SUPP_TYPE, "book": supp_clean_name(draft["name"]),
+                                        "grade": draft["grade"], "answer": str(r.get("정답", "") or "")})
+                        elif draft_is_tb:
                             # 교과서: [공통영어2 능률(오) 4과] 4-1
                             rec.update({"label": f"{ekey} {num}", "source_type": "textbook",
                                         "subject": draft["subject"].strip(), "publisher": draft["publisher"].strip(), "unit": draft["unit"].strip()})
@@ -10675,14 +11316,22 @@ def render_mock_exam_tab(text_model: str, api_delay: int, academy_name: str, sch
 
     # ---- 3) 모의고사(연도/월/학년) 또는 교과서(과목/출판사/단원) → 번호 클릭 선택 ----
     saved_mock: List[Dict] = st.session_state.saved_mock
-    kind_items = [p for p in saved_mock if (p.get("source_type") == "textbook") == is_textbook]
+    kind_items = [p for p in saved_mock if src_kind(p) == kind_label]
     st.markdown(f"##### 3️⃣ {kind_label} 선택 → 번호 클릭 → 교재 생성")
     if not kind_items:
-        st.info(f"저장된 {kind_label} 원문이 없습니다. 위에서 {kind_label} PDF를 업로드해 저장해주세요.")
+        st.info(f"저장된 {kind_label} 원문이 없습니다. 위에서 {kind_label} PDF를 업로드해 저장해주세요."
+                + (" 모의고사로 저장해 둔 부교재는 '모의고사' 아래 **📦 부교재로 옮기기**로 옮길 수 있어요." if is_supp else ""))
 
     exams: Dict[str, List[Dict]] = {}
     f_col1, f_col2, f_col3 = st.columns(3)
-    if is_textbook:
+    if is_supp:
+        grades = sorted({p.get("grade", "") for p in kind_items if p.get("grade")})
+        sel_a = f_col1.selectbox("🎓 학년", ["전체"] + grades, key="supp_f_grade")
+        books = sorted({p.get("book", "") for p in kind_items if p.get("book") and sel_a in ("전체", p.get("grade"))}, key=natural_sort_key)
+        sel_b = f_col2.selectbox("📗 교재", ["전체"] + books, key="supp_f_book")
+        sel_c = "전체"
+        fields = ("grade", "book", "book")
+    elif is_textbook:
         subjects = sorted({p.get("subject", "") for p in kind_items if p.get("subject")})
         sel_a = f_col1.selectbox("📘 과목", ["전체"] + subjects, key="tb_f_subject")
         publishers = sorted({p.get("publisher", "") for p in kind_items if p.get("publisher") and sel_a in ("전체", p.get("subject"))})
@@ -10705,6 +11354,8 @@ def render_mock_exam_tab(text_model: str, api_delay: int, academy_name: str, sch
 
     def exam_sort_key(k: str):
         first = exams[k][0]
+        if is_supp:
+            return natural_sort_key(first.get("book") or k)
         if is_textbook:
             return (first.get("subject", ""), first.get("publisher", ""), natural_sort_key(first.get("unit", "")))
         return (-int(first.get("year", 0) or 0), -int(first.get("month", 0) or 0), first.get("grade", ""))
@@ -10722,7 +11373,7 @@ def render_mock_exam_tab(text_model: str, api_delay: int, academy_name: str, sch
             if pill_key not in st.session_state:
                 st.session_state[pill_key] = [n for n in pick_store.get(ekey, []) if n in num_to_item]
             h_col1, h_col2, h_col3 = st.columns([4, 1, 1])
-            h_col1.markdown(f"**{md_safe(ekey)}** · 지문 {len(items)}개")
+            h_col1.markdown(f"**{md_safe(ekey)}** · 지문 {len(items)}개" + (f" · {items[0].get('grade', '')}" if is_supp and items[0].get("grade") else ""))
             if h_col2.button("전체 선택", key=f"mock_all_{ekey}", use_container_width=True):
                 st.session_state[pill_key] = list(num_to_item.keys())
             if h_col3.button("선택 해제", key=f"mock_none_{ekey}", use_container_width=True):
@@ -10731,11 +11382,14 @@ def render_mock_exam_tab(text_model: str, api_delay: int, academy_name: str, sch
                 ekey,
                 options=list(num_to_item.keys()),
                 selection_mode="multi",
-                format_func=lambda n, m=num_to_item, tb=is_textbook: (n if tb else f"{n}번") + (" ⚠️" if m[n].get("needs_review") else ""),
+                format_func=lambda n, m=num_to_item, tb=is_textbook, sp=is_supp: (n if tb else (supp_num_text(n) if sp else f"{n}번")) + (" ⚠️" if m[n].get("needs_review") else ""),
                 key=pill_key,
                 label_visibility="collapsed"
             )
             pick_store[ekey] = list(picked or [])
+
+    if kind_label in ("모의고사", "부교재"):
+        render_passage_rename_box(kind_label)
 
     # 모든 시험·교과서의 선택 번호 모으기 (필터·종류를 바꿔도 선택 유지, 모의고사와 교과서를 섞어 선택 가능)
     by_label = {p["label"]: p for p in saved_mock}
@@ -10851,7 +11505,7 @@ APP_HELP = {
 ##### 🔁 기본 흐름 (왼쪽 메뉴)
 | 순서 | 어디서 | 무엇을 |
 |---|---|---|
-| ① 원문 모으기 | 📝 원문 라이브러리 | 모의고사·교과서 PDF를 올리면 AI가 원문을 복원 → 표에서 확인·수정 → 저장 |
+| ① 원문 모으기 | 📝 원문 라이브러리 | 모의고사·교과서·부교재 PDF를 올리면 AI가 원문을 복원 → 표에서 확인·수정 → 저장 |
 | ② 교재 만들기 | 📝 원문 라이브러리 아래쪽 / 🚀 엑셀 원클릭 | 지문을 골라 One-Shot·Self-Note·Core·Voca 생성 (서버에서 백그라운드로 진행) |
 | ③ 출력 | 🖨️ 교재 출력 (🏆 🦅 💎 📖) | 지문을 골라 '단행본 렌더링' → HTML 다운로드 → 열어서 **인쇄 / PDF로 저장** |
 | ④ 변형문제 | 🧩 변형문제 은행·시험지 | 문제를 계속 쌓아 두고, 조건에 맞게 뽑아 시험지·책으로 출력 |
@@ -10889,7 +11543,7 @@ APP_HELP = {
 """,
 "mock": """
 ##### 📝 원문 라이브러리 — 모든 교재·변형문제의 '원본 창고'
-**① 올리기 → ② 확인·저장 → ③ 골라서 교재 만들기** 순서예요. 맨 위에서 **모의고사 / 교과서**를 먼저 고르세요.
+**① 올리기 → ② 확인·저장 → ③ 골라서 교재 만들기** 순서예요. 맨 위에서 **모의고사 / 교과서 / 부교재**를 먼저 고르세요.
 
 **모의고사**
 - 시험지 PDF + 정답표를 올리고 **🧠 정답 반영 원문 복원 시작**: AI가 18~45번 지문을 정답이 반영된 원래 글로 되돌려요
@@ -10898,6 +11552,12 @@ APP_HELP = {
 
 **교과서**
 - 과목·출판사·단원을 적고(비우면 자동 인식) **📘 단락별 본문 추출 시작** → 단락마다 `4-1, 4-2…`처럼 나뉘어 저장돼요. 단원 하나씩 올리면 가장 정확해요.
+
+**부교재** (올림포스·수능특강처럼 연도·월이 없는 교재)
+- **교재 이름·학년**을 직접 적고 PDF를 올려 **🧠 정답 반영 원문 복원 시작** → 지문 이름은 `[교재 이름] 번호`가 돼요.
+- 검수 표의 **📋 지문 번호 한꺼번에 붙여넣기**: 엑셀에서 번호 칸만 복사하면 표 순서대로, **지문 칸과 번호 칸을 함께** 복사하면 지문 글로 찾아 넣어요(순서가 달라도 됨).
+- 저장한 뒤에도 **✏️ 부교재 이름·지문 번호 바꾸기**로 이름·번호를 한꺼번에 바꿀 수 있어요. 그 지문으로 만든 교재 4종·변형문제·기출 연결·주간 클리닉의 이름도 같이 바뀌고, **↩️ 마지막 바꾸기 되돌리기**로 되돌릴 수 있어요.
+- 모의고사로 잘못 저장한 부교재는 '모의고사' 아래 **📦 부교재로 옮기기**로 옮겨요.
 
 **저장된 원문 쓰기 (아래쪽)**
 - 년도·월·학년 필터로 좁힌 뒤 번호를 눌러 지문을 골라요 (**전체 선택 / 선택 해제**).
