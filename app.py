@@ -11427,7 +11427,9 @@ body { font-family: 'Noto Serif KR', 'Times New Roman', serif; font-size: 10.4pt
 .sheet { max-width: 186mm; margin: 0 auto; }
 .printbar { position: sticky; top: 0; text-align: right; padding: 6px; background: #fff; z-index: 5; }
 .printbar button { font-size: 13px; padding: 6px 14px; cursor: pointer; }
-@media print { .printbar { display: none; } .pfoot { position: fixed; bottom: -9mm; left: 0; right: 0; } }
+.printbar .pnote { font-family: 'Noto Sans KR', sans-serif; font-size: 11.5px; color: #64748b; margin-right: 10px; }
+/* 꼬리말: 화면에서는 시험지 끝에 한 줄, 인쇄할 때는 쪽마다 맨 아래 여백 칸(@page @bottom-left/right — render_final_exam이 글자를 넣음) */
+@media print { .printbar { display: none; } .pfoot { display: none !important; } }
 .pfoot { font-family: 'Noto Sans KR'; font-size: 8.5pt; display: flex; justify-content: space-between; padding: 0 2mm; color: #222; }
 .ttl { font-family: 'Noto Sans KR'; font-weight: 900; text-align: center; }
 /* 운양고형 머리말: 위 칸 시험 이름, 가운데 큰 과목명, 오른쪽 실시 학급 */
@@ -11494,7 +11496,8 @@ def render_final_exam(qs: List[Dict], meta: Dict) -> str:
     n_es = len(qs) - n_mc
     total = round(sum(r.get("points", 0) for r in qs), 1)
     j = school == "제일고"
-    o = ["<div class='printbar'><button onclick='window.print()'>🖨️ 인쇄 / PDF로 저장</button></div>", f"<div class='sheet{' j' if j else ''}'>"]
+    o = ["<div class='printbar'><span class='pnote'>인쇄 창 '설정 더보기'에서 '머리글과 바닥글'은 꺼 주세요 (날짜·주소가 꼬리말과 겹쳐요)</span>"
+         "<button onclick='window.print()'>🖨️ 인쇄 / PDF로 저장</button></div>", f"<div class='sheet{' j' if j else ''}'>"]
     if j:
         o.append(f"<div class='j-title'>{html.escape(title)} 모의고사 문제지 <span style='font-size:10.5pt;font-weight:700'>· {html.escape(meta.get('term', ''))} 제일고 대비</span></div>"
                  f"<table class='j-head'><tr><td>학 년</td><td class='big'>{g}</td><td class='big'>{html.escape(subj)}</td>"
@@ -11578,9 +11581,14 @@ def render_final_exam(qs: List[Dict], meta: Dict) -> str:
             o.append(f"<div class='exp'><h3>{lab} 정답 {qb_html(c.get('answer', ''))}<span>({html.escape(r['passage_label'])} · {html.escape(r['q_type'])} · {html.escape(r['difficulty'])})</span></h3><ul>"
                      + "".join(f"<li>{qb_html(e)}</li>" for e in (c.get("explanation") or [])) + "</ul></div>")
         o.append("</div></div>")
-    o.append(f"<div class='pfoot'><span>{g}학년 ({html.escape(subj)})</span><span>{html.escape(title)} · {html.escape(meta.get('academy', '') or 'PQRS 영T')}</span></div>")
+    foot_l, foot_r = f"{g}학년 ({subj})", f"{title} · {meta.get('academy', '') or 'PQRS 영T'}"
+    o.append(f"<div class='pfoot'><span>{html.escape(foot_l)}</span><span>{html.escape(foot_r)}</span></div>")
     o.append("</div>")
-    return f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>{html.escape(title)}</title><style>{FINAL_CSS}</style></head><body>{''.join(o)}</body></html>"
+    # 예전 position:fixed 꼬리말은 크롬 인쇄에서 1쪽엔 안 찍히고 2쪽부터 맨 위 본문에 겹쳐 찍혔음 → 쪽 여백 칸에 넣음
+    fbox = "font-family: 'Noto Sans KR', sans-serif; font-size: 8.5pt; color: #222; vertical-align: top; padding-top: 4mm;"
+    foot_css = (f"\n@page {{ @bottom-left {{ content: {_css_q(foot_l)}; {fbox} padding-left: 2mm; }}"
+                f" @bottom-right {{ content: {_css_q(foot_r)}; {fbox} padding-right: 2mm; text-align: right; }} }}\n")
+    return f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>{html.escape(title)}</title><style>{FINAL_CSS}{foot_css}</style></head><body>{''.join(o)}</body></html>"
 
 def qb_fetch_ids(sb, ids: List[str]) -> List[Dict]:
     """문제 id로 불러옴 (저장한 회차 시험지를 다시 만들 때)"""
