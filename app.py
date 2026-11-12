@@ -9350,7 +9350,7 @@ def render_weekly_clinic(sb, mock_lib: List[Dict], by_label: Dict, summary: List
         st.session_state["qb_clinic_name"] = w.get("name", "")
         st.session_state["qb_clinic_school"] = w.get("school", QB_SCHOOLS[0])
         st.session_state.pop("qb_clinic_html", None)
-    sel = _qb_passage_picker("qb_clinic_labels", mock_lib, label_counts)
+    sel = _qb_passage_picker("qb_clinic_labels", mock_lib, label_counts, ordered=True)
     with st.container(key="qb_card_clinic_opts"):
         st.markdown("<div class='qb-title'>주차 정보</div>", unsafe_allow_html=True)
         name = _qb_row("주차 이름").text_input("주차 이름", key="qb_clinic_name", placeholder="예: 11월 2주차 운양고1 A반", label_visibility="collapsed")
@@ -9376,8 +9376,8 @@ def render_weekly_clinic(sb, mock_lib: List[Dict], by_label: Dict, summary: List
         st.caption("지문을 고르고 이름을 붙여 저장하면 아래에서 클리닉을 만들 수 있어요.")
         render_clinic_archive(sb, wid, set(by_label), text_model, academy_name, school_name)  # 주차를 지웠어도 보관된 클리닉은 다시 받을 수 있게
         return
-    labels = sorted(w.get("labels", []), key=lambda l: natural_sort_key({"label": l}))
-    labels = [l for l in labels if l in by_label]
+    # 저장한 주차의 지문 순서 그대로 (2026-11-13~ 고른 순서 · 예전에 저장한 주차는 지문 번호 순으로 저장돼 있어 예전과 같음)
+    labels = [l for l in dict.fromkeys(w.get("labels", [])) if l in by_label]
     passages = [by_label[l] for l in labels]
     if not passages:
         # 저장된 주차 지문이 원문 라이브러리에서 모두 지워졌거나 이름이 바뀐 경우 (예전엔 여기서 오류가 나 아래 탭까지 멈췄음)
@@ -9386,9 +9386,9 @@ def render_weekly_clinic(sb, mock_lib: List[Dict], by_label: Dict, summary: List
         return
     # 이 주차 지문을 묶어 만든 문제(이어 붙이기·(A)(B))도 함께 · 모자란 문제는 짧은 교과서 단락을 자동으로 묶어 만듦
     links_w = [l for l in qb_link_labels(sb) if set(qb_link_parts(l)[1]) <= set(labels)]
-    labels_all = sorted(labels + links_w, key=lambda l: natural_sort_key({"label": l}))
+    labels_all = qb_order_with_links(labels, links_w)
     gen_passages = qb_auto_join(passages, mock_lib)[0]
-    if set(sel) != set(w.get("labels", [])) or name.strip() != w.get("name") or school != w.get("school"):
+    if list(sel) != [l for l in w.get("labels", []) if l in by_label] or name.strip() != w.get("name") or school != w.get("school"):
         st.info("고친 내용이 아직 저장되지 않았어요. 아래 클리닉은 저장된 주차 기준으로 만들어요.")
     school = w.get("school", QB_SCHOOLS[0])
 
@@ -9483,8 +9483,23 @@ def render_weekly_clinic(sb, mock_lib: List[Dict], by_label: Dict, summary: List
         components.html(st.session_state.qb_clinic_html, height=850, scrolling=True)
     render_clinic_archive(sb, wid, set(by_label), text_model, academy_name, school_name)
 
-def _qb_passage_picker(key: str, mock_lib: List[Dict], counts: Dict[str, int]) -> List[str]:
-    """출처·학년·시험을 고른 뒤 번호 칩을 눌러 지문을 고름 (여러 시험에 걸쳐 모아 담김)"""
+QB_EXAM_ORDERS = ["고른 순서", "지문 순서 (오름차순)", "지문 역순 (내림차순)"]   # 시험지 만들기 '순서' (2026-11-13~ 고른 순서가 기본)
+
+def qb_order_with_links(labels: List[str], links: List[str]) -> List[str]:
+    """고른 순서 그대로 + 묶은 지문('4-3 + 4-4') 문제는 그 묶음의 첫 지문 바로 뒤에 (지문 번호 순일 때 예전과 같은 자리)"""
+    pos = {l: i for i, l in enumerate(labels)}
+
+    def k(l):
+        if l in pos:
+            return (pos[l], 0)
+        ps = [pos[x] for x in qb_link_parts(l)[1] if x in pos]
+        return (min(ps) if ps else len(labels), 1)
+    return sorted(dict.fromkeys(list(labels) + list(links)), key=k)
+
+def _qb_passage_picker(key: str, mock_lib: List[Dict], counts: Dict[str, int], ordered: bool = False) -> List[str]:
+    """출처·학년·시험을 고른 뒤 번호 칩을 눌러 지문을 고름 (여러 시험에 걸쳐 모아 담김)
+    고른 목록은 누른 순서대로 (2026-11-13~, 예전엔 늘 지문 번호 순으로 다시 정렬했음).
+    ordered=True(시험지 만들기·주간 클리닉): 고른 순서를 번호로 보여 주고 ▲▼로 바꿀 수 있음 — 시험지에 그 순서로 나옴"""
     lib = sorted(mock_lib, key=natural_sort_key)
     groups, group_of = {}, {}
     for p in lib:
@@ -9503,10 +9518,26 @@ def _qb_passage_picker(key: str, mock_lib: List[Dict], counts: Dict[str, int]) -
             chip_n[x] = chip_n.get(x, 0) + counts[l]
 
     def set_chosen(labels):
-        st.session_state[key] = sorted(set(labels), key=order.get)
+        st.session_state[key] = [l for l in dict.fromkeys(labels) if l in order]
 
     def sync(pkey, opts):
-        set_chosen([l for l in st.session_state[key] if l not in opts] + list(st.session_state.get(pkey) or []))
+        # 이 줄 칩에서 끈 것은 빼고, 새로 누른 것은 맨 뒤에 (누른 순서 유지)
+        now = list(st.session_state.get(pkey) or [])
+        cur = st.session_state[key]
+        set_chosen([l for l in cur if l not in opts or l in now] + [l for l in now if l not in cur])
+
+    def move(i, d):
+        cur = list(st.session_state[key])
+        j = i + d
+        if 0 <= i < len(cur) and 0 <= j < len(cur):
+            cur[i], cur[j] = cur[j], cur[i]
+            set_chosen(cur)
+
+    def drop(i):
+        cur = list(st.session_state[key])
+        if 0 <= i < len(cur):
+            cur.pop(i)
+            set_chosen(cur)
 
     with st.container(key=f"qb_card_{key}"):
         srcs = [s for s in SRC_KINDS if any(_qb_src(ps[0]) == s for ps in groups.values())]
@@ -9553,12 +9584,17 @@ def _qb_passage_picker(key: str, mock_lib: List[Dict], counts: Dict[str, int]) -
         here = [p["label"] for p in ps]
         f1 = st.container()
         if chosen:
-            lines = {}
-            for l in chosen:
-                lines.setdefault(group_of[l], []).append(str(by_lbl[l].get("number") or l))
-            body = " &nbsp;·&nbsp; ".join(
-                f"<b>{html.escape(_qb_group_name(groups[g]) + ((' ' + str(groups[g][0].get('grade'))) if _qb_is_mock(groups[g][0]) else ''))}</b> "
-                f"{html.escape(', '.join(nums))}" for g, nums in lines.items())
+            if ordered:
+                # 시험지·클리닉: 고른 순서 그대로 번호를 붙여 보여 줌 (이 순서로 문제가 나옴)
+                body = "<span class='muted'>시험지 순서:</span> " + " &nbsp;→&nbsp; ".join(
+                    f"<b>{i}.</b> {html.escape(ppt_header_label(l))}" for i, l in enumerate(chosen, 1))
+            else:
+                lines = {}
+                for l in sorted(chosen, key=order.get):
+                    lines.setdefault(group_of[l], []).append(str(by_lbl[l].get("number") or l))
+                body = " &nbsp;·&nbsp; ".join(
+                    f"<b>{html.escape(_qb_group_name(groups[g]) + ((' ' + str(groups[g][0].get('grade'))) if _qb_is_mock(groups[g][0]) else ''))}</b> "
+                    f"{html.escape(', '.join(nums))}" for g, nums in lines.items())
             cs = set(chosen)
             n_link = sum(counts[l] for l, parts in link_parts.items() if parts <= cs)
             n_part = sum(counts[l] for l, parts in link_parts.items() if parts & cs and not parts <= cs)
@@ -9575,6 +9611,20 @@ def _qb_passage_picker(key: str, mock_lib: List[Dict], counts: Dict[str, int]) -
         f3.button("이 시험 해제", key=f"{key}_none", type="tertiary",
                   on_click=lambda: set_chosen([l for l in st.session_state[key] if l not in here]))
         f4.button("모두 비우기", key=f"{key}_clear", type="tertiary", disabled=not chosen, on_click=lambda: set_chosen([]))
+        if ordered and len(chosen) > 1:
+            with st.expander(f"↕️ 지문 순서 바꾸기 — 시험지에 위에서부터 이 순서로 나와요 ({len(chosen)}개)", expanded=False):
+                s1, s2, _ = st.columns([1.2, 1.2, 4])
+                s1.button("지문 번호 순으로", key=f"{key}_sort_up", use_container_width=True,
+                          on_click=lambda: set_chosen(sorted(st.session_state[key], key=order.get)))
+                s2.button("지문 번호 역순으로", key=f"{key}_sort_down", use_container_width=True,
+                          on_click=lambda: set_chosen(sorted(st.session_state[key], key=order.get, reverse=True)))
+                for i, l in enumerate(chosen):
+                    c0, c1, c2, c3 = st.columns([8, 0.7, 0.7, 0.7], vertical_alignment="center")
+                    c0.markdown(f"**{i + 1}.** {md_safe(ppt_header_label(l))} <span style='color:#64748b;font-size:12px'>· 쌓인 문제 {chip_n.get(l, 0)}개</span>",
+                                unsafe_allow_html=True)
+                    c1.button("▲", key=f"{key}_up_{i}", disabled=i == 0, on_click=move, args=(i, -1), help="위로")
+                    c2.button("▼", key=f"{key}_dn_{i}", disabled=i == len(chosen) - 1, on_click=move, args=(i, 1), help="아래로")
+                    c3.button("✕", key=f"{key}_x_{i}", on_click=drop, args=(i,), help="빼기")
     return st.session_state[key]
 
 def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_name: str):
@@ -9732,7 +9782,7 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
             render_answer_book_ui(sb, text_model, academy_name, school_name, set(by_label))
         except Exception as ex:  # 합본 칸이 이상해도 시험지 만들기는 그대로
             st.warning(f"⚠️ 정답·해설 합본 칸을 보여 주지 못했어요. 시험지 만들기에는 영향이 없어요. ({str(ex)[:80]})")
-        sel_e = _qb_passage_picker("qb_exam_labels", mock_lib, label_counts)
+        sel_e = _qb_passage_picker("qb_exam_labels", mock_lib, label_counts, ordered=True)
         with st.container(key="qb_card_exam_opts"):
             st.markdown("<div class='qb-title'>시험지 구성</div>", unsafe_allow_html=True)
             e_school = _qb_row("학교").segmented_control("학교", ["전체"] + QB_SCHOOLS, default="전체", key="qb_exam_school",
@@ -9789,8 +9839,8 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
             u1.button("전체 선택", key="qb_exam_types_all", type="tertiary", on_click=lambda: st.session_state.update(qb_exam_types=list(QB_TYPE_NAMES)))
             u2.button("있는 유형만", key="qb_exam_types_have", type="tertiary", disabled=not ty_counts,
                       on_click=lambda: st.session_state.update(qb_exam_types=[t for t in QB_TYPE_NAMES if ty_counts.get(t)]))
-            order = _qb_row("순서").segmented_control("순서", ["지문 순서 (오름차순)", "지문 역순 (내림차순)"], default="지문 순서 (오름차순)",
-                                                     key="qb_exam_order", label_visibility="collapsed") or "지문 순서 (오름차순)"
+            order = _qb_row("순서").segmented_control("순서", QB_EXAM_ORDERS, default=QB_EXAM_ORDERS[0], key="qb_exam_order", label_visibility="collapsed",
+                                                     help="고른 순서: 위 '지문 고르기'에서 누른 순서 (↕️ 지문 순서 바꾸기에서 바꿀 수 있어요)") or QB_EXAM_ORDERS[0]
             avail = sum(ty_counts.get(t, 0) for t in e_types)
             mix = "자동으로 섞기"
             if e_school == "전체":
@@ -9852,7 +9902,10 @@ def render_qbank_tab(text_model: str, api_delay: int, academy_name: str, school_
         reshuffle = b2.button("🔀 다른 조합으로 다시 뽑기", disabled="qb_exam_html" not in st.session_state, use_container_width=True, key="qb_exam_shuffle")
         if make or reshuffle:
             seed = random.randint(1, 10**9)
-            labels_ordered = sorted(sel_e + sel_links, key=lambda l: natural_sort_key({"label": l}), reverse=order.startswith("지문 역순"))
+            if order == QB_EXAM_ORDERS[0]:
+                labels_ordered = qb_order_with_links(sel_e, sel_links)   # 고른 순서 (묶은 지문 문제는 첫 지문 뒤)
+            else:
+                labels_ordered = sorted(sel_e + sel_links, key=lambda l: natural_sort_key({"label": l}), reverse=order.startswith("지문 역순"))
             def wanted(r):
                 is_real = r["difficulty"] == QB_GICHUL_LEVEL
                 if (is_real and e_real == "빼기") or (not is_real and (e_real == "기출만" or r["difficulty"] not in e_levels)):
