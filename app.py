@@ -1139,6 +1139,11 @@ def md_safe(t) -> str:
     return str(t).replace("~", "\\~")
 
 
+def rel_dicts(lst) -> List[Dict]:
+    """유의어·반의어 목록에서 사전 모양 칸만 (AI가 가끔 글자만 넣은 칸 — 예: 'x' — 은 빼고)"""
+    return [x for x in (lst or []) if isinstance(x, dict)]
+
+
 # -----------------------------
 # 2-B. 단행본 표지(1P) + 공란(2P) + 저작권 뒤표지(마지막P) 빌더
 # -----------------------------
@@ -1253,7 +1258,7 @@ def booklet_stats(book_type: str, passages: List[Dict]) -> Dict:
         st_["words"] = len(items)
         st_["core_words"] = sum(1 for it in items if is_core(it))
         st_["key_words"] = st_["words"] - st_["core_words"]
-        st_["related"] = sum(len([x for x in (it.get("synonyms", []) or []) + (it.get("antonyms", []) or []) if x.get("word")]) for it in items)
+        st_["related"] = sum(len([x for x in rel_dicts(it.get("synonyms")) + rel_dicts(it.get("antonyms")) if x.get("word")]) for it in items)
     return st_
 
 
@@ -1542,7 +1547,7 @@ def generate_voca_rel_csv_bytes(selected_passages: List[Dict]) -> bytes:
             cat = str(item.get("category", "")).strip()
             cls_label = cat if ("본문" in cat or "선지" in cat or "번" in cat) else lbl
 
-            for syn in item.get("synonyms", []):
+            for syn in rel_dicts(item.get("synonyms")):
                 sw = str(syn.get("word", "")).strip()
                 if not sw:
                     continue
@@ -1557,7 +1562,7 @@ def generate_voca_rel_csv_bytes(selected_passages: List[Dict]) -> bytes:
                 })
                 word_no += 1
 
-            for ant in item.get("antonyms", []):
+            for ant in rel_dicts(item.get("antonyms")):
                 aw = str(ant.get("word", "")).strip()
                 if not aw:
                     continue
@@ -1597,6 +1602,8 @@ def generate_voca_excel_bytes(selected_passages: List[Dict]) -> bytes:
         row_types_3col.append("passage_banner")
 
         for item in voca_list:
+            if not isinstance(item, dict):
+                continue
             w = str(item.get("word", "")).strip()
             pos = str(item.get("pos", "")).strip()
             pron = str(item.get("pronunciation", "")).strip()
@@ -1631,7 +1638,7 @@ def generate_voca_excel_bytes(selected_passages: List[Dict]) -> bytes:
                 "한국어 뜻 (시험빈칸)": ""
             })
 
-            for syn in item.get("synonyms", []):
+            for syn in rel_dicts(item.get("synonyms")):
                 sw = str(syn.get("word", "")).strip()
                 spron = str(syn.get("pronunciation", "")).strip()
                 smean = str(syn.get("meaning", "")).strip()
@@ -1661,7 +1668,7 @@ def generate_voca_excel_bytes(selected_passages: List[Dict]) -> bytes:
                     "한국어 뜻 (시험빈칸)": ""
                 })
 
-            for ant in item.get("antonyms", []):
+            for ant in rel_dicts(item.get("antonyms")):
                 aw = str(ant.get("word", "")).strip()
                 apron = str(ant.get("pronunciation", "")).strip()
                 amean = str(ant.get("meaning", "")).strip()
@@ -2559,8 +2566,8 @@ def render_core(p: Dict) -> str:
 
     cv_items = []
     for cv in data.get("core_vocab", [])[:10]:
-        syn_txt = ", ".join([f"{s.get('word','')}({s.get('meaning','')})" for s in cv.get("synonyms", [])[:2] if s.get("word")])
-        ant_txt = ", ".join([f"{a.get('word','')}({a.get('meaning','')})" for a in cv.get("antonyms", [])[:1] if a.get("word")])
+        syn_txt = ", ".join([f"{s.get('word','')}({s.get('meaning','')})" for s in rel_dicts(cv.get("synonyms"))[:2] if s.get("word")])
+        ant_txt = ", ".join([f"{a.get('word','')}({a.get('meaning','')})" for a in rel_dicts(cv.get("antonyms"))[:1] if a.get("word")])
         rel_str = " | ".join(x for x in ((f"유의: {syn_txt}" if syn_txt else ""), (f"반의: {ant_txt}" if ant_txt else "")) if x)
         cv_items.append(
             f"<div>• <b style='color:#0047AB;'>{esc(cv.get('word',''))}</b> [{esc(cv.get('pronunciation',''))}] "
@@ -3241,11 +3248,11 @@ def render_permanent_json_editor(prefix: str, target_type: str, file_path: str, 
             for item in pdata.get("voca_list", []):
                 syn_str = ", ".join([
                     f"{s.get('word','')}[{s.get('pronunciation','')}]({s.get('meaning','')})"
-                    for s in item.get("synonyms", []) if s.get("word")
+                    for s in rel_dicts(item.get("synonyms")) if s.get("word")
                 ])
                 ant_str = ", ".join([
                     f"{a.get('word','')}[{a.get('pronunciation','')}]({a.get('meaning','')})"
-                    for a in item.get("antonyms", []) if a.get("word")
+                    for a in rel_dicts(item.get("antonyms")) if a.get("word")
                 ])
                 rows_for_editor.append({
                     "출제 트랙/문항출처": item.get("category", "지문핵심"),
