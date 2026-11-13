@@ -1050,6 +1050,47 @@ if "past_v_selected" not in st.session_state:
 if "shared_sel_labels" not in st.session_state:
     st.session_state.shared_sel_labels = []
 SHARED_SELECTION_TYPES = ("victory", "anatomy", "core", "voca")
+SHARED_LIB_KEYS = {"victory": "saved_v", "anatomy": "saved_a", "core": "saved_c", "voca": "saved_w"}
+
+
+def _passage_grams(text: str) -> set:
+    w = re.findall(r"[a-z]+", (text or "").lower())
+    return {" ".join(w[i:i + 4]) for i in range(len(w) - 3)}
+
+
+@st.cache_resource(show_spinner=False, max_entries=16)
+def _same_passage_index(items: tuple) -> dict:
+    """((id, 본문), ...) → 네 단어 묶음 색인. 이름이 달라도 본문이 같은 지문을 찾을 때 씀 (읽기만 하므로 함께 써도 됨)"""
+    inv, size = {}, {}
+    for pid, text in items:
+        g = _passage_grams(text)
+        if len(g) < 8:
+            continue
+        size[pid] = len(g)
+        for x in g:
+            inv.setdefault(x, []).append(pid)
+    return {"inv": inv, "size": size}
+
+
+def lib_passage_index(items: List[Dict]) -> dict:
+    return _same_passage_index(tuple((p.get("id"), p.get("body_text") or "") for p in items if p.get("id")))
+
+
+def same_passage_id(text: str, idx: dict) -> str:
+    """본문이 거의 같은(네 단어 묶음 85% 이상 겹치는) 지문의 id. 없으면 ''"""
+    g = _passage_grams(text)
+    if len(g) < 8:
+        return ""
+    hits = {}
+    for x in g:
+        for pid in idx["inv"].get(x, ()):
+            hits[pid] = hits.get(pid, 0) + 1
+    best, best_r = "", 0.0
+    for pid, h in hits.items():
+        r = h / max(len(g), idx["size"][pid])
+        if r > best_r:
+            best, best_r = pid, r
+    return best if best_r >= 0.85 else ""
 
 if "saved_mock" not in st.session_state:
     st.session_state.saved_mock = load_from_file(MOCK_FILE)
@@ -4040,6 +4081,10 @@ def render_library_manager(prefix: str, title_name: str, file_path: str, css_str
             lbl = p.get("label", "")
             if lbl and lbl not in existing_labels and p.get("body_text"):
                 source_pool[lbl] = p
+        if source_pool:
+            # 이름은 달라도 같은 지문의 교재가 이미 있으면 빼기 (같은 지문을 또 만드는 비용 방지)
+            _idx = lib_passage_index(saved_list)
+            source_pool = {l: p for l, p in source_pool.items() if not same_passage_id(p["body_text"], _idx)}
 
         core_by_label = {p["label"]: p["data"] for p in st.session_state.saved_c if p.get("label") and p.get("data")}
 
@@ -4077,9 +4122,39 @@ def render_library_manager(prefix: str, title_name: str, file_path: str, css_str
     id_to_item = {p["id"]: p for p in saved_list}
     shares_selection = target_type in SHARED_SELECTION_TYPES
     label_to_id = {p["label"]: p["id"] for p in saved_list}
+    resolved = {}    # 다른 탭에서 고른 이름 → 이 교재에서 본문이 같은 지문 id (이름이 다른 경우)
+    alias_of = {}    # 이 교재 지문 id → 공유 목록에 있는 원래 이름
+    dup_of = {}      # 같은 지문을 두 이름으로 고른 경우: 남는 이름 → 이미 고른 지문 id
+    sel_same, sel_missing, missing_rows = [], [], []
     if shares_selection:
-        # 다른 교재 탭에서 고른 지문도 같은 이름이면 선택된 상태로 (이 교재에 없는 지문은 건너뜀)
-        selected_ids[:] = [label_to_id[l] for l in st.session_state.shared_sel_labels if l in label_to_id]
+        # 다른 교재 탭에서 고른 지문도 같은 이름이면 선택된 상태로.
+        # 이름이 달라도 본문이 같은 지문이 이 교재에 있으면 그것을 고르고, 정말 없는 지문만 빠짐 (아래에 알려 줌)
+        shared_now = list(dict.fromkeys(st.session_state.shared_sel_labels))
+        others = [l for l in shared_now if l not in label_to_id]
+        if others:
+            used = {label_to_id[l] for l in shared_now if l in label_to_id}
+            other_items = {}
+            for t, k in SHARED_LIB_KEYS.items():
+                if t != target_type:
+                    for p in st.session_state.get(k) or []:
+                        if p.get("label") in others and p.get("body_text"):
+                            other_items.setdefault(p["label"], p)
+            idx = lib_passage_index(saved_list)
+            for l in others:
+                op = other_items.get(l)
+                pid = same_passage_id(op["body_text"], idx) if op else ""
+                if pid and pid not in used:
+                    resolved[l], alias_of[pid] = pid, l
+                    used.add(pid)
+                    sel_same.append((l, id_to_item[pid]["label"]))
+                elif pid:
+                    dup_of[l] = pid
+                else:
+                    sel_missing.append(l)
+                    if op:
+                        missing_rows.append({"label": l, "text": op["body_text"], "school": op.get("school_name", ""),
+                                             "img_path": op.get("image_path", "")})
+        selected_ids[:] = [label_to_id[l] if l in label_to_id else resolved[l] for l in shared_now if l in label_to_id or l in resolved]
     else:
         selected_ids[:] = [sid for sid in selected_ids if sid in id_to_item]
     selected_set = set(selected_ids)
@@ -4088,9 +4163,10 @@ def render_library_manager(prefix: str, title_name: str, file_path: str, css_str
         """이 탭에서 바뀐 선택을 공유 목록에 반영 (이 교재에 없는 지문의 선택은 그대로 유지)"""
         if not shares_selection:
             return
-        mine = [id_to_item[sid]["label"] for sid in selected_ids if sid in id_to_item]
-        others = [l for l in st.session_state.shared_sel_labels if l not in label_to_id]
-        st.session_state.shared_sel_labels = mine + others
+        mine = [alias_of.get(sid) or id_to_item[sid]["label"] for sid in selected_ids if sid in id_to_item]
+        others = [l for l in st.session_state.shared_sel_labels
+                  if l not in label_to_id and l not in resolved and (l not in dup_of or dup_of[l] in selected_set)]
+        st.session_state.shared_sel_labels = list(dict.fromkeys(mine + others))
 
     if target_type == "past_voca":
         q_c1, q_c2, q_c3 = st.columns(3)
@@ -4183,14 +4259,30 @@ def render_library_manager(prefix: str, title_name: str, file_path: str, css_str
         cur_page_info = f"총 {len(saved_list)}개 중 {total_filtered}개 검색됨 ({cur_page}/{total_pages} 페이지 표시 중)"
 
     st.caption(f"📊 {cur_page_info} | 🎯 **현재 선택된 시험지/지문: {len(selected_ids)}개**")
+    if sel_same:
+        st.caption(f"🔗 다른 교재에서 고른 지문 중 {len(sel_same)}개는 {title_name}에 이름이 다르게 들어 있어서, 본문이 같은 지문으로 함께 골랐어요: "
+                   + " · ".join(f"{md_safe(a)} → {md_safe(b)}" for a, b in sel_same[:6]) + (f" 외 {len(sel_same) - 6}개" if len(sel_same) > 6 else ""))
+    if sel_missing:
+        st.warning(f"⚠️ 다른 교재에서 고른 지문 중 **{len(sel_missing)}개**는 {title_name}가 아직 없어서 여기서는 빠졌어요: "
+                   + ", ".join(md_safe(l) for l in sel_missing[:8]) + (f" 외 {len(sel_missing) - 8}개" if len(sel_missing) > 8 else ""))
+        if missing_rows:
+            with st.popover(f"🔄 빠진 {len(missing_rows)}개 {title_name} 만들기"):
+                st.caption(book_cost_line(text_model, {target_type: len(missing_rows)}))
+                if st.button("생성 시작", type="primary", use_container_width=True, key=f"{prefix}_make_missing_sel"):
+                    n_added = enqueue_generation(missing_rows, [target_type], text_model, api_delay, academy_name, school_name)
+                    st.session_state.gen_flash = f"✅ {n_added}개 지문의 {title_name} 생성을 작업에 추가했습니다. 창을 닫아도 서버에서 계속 진행됩니다."
+                    st.rerun()
 
     def on_card_toggle(pid: str):
         # 카드 버튼을 누를 때마다 선택/해제 (누른 순서가 곧 출력 순서)
         if shares_selection:
-            lbl = id_to_item[pid]["label"]
+            lbl = alias_of.get(pid) or id_to_item[pid]["label"]
             shared = st.session_state.shared_sel_labels
             if lbl in shared:
                 shared.remove(lbl)
+                for x, d in dup_of.items():  # 같은 지문을 다른 이름으로도 골라 두었으면 함께 해제
+                    if d == pid and x in shared:
+                        shared.remove(x)
             else:
                 shared.append(lbl)
             return
@@ -10745,6 +10837,28 @@ def _rn_walk(o, mp: Dict[str, str], cnt: List[int]):
         return {(_rn_walk(k, mp, cnt) if isinstance(k, str) else k): _rn_walk(v, mp, cnt) for k, v in o.items()}
     return o
 
+def _rn_review_keys(d, mp: Dict[str, str], cnt: List[int]):
+    """배포 전 검수 기록은 키가 '지문 이름|단어|…' 모양 → 앞부분 이름도 바꿈 (새 이름 기록이 이미 있으면 그것을 남김)"""
+    if not isinstance(d, dict):
+        return d
+    out = dict(d)
+    for part in ("syn", "ans"):
+        sec = d.get(part)
+        if not isinstance(sec, dict):
+            continue
+        moved = {}
+        for k, v in sec.items():
+            head, sep, rest = k.partition("|") if isinstance(k, str) else (k, "", "")
+            if sep and head in mp:
+                moved[mp[head] + sep + rest] = v
+        if moved:
+            keep = {k: v for k, v in sec.items() if not (isinstance(k, str) and "|" in k and k.partition("|")[0] in mp)}
+            for k, v in moved.items():
+                keep.setdefault(k, v)
+            out[part] = keep
+            cnt[0] += len(moved)
+    return out
+
 def _rn_doc_files(sb) -> List[str]:
     """지문 이름이 들어 있을 수 있는 그 밖의 문서 (기출 연결·클리닉·시험지 기록 등 + DB에 있는 다른 문서)"""
     fs = [GICHUL_FULL_FILE, GICHUL_FILE, GICHUL_MARKS_FILE, QB_CLINIC_FILE, QB_CLINIC_SAVED_FILE, QB_EXAM_LOG_FILE,
@@ -10890,6 +11004,8 @@ def _rn_run(entry: Dict, entries: List[Dict]):
                 cur = _store_get(sb, fp, None)
                 cnt = [0]
                 new = _rn_walk(cur, mp, cnt) if cur is not None else None
+                if k == filepath_to_doc_key(REVIEW_FILE):
+                    new = _rn_review_keys(new, mp, cnt)
                 if cnt[0]:
                     _store_put(sb, fp, new)
                 mark(k, cnt[0])
