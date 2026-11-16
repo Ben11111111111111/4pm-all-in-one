@@ -6410,7 +6410,7 @@ def qb_school_pack_load(sb, dna: Dict = None) -> Dict:
 
 # ---- 출제 규칙 버전 (2026-11-10): 학교 스타일을 담는 규칙을 바꿀 때마다 올리고, 만든 문제에 그때 버전을 남김 ----
 #   버전 기록이 없는 예전 문제는 v1.0으로 봄 (저장된 문제를 고치지 않고 읽을 때만 판단). 실제 기출은 버전 없음
-QB_RULES_VERSION = "1.3"
+QB_RULES_VERSION = "1.4"
 QB_RULES_HISTORY = [
     ("1.0", "~2026-11-09", "학교 스타일·지문 변형 비율·어법 출제 빈도·헷갈림 장치·난이도 판정 (선지 길이 기준 없음)"),
     ("1.1", "2026-11-10", "학년 반영 · 학교·학년·유형별 선지 길이(24~26년 실제 기출 30개 측정) · 상·최상 선지 어휘 기준"),
@@ -6418,6 +6418,8 @@ QB_RULES_HISTORY = [
                           "같은 학교·유형 실제 기출 예시 · 학교 실제 발문 말투 · 제일고 내용 일치 하·중도 영어 선지"),
     ("1.3", "2026-11-10", "찍기 요령 차단(실제 기출 52회 vs 변형 6,743개 비교) · 조합형 선택지를 실제 기출처럼 흩어 정함 · 요약문 다섯 쌍 단어를 서로 다르게 · "
                           "오답 한두 개도 정답만큼 재진술 · 선택지형 정답 번호를 ①부터 ⑤까지 고르게 · 상식 함정·정도/시간 바꾸기·주체/강도 바꾸기 장치"),
+    ("1.4", "2026-11-16", "한 지문 묶음(FINAL): 실제 기출처럼 지문 하나에 2문제 — 첫 문제(밑줄·빈칸 유형)를 만든 뒤 그 지문 그대로 짝 문제를 만들고 "
+                          "그 지문으로 정답 검증 · 짝 발문은 '윗글의 ~'"),
 ]
 
 def qb_ver(r: Dict) -> str:
@@ -6437,8 +6439,10 @@ def qb_ver_mix(qs: List[Dict]) -> str:
 
 def qb_build_prompt(label: str, text: str, q_type: str, level: str, school: str, count: int,
                     avoid: List[str], dna_rules: str, essay_rules: str, existing: List[Dict] = None, underline: str = "mix",
-                    yt_points: List[Dict] = None, yt_focus: bool = False, unit_other: str = "", grade: str = "", pack: Dict = None):
+                    yt_points: List[Dict] = None, yt_focus: bool = False, unit_other: str = "", grade: str = "", pack: Dict = None,
+                    set_passage: str = ""):
     """→ (공통 앞부분, 이번 출제 부분, 문항별 계획). grade: '고1'·'고2' (비우면 지문 이름으로 판단)
+    set_passage: 묶음 짝 문제 — 학생이 볼 지문(첫 문제의 밑줄·빈칸·틀린 표현 포함). 이 지문으로 풀리게 만들고 지문은 프로그램이 이걸로 바꿈
     pack: v1.2 학교별 실제 기출 꾸러미 (qb_school_pack) — 없으면 v1.1과 같은 프롬프트
     프롬프트 앞부분(출제 DNA + 공통 규칙)은 모든 호출에서 글자 하나까지 같게 두어 캐시로 읽히게 하고,
     학교·유형·난이도·지문처럼 호출마다 다른 내용은 뒤에 붙임"""
@@ -6457,6 +6461,12 @@ def qb_build_prompt(label: str, text: str, q_type: str, level: str, school: str,
     if q_type == "요약문 (A)(B)":
         extra += QB_SUMMARY_WORDS + "\n"
     extra += qb_link_note(label, text)
+    if set_passage:
+        extra += ("\n[묶음 문제 — 실제 기출처럼 이 지문 하나에 다른 문제가 함께 실림]\n"
+                  "- 학생이 보는 지문은 아래 [함께 실리는 지문]이다(다른 문제의 밑줄·기호·빈칸·일부러 틀리게 바꾼 낱말·어법 표현이 들어 있음).\n"
+                  "- 이 문제는 그 지문을 읽고 풀리게 만든다. 정답·오답 근거는 표시·틀린 표현이 없는 문장에서 잡고, 표시된 곳의 낱말·어법·빈칸 내용에 기대지 않는다.\n"
+                  "- stem은 '윗글의 ~'처럼 위 지문을 가리킨다. passage에는 '원문'이라고만 써도 된다(프로그램이 [함께 실리는 지문]으로 바꿈).\n"
+                  f"[함께 실리는 지문]\n{set_passage}\n")
     plans = qb_question_plans(q_type, level, school, count, existing or [], underline, text=text)
     yt = qb_yt_applicable(yt_points, q_type, bool(unit_other)) if level != "하" else []
     if qb_yt_plans(plans, yt, yt_focus) and unit_other and any("영쌤 출제 포인트" in x and p.get("tb") and str(p["text"]).strip() in x
@@ -6512,12 +6522,18 @@ def qb_build_prompt(label: str, text: str, q_type: str, level: str, school: str,
 
 def qb_generate(gclient, model: str, label: str, text: str, q_type: str, level: str, school: str, count: int,
                 avoid: List[str], dna_rules: str, essay_rules: str, logs: List[str], existing: List[Dict] = None, underline: str = "mix",
-                yt_points: List[Dict] = None, yt_focus: bool = False, unit_other: str = "", grade: str = "", pack: Dict = None) -> List[Dict]:
-    """변형문제 count개 생성 (형식이 맞지 않는 문항은 버림)"""
+                yt_points: List[Dict] = None, yt_focus: bool = False, unit_other: str = "", grade: str = "", pack: Dict = None,
+                set_passage: str = "") -> List[Dict]:
+    """변형문제 count개 생성 (형식이 맞지 않는 문항은 버림) · set_passage: 묶음 짝 문제면 지문을 그 지문으로 바꿈"""
     shared, task, plans = qb_build_prompt(label, text, q_type, level, school, count, avoid, dna_rules, essay_rules, existing, underline,
-                                          yt_points, yt_focus, unit_other, grade, pack)
+                                          yt_points, yt_focus, unit_other, grade, pack, set_passage)
     out = _qb_call(gclient, model, [shared, task], SCHEMA_QBANK, 0.7, logs, f"{label} {q_type} {level} 생성", cache_first=True)
-    return qb_parse(out, q_type, count, plans, text)
+    qs = qb_parse(out, q_type, count, plans, text)
+    if set_passage:
+        for q in qs:
+            q["passage"] = set_passage  # 학생이 보는 지문 = 첫 문제 지문 (정답 검증도 이 지문으로)
+            q["given"] = ""
+    return qs
 
 def qb_shape_ok(q: Dict, q_type: str) -> bool:
     """풀 수 없는 모양의 문항 거르기 (AI 호출 없음): 지문 속 ①~⑤ 빠짐, 같은 선지 두 번, 조합 선지에 없는 기호, 유형과 다른 발문"""
@@ -6670,6 +6686,8 @@ def qb_delete(sb, ids: List[str]):
 def _generate_qbank_item(sb_factory, gclient, item: Dict, opts: Dict, dna_rules: str, essay_rules: str, logs: List[str],
                          yt_points: List[Dict] = None, pack: Dict = None) -> (bool, str):
     """작업 목록의 변형문제 1건(지문·유형·난이도) 생성 → 정답 검증 → 문제 표에 저장"""
+    if item.get("set_with") or item.get("set_lead_id"):
+        return _generate_qbank_set(sb_factory, gclient, item, opts, dna_rules, essay_rules, logs, yt_points, pack)
     sb = sb_factory()
     item = {**item, "ver": QB_RULES_VERSION, "no_dna": not pack}  # 학교별 기출 자료를 못 읽었으면 no_dna (v1.3 찍기 차단은 그대로 적용)
     label, q_type, level, school = item["passage_label"], item["q_type"], item["difficulty"], item.get("school", "운양고")
@@ -6682,7 +6700,7 @@ def _generate_qbank_item(sb_factory, gclient, item: Dict, opts: Dict, dna_rules:
         time.sleep(opts.get("api_delay", 3))
         questions = qb_generate(gclient, model, label, item["text"], q_type, level, school, count, avoid, dna_rules, essay_rules, logs,
                                 existing, item.get("underline", "mix"), yt_points, bool(item.get("yt_focus")), item.get("unit_other", ""),
-                                item.get("grade", ""), pack)
+                                item.get("grade", ""), pack, item.get("set_passage", ""))
         if questions:
             break
         if round_idx < len(GEN_RETRY_WAITS):
@@ -6690,6 +6708,49 @@ def _generate_qbank_item(sb_factory, gclient, item: Dict, opts: Dict, dna_rules:
     if not questions:
         return False, "변형문제 생성 실패"
     return qb_save_questions(sb, gclient, model, item, questions, logs, existing, pack)
+
+def _generate_qbank_set(sb_factory, gclient, item: Dict, opts: Dict, dna_rules: str, essay_rules: str, logs: List[str],
+                        yt_points: List[Dict] = None, pack: Dict = None) -> (bool, str):
+    """한 지문 묶음 문제 (실제 기출처럼 지문은 한 번 싣고 문제 2~3개 — 같은 지문을 따로 내면 학생이 서로 비교해 답을 맞힐 수 있어서)
+    ① 첫 문제(밑줄·빈칸 표시가 있는 유형)를 평소처럼 만들어 정답 검증·저장
+    ② 짝 문제(set_with)는 그 지문(표시 포함)을 보고 만들고, 지문을 그 지문으로 바꿔 정답 검증·저장 (떨어지면 한 번 더)
+    set_lead_id가 있으면 ①은 이미 저장된 그 문제로 (짝만 다시 만들 때)"""
+    sb = sb_factory()
+    label = item["passage_label"]
+    mates = [m for m in (item.get("set_with") or []) if isinstance(m, dict) and m.get("q_type")]
+    base = {k: v for k, v in item.items() if k not in ("set_with", "set_lead_id")}
+    if item.get("set_lead_id"):
+        lead = next(iter(qb_fetch_ids(sb, [item["set_lead_id"]])), None)
+        lc = (lead or {}).get("content") or {}
+        if not lc.get("passage") or not lc.get("set_id"):
+            return False, "묶음 첫 문제를 찾지 못했어요 (지워졌을 수 있어요)"
+        set_id, passage = str(lc["set_id"]), lc["passage"]
+    else:
+        set_id = str(item.get("set_id") or uuid.uuid4().hex[:12])
+        ok, err = _generate_qbank_item(sb_factory, gclient, {**base, "set_id": set_id, "set_no": int(item.get("set_no") or 1), "count": 1},
+                                       opts, dna_rules, essay_rules, logs, yt_points, pack)
+        if not ok:
+            return False, err
+        got = [r for r in qb_fetch(sb, [label], "id,content") if (r.get("content") or {}).get("set_id") == set_id]
+        if not got:
+            return False, "묶음 첫 문제가 저장되지 않았어요 (이미 있는 문제와 똑같음)"
+        passage = got[0]["content"]["passage"]
+    miss = []
+    for k, m in enumerate(mates, 2):
+        lv = m.get("difficulty") or item.get("difficulty")
+        mi = {**base, "q_type": m["q_type"], "difficulty": lv, "count": 1, "set_id": set_id, "set_no": int(m.get("set_no") or k),
+              "set_passage": passage, "label": f"{label} · {m['q_type']} · {lv} (묶음 짝)",
+              "light": bool(item.get("light_easy")) and lv in ("하", "중")}  # 가벼운 모델은 짝 문제 난이도로 다시 정함
+        ok = False
+        for _ in range(2):
+            ok, err = _generate_qbank_item(sb_factory, gclient, mi, opts, dna_rules, essay_rules, logs, yt_points, pack)
+            if ok:
+                break
+        if not ok:
+            miss.append(m["q_type"])
+    if miss:
+        logs.append(f"⚠️ {label} 묶음: 짝 문제({', '.join(miss)})가 정답 검증을 통과하지 못해 빠졌어요 — FINAL 초안에서 그 칸만 다시 만들 수 있어요")
+    return True, ""
 
 _QB_SIG_KEYS = ("stem", "given", "passage", "box", "choices", "answer", "target")
 
@@ -6751,6 +6812,8 @@ def qb_save_questions(sb, gclient, model: str, item: Dict, questions: List[Dict]
             q["no_dna"] = True  # 학교별 실제 기출 자료를 못 읽고 만든 문제 (나중에 확인용)
         if item.get("final_tag"):
             q["final_draft"] = item["final_tag"]  # FINAL 초안의 빈 칸을 채우려고 만든 문제 (그 초안에 바로 들어감)
+        if item.get("set_id"):
+            q["set_id"], q["set_no"] = str(item["set_id"]), int(item.get("set_no") or 1)  # 한 지문 묶음 (지문은 한 번 싣고 문제를 이어 붙임)
         qt = q.pop("_q_type", q_type)
         lv = level
         jl, why = q.pop("_judged", (None, ""))
@@ -7026,14 +7089,21 @@ def enqueue_qbank(passages: List[Dict], q_types: List[str], levels: List[str], s
         # 어법은 최상이면 단일 정답형 대신 '있는 대로 고른 것' 조합형으로 (같은 조합은 한 번만)
         combos = list(dict.fromkeys(("어법 (조합형)" if (t == "어법 (단일)" and lv == "최상") else t, lv) for t in q_types for lv in levels))
         # plan이 있으면 (지문, 유형, 난이도, 문제 수)만 정확히 추가 (주간 클리닉의 '모자란 문제 만들기')
-        todo = ([(p, ("어법 (조합형)" if (t == "어법 (단일)" and lv == "최상") else t), lv, n) for p, t, lv, n in plan] if plan is not None
-                else [(p, t, lv, count) for p in passages for t, lv in combos])
-        for p, t, lv, cnt in todo:
-            job["items"].append({"id": str(uuid.uuid4()), "kind": "qbank", "label": f"{p['label']} · {t} · {lv}",
+        # plan의 다섯째 칸(있으면)은 작업 건에 더할 값 — FINAL 한 지문 묶음: set_id·set_no·set_with(짝 문제) 또는 set_lead_id(짝만 다시)
+        todo = ([(x[0], ("어법 (조합형)" if (x[1] == "어법 (단일)" and x[2] == "최상") else x[1]), x[2], x[3], (x[4] if len(x) > 4 else {})) for x in plan]
+                if plan is not None else [(p, t, lv, count, {}) for p in passages for t, lv in combos])
+        for p, t, lv, cnt, ex in todo:
+            is_set = bool(ex.get("set_with") or ex.get("set_lead_id"))
+            if ex.get("set_lead_id"):
+                set_txt = " · 묶음 짝 다시: " + " + ".join(m["q_type"] for m in ex.get("set_with") or [])
+            else:
+                set_txt = (" + " + " + ".join(m["q_type"] for m in ex["set_with"]) + " (한 지문 묶음)") if ex.get("set_with") else ""
+            job["items"].append({"id": str(uuid.uuid4()), "kind": "qbank", "label": f"{p['label']} · {t} · {lv}{set_txt}" if not ex.get("set_lead_id") else f"{p['label']}{set_txt}",
+                                 **ex, **({"light_easy": bool(light_easy)} if is_set else {}),
                                  "passage_label": p["label"], "exam_key": p.get("exam_key", ""), "number": str(p.get("number", "")),
                                  "text_key": _job_text_key(job, p.get("body_text", "")), "q_type": t, "difficulty": lv, "school": school,
                                  "count": cnt, "verify": verify, "state": "pending", "error": "",
-                                 "light": bool(light_easy and lv in ("하", "중")), "underline": underline, "batch": bool(batch),
+                                 "light": bool(light_easy and lv in ("하", "중")), "underline": underline, "batch": bool(batch) and not is_set,
                                  "yt_focus": bool(yt_focus), "unit_key": (_job_text_key(job, uo) if (uo := unit_for(p, t)) else ""),
                                  "grade": grade or qb_passage_grade(p), **({"final_tag": tag} if tag else {})})
             added["n"] += 1
@@ -7263,11 +7333,19 @@ def qb_set_key(r: Dict):
     if isinstance(imp, dict) and str(imp.get("set") or "").strip():
         p = re.sub(r"[\W_]", "", str(c.get("passage", ""))).lower()  # 띄어쓰기·문장부호·밑줄 기호 차이는 같은 지문으로
         return ("TEST", str(imp["set"]).strip(), r.get("passage_label", ""), p) if p else None
+    if isinstance(c, dict) and c.get("set_id"):
+        return ("SET", str(c["set_id"]))  # 2026-11-16~: 한 지문 묶음으로 만든 변형문제 (FINAL)
     return None
 
+def qb_set_stem(stem) -> str:
+    """한 지문 묶음으로 실을 때 발문이 위 지문을 가리키게 ('다음 글의 주제로' → '윗글의 주제로', 실제 기출 묶음 말투)"""
+    return re.sub(r"^(\s*)다음\s*글", r"\1윗글", str(stem or ""))
+
 def _qb_src_no(r: Dict) -> int:
-    """묶음 안 순서: 실제 기출은 시험 번호 · 가져온 TEST는 원래 번호(없으면 유형 순서)"""
+    """묶음 안 순서: 실제 기출은 시험 번호 · 가져온 TEST는 원래 번호(없으면 유형 순서) · 한 지문 묶음 변형문제는 묶음 안 번호"""
     c = r.get("content") or {}
+    if isinstance(c, dict) and c.get("set_id"):
+        return int(c.get("set_no") or 1)
     imp = c.get("import") if isinstance(c, dict) else None
     if isinstance(imp, dict) and not (c.get("source") or {}).get("no"):
         m = re.match(r"\d+", str(imp.get("no") or ""))
@@ -7279,9 +7357,11 @@ def _qb_src_no(r: Dict) -> int:
 
 def _qb_set_note(added: List[Dict], extra: int, removed: int, total_now: int) -> str:
     """묶음을 붙였다는 안내 (실제 기출만이면 예전 문구 그대로)"""
-    test = any((qb_set_key(r) or ("",))[0] == "TEST" for r in added)
-    real = any((qb_set_key(r) or ("",))[0] != "TEST" for r in added)
-    who = "실제 기출·TEST에서" if (test and real) else ("TEST에서" if test else "실제 기출에서")
+    kinds = {(qb_set_key(r) or ("",))[0] for r in added}
+    names = [n for k, n in (("TEST", "TEST"), ("SET", "한 지문 묶음 변형문제")) if k in kinds]
+    if kinds - {"TEST", "SET"}:
+        names.insert(0, "실제 기출")
+    who = "·".join(names) + "에서"
     return (f"{who} 한 지문에 함께 나온 문제 {extra}개를 묶어서 넣었습니다"
             + (f" (대신 변형문제 {removed}개를 빼서 문항 수 유지)." if removed == extra else f" (총 {total_now}문항)."))
 
@@ -7334,18 +7414,19 @@ def qb_drop_partial_sets(rows: List[Dict], all_rows: List[Dict]) -> (List[Dict],
     full, have = {}, {}
     for r in all_rows:
         k = qb_set_key(r)
-        if k and k[0] == "TEST":
+        if k and k[0] in ("TEST", "SET"):
             full.setdefault(k, set()).add(r.get("id"))
     for r in rows:
         k = qb_set_key(r)
-        if k and k[0] == "TEST":
+        if k and k[0] in ("TEST", "SET"):
             have.setdefault(k, set()).add(r.get("id"))
     bad = {k for k, ids in have.items() if len(full.get(k, ids)) > 1 and not full[k] <= ids}
     if not bad:
         return rows, []
     out = [r for r in rows if qb_set_key(r) not in bad]
     n = len(rows) - len(out)
-    return out, [f"가져온 TEST에서 한 지문에 함께 나온 문제 중 짝이 지금 조건(유형·난이도·이미 낸 문항)에 맞지 않는 {n}문제는 뺐어요 (짝 없이 실으면 지문에 짝 문제 표시가 남아서)."]
+    who = "가져온 TEST·한 지문 묶음" if {k[0] for k in bad} == {"TEST", "SET"} else ("가져온 TEST" if next(iter(bad))[0] == "TEST" else "한 지문 묶음 변형문제")
+    return out, [f"{who}에서 한 지문에 함께 나온 문제 중 짝이 지금 조건(유형·난이도·이미 낸 문항)에 맞지 않는 {n}문제는 뺐어요 (짝 없이 실으면 지문에 짝 문제 표시가 남아서)."]
 
 def qb_keep_sets(picked: List[Dict], rows: List[Dict]) -> (List[Dict], List[str]):
     """실제 기출에서 한 지문에 여러 문제가 나온 경우, 하나가 뽑히면 같은 묶음 문제도 함께(시험 번호순으로 연달아) 넣음.
@@ -8460,7 +8541,8 @@ def render_qbank_exam(qs: List[Dict], meta: Dict, gidx: Dict[str, List[Dict]]) -
             o.append(f"<div class='q setq'><div class='stem sethead'>[{n}~{last}] 다음 글을 읽고 물음에 답하시오.</div>"
                      f"<div class='passage'>{qb_paras(c.get('passage'))}</div></div>")
         tm = f"<span class='tm'>⏱ {qb_time_text(qb_time_sec(r))}</span>" if meta.get("show_time", True) else ""
-        o.append(f"<div class='q'><div class='stem'>{tm}<span class='no'>{n}.</span> {qb_html(c.get('stem'))}</div>")
+        stem = qb_set_stem(c.get("stem")) if in_set and k and k[0] == "SET" else c.get("stem")
+        o.append(f"<div class='q'><div class='stem'>{tm}<span class='no'>{n}.</span> {qb_html(stem)}</div>")
         if meta.get("show_tag"):
             o.append(f"<span class='tag'>{tag_of(r)}</span>")
         if c.get("given"):
@@ -11753,20 +11835,24 @@ APP_HELP = {
 학생들이 시험 직전에 **우리 학교와 똑같은 시험**을 회차별로 볼 수 있게 만드는 화면이에요.
 
 1. **시험 정보**: 학교(운양고/제일고)·학년·시험 이름(예: 26년 2학기 기말)을 정해요. 같은 시험 이름으로 만들면 1회차, 2회차 … 5회차로 이어져요.
-2. **시험 범위**: 시험에 나오는 지문을 골라요. 다음 회차를 만들 때는 지난 회차의 범위가 그대로 골라져 있어요. 고른 지문이 문항 수보다 많지 않으면 **모든 지문에서 한 문제 이상** 나와요.
+2. **시험 범위**: 시험에 나오는 지문을 골라요. 다음 회차를 만들 때는 지난 회차의 범위가 그대로 골라져 있어요.
+   - **한 지문은 시험지에 한 번만** 실어요. 같은 지문을 따로따로 내면(예: 4·5·6번이 한 지문의 서로 다른 변형) 학생이 지문끼리 비교해 답을 맞힐 수 있어서예요.
+   - 고른 지문이 문항 수보다 적으면 모든 지문을 넣고, 남는 문항은 실제 기출처럼 **한 지문에 2문제 묶음**([1~2] 다음 글을 읽고, 물음에 답하시오.)으로 내요. 2문제씩 묶어도 모자라면 3문제 묶음도 써요. 묶음 지문은 **시험에 나올 가능성이 높고 긴 지문**부터 골라요.
+   - 고른 지문이 문항 수보다 많으면 **시험에 나올 가능성이 높은 지문만** 넣어요 (모의고사 18·19·25·27·28·43~45번처럼 실제 시험에 거의 안 나오는 번호를 먼저 빼고, 교과서 본문은 우선). 뺀 지문은 화면에 나와요.
 3. **시험 구성**: 그 학교·학년 **실제 기출 한 회**를 고르면 유형·배점·**문항 수**(선택형·서술형)를 그대로 따라요. 기본은 가장 최근 시험이에요.
-   - 기출 표시에서 유형을 알아보지 못한 문항('기타')은 **'아무 유형' 칸**으로 남겨 다른 선택형 문제로 채워요 → 문항 수가 실제 시험보다 줄지 않아요.
+   - 기출 표시에서 유형을 알아보지 못한 문항('기타')은 기출 전 문항 분석의 유형으로 채우고, 그래도 모르면 **'아무 유형' 칸**으로 남겨 다른 선택형 문제로 채워요 → 문항 수가 실제 시험보다 줄지 않아요.
+   - **한 지문 묶음 구조**도 참고 기출을 따라요 (예: 제일고 26년 2학기 중간 고2 = 지문 20개 · 1~2·12~13·15~16·20~21번 묶음). 묶음에는 밑줄·빈칸 유형(어법·낱말·빈칸) 하나 + 지문을 그대로 묻는 유형(주제·제목·일치·추론·요약) 짝으로 넣어요.
    - **목표 평균**: 난이도별 예상 정답률(하 90%·중 75%·상 55%·최상 40%)로 평균을 계산해서, 목표에 맞게 난이도를 섞어요.
    - **단어 수**: 그 학교·학년 실제 기출의 지문 단어 수 평균에 가깝게 골라요. 원문을 그대로 쓰는 주제·일치형 같은 문제는 실제 시험처럼 **한 지문에 여러 문제**([1~3] 다음 글을 읽고…)로 묶여요.
    - **문제 고르는 방법**: **은행 문제로 고르기**(AI 비용 없음) 또는 **모두 새 문제로 만들기**(칸마다 새 문제 1개 · 버튼에 예상 비용).
    - **이미 낸 문제는 안 나와요**: 같은 학교·학년 FINAL에 저장된 문제는 늘 빼고, **'클리닉·시험지에 쓴 문제 빼기'**를 켜면 주간 클리닉·변형문제 시험지에 들어간 문제도 빼요.
 4. **📄 만들기** → 미리보기·학생용/교사용(정답·해설·난이도) HTML. 마음에 들면 **💾 확정 저장**해야 회차로 기록되고 다음 회차에서 빠져요.
-   - 은행에 맞는 문제가 없어 **빈 칸**이 있거나 **안 들어간 지문**이 있으면 **🛠️ 새 문제로 채우기**로 그 칸에 맞는 문제만 새로 만들어요 (예상 비용이 버튼에 나와요). 예상 평균이 목표와 많이 다르면 **난이도도 맞추기**로 너무 어렵거나 쉬운 문제 몇 개를 같은 지문의 새 문제로 바꿀 수 있어요.
+   - 은행에 맞는 문제가 없어 **빈 칸**이 있거나 **안 들어간 지문**이 있으면 **🛠️ 새 문제로 채우기**로 그 칸에 맞는 문제만 새로 만들어요 (예상 비용이 버튼에 나와요). 은행에 같은 지문으로 함께 만든 묶음이 없는 **묶음 칸**도 여기서 새로 만들어요: 첫 문제(밑줄·빈칸 유형)를 만든 뒤 **그 지문 그대로** 짝 문제를 만들고, 그 지문으로 정답을 다시 풀어 확인해요. 짝 문제 발문은 실제 기출처럼 '윗글의 ~'로 나와요. 예상 평균이 목표와 많이 다르면 **난이도도 맞추기**로 너무 어렵거나 쉬운 문제 몇 개를 같은 지문의 새 문제로 바꿀 수 있어요.
    - 새 문제를 만드는 동안은 **초안**으로 남아요. 창을 닫아도 서버에서 만들고, 다 되면 초안에 바로 들어가요. 만들지 못한 칸은 그 칸만 다시 만들 수 있고, 초안을 버려도 만든 문제는 은행에 남아요.
 5. **회차 기록**: 시험을 본 뒤 표에 **실제 평균·응시 인원**을 적고 저장하세요. 실제 평균과 예상 평균의 차이를 최근 회차일수록 크게 쳐서 다음 회차 예상에 보정해요. 기록이 쌓일수록 목표 평균에 더 정확히 맞춰져요.
    - 잘못 저장한 회차는 **🗑️ 회차 삭제**로 지울 수 있어요. 그 회차 문제는 은행에 그대로 남고 다음 FINAL에서 다시 뽑힐 수 있어요.
 
-시험지 모양: 운양고는 '○학년 ○학기 지필평가 문제지' 머리말·과목명·실시 학급 칸, 제일고는 '학년 | 과목 | 시행일시' 표와 네모 칸 지문으로 실제 시험지와 같은 배치예요. 학교 로고·학교 이름 대신 PQRS 영T가 들어가요.
+시험지 모양: 운양고는 '○학년 ○학기 지필평가 문제지' 머리말·과목명·실시 학급 칸, 제일고는 '학년 | 과목 | 시행일시' 표와 네모 칸 지문으로 실제 시험지와 같은 배치예요. 학교 로고·학교 이름 대신 PQRS 영T가 들어가요. **시행일**은 기본으로 비워 두어 시험지에 빈칸으로 나와요 (손으로 쓰거나, 칸에 적으면 그대로 찍혀요).
 """,
 "qbank": """
 ##### 🧩 변형문제 은행 — '쌓기'와 '뽑기'가 나뉘어 있어요
@@ -12133,15 +12219,39 @@ FINAL_ANY = "아무 유형"  # 실제 기출에서 유형을 알 수 없는 문�
 FINAL_ANY_GEN = ["빈칸", "내용 일치·불일치", "낱말 (문맥상)", "어법 (단일)", "제목", "주제", "요지·주장", "함축 의미"]  # 그런 칸을 새로 만들 때 돌려 쓰는 유형
 FINAL_MODES = ["은행 문제로 고르기", "모두 새 문제로 만들기"]
 
-def final_slots(ex: Dict) -> List[Dict]:
-    """실제 기출 한 시험 → 문항 칸 목록 [{no, q_type, points}] — 문항 수는 실제 기출 그대로
-    유형을 모르는 '기타'는 '아무 유형' 칸, 서술형·논술형 번호의 '기타'는 조건 영작 칸 (2026-11-16 전에는 '기타'를 빼서 문항 수가 줄었음)"""
-    slots = []
+def _final_src_key(q: Dict) -> str:
+    """실제 기출 문항이 쓴 지문 (연결된 지문 이름, 없으면 출처 첫머리) — 연달아 같으면 한 지문 묶음 (예: [1~2] 다음 글을 읽고 …)"""
+    l = str(q.get("matched_label") or "").strip()
+    if l:
+        return l
+    return " ".join(re.findall(r"[a-z]+", str(q.get("source_hint") or "").lower())[:8])
+
+def final_full_types(sb, exam_id: str) -> Dict:
+    """기출 전 문항 분석에서 읽은 문항 번호별 유형 (기출 표시에서 '기타'로 남은 문항의 실제 유형을 알 때 씀)"""
+    try:
+        e = ((_store_get(sb, GICHUL_FULL_FILE, {}) or {}).get("exams") or {}).get(exam_id) or {}
+        return {str(q.get("no", "")): q.get("q_type", "") for q in e.get("questions", [])}
+    except Exception:
+        return {}
+
+def final_slots(ex: Dict, full_types: Dict = None) -> List[Dict]:
+    """실제 기출 한 시험 → 문항 칸 목록 [{no, q_type, points, grp}] — 문항 수는 실제 기출 그대로
+    유형을 모르는 '기타'는 전 문항 분석의 유형으로, 그래도 모르면 '아무 유형' 칸 · 서술형·논술형 번호의 '기타'는 조건 영작 칸
+    grp: 실제 기출에서 같은 지문을 쓴 문항끼리 같은 번호 (한 지문에 2~3문제 묶음)"""
+    slots, keys = [], []
     for q in ex.get("questions", []):
         t, no = q.get("q_type", ""), str(q.get("no", ""))
+        if t not in QB_TYPES and (full_types or {}).get(no) in QB_TYPES:
+            t = full_types[no]  # 예: 26-2 중간 고2 2번 — 기출 표시는 '기타', 전 문항 분석은 '주제'
         if t not in QB_TYPES:
             t = "서술형 (조건 영작)" if ("서술" in no or "논술" in no) else FINAL_ANY
         slots.append({"no": no, "q_type": t, "points": final_points(q.get("points"))})
+        keys.append(_final_src_key(q))
+    g = -1
+    for i, k in enumerate(keys):
+        if i == 0 or not k or k != keys[i - 1]:
+            g += 1
+        slots[i]["grp"] = g
     miss = [s for s in slots if not s["points"]]
     if miss:  # 배점을 못 읽은 문항: 100점에서 남는 점수를 나눠 줌 (말이 안 되면 4점)
         rest = round(100 - sum(s["points"] for s in slots), 1)
@@ -12151,6 +12261,147 @@ def final_slots(ex: Dict) -> List[Dict]:
         if 2 <= rest / len(miss) <= 6:
             miss[-1]["points"] = round(miss[-1]["points"] + rest - each * len(miss), 1)  # 반올림 차이는 마지막 칸에
     return slots
+
+# ---- 한 지문 묶음 (2026-11-16 선생님 요청) ----
+#   같은 지문으로 문제를 따로따로 내면(예: 4·5·6번이 한 지문의 서로 다른 변형) 학생이 지문끼리 비교해 답을 맞힐 수 있음
+#   → 지문 하나는 시험지에 한 번만 · 문항이 지문보다 많으면 실제 기출(제일고·운양고 52회)처럼 한 지문에 2문제 묶음 (2문제로도 모자라면 3문제)
+#   → 지문이 문항보다 많으면 시험에 나올 가능성이 높은 지문만
+FINAL_SET_MARK = ["낱말 (문맥상)", "어법 (조합형)", "어법 (단일)", "빈칸", "함축 의미"]  # 지문에 밑줄·빈칸 표시를 넣는 유형 → 묶음 첫 문제 (묶음에 하나만)
+FINAL_SET_PLAIN = ["주제", "제목", "요지·주장", "내용 일치·불일치", "추론 (추론 가능·불가)", "요약문 (A)(B)", "<보기> 일치 조합형"]  # 지문을 그대로 두고 묻는 유형 → 짝
+# 실제 기출에서 모의고사 18·19(목적·심경)·25(도표)·27·28(안내문)·43~45(장문 이야기)는 거의 안 나왔고 26(인물)은 가끔 → 시험에 나올 가능성을 낮게
+FINAL_RARE_NO = {"18": 0.3, "19": 0.3, "25": 0.2, "26": 0.5, "27": 0.2, "28": 0.2, "43~45": 0.3, "43": 0.3, "44": 0.3, "45": 0.3}
+
+def final_likely(p: Dict) -> (float, str):
+    """지문이 실제 시험에 나올 가능성 (AI 없음) → (점수, 이유): 교과서 본문 > 모의고사 주요 번호 > 거의 안 나오는 번호 · 같으면 긴 지문 (2문제를 낼 내용이 있음)"""
+    label = str(p.get("label", ""))
+    words = len(str(p.get("body_text", "")).split())
+    why = ""
+    if p.get("source_type") == "textbook":
+        base, why = 1.2, "교과서 본문"
+    else:
+        num = str(p.get("number") or "").strip()
+        if not num:
+            m = re.search(r"\]\s*(\d+(?:~\d+)?)\s*번", label)
+            num = m.group(1) if m else ""
+        base = FINAL_RARE_NO.get(num, 1.0) if re.search(r"\d+\s*월", label) else 1.0
+        if base < 0.6:
+            why = "실제 시험에 거의 안 나오는 번호"
+    return round(base * (0.85 + 0.3 * min(1.0, words / 300)), 3), why
+
+def final_groups(slots: List[Dict]) -> List[List[int]]:
+    """칸 → 지문 하나에 해당하는 칸 묶음 목록 (grp가 없는 예전 칸은 칸마다 따로)"""
+    gs = {}
+    for i, s in enumerate(slots):
+        gs.setdefault(s.get("grp", ("i", i)), []).append(i)
+    return list(gs.values())
+
+def _final_kind(t: str) -> str:
+    if t in FINAL_SET_MARK:
+        return "mark"
+    if t in FINAL_SET_PLAIN:
+        return "plain"
+    return "any" if t == FINAL_ANY else "no"
+
+def final_structure(slots: List[Dict], n_passages: int) -> List[Dict]:
+    """실제 기출 칸을 고른 지문 수에 맞게 묶음 → 새 칸 목록 (grp = 지문 하나)
+    묶음 수 = min(지문 수, 문항 수). 문항이 남으면 한 지문 2문제 묶음(그래도 모자라면 3문제) — 실제 기출에서 묶였던 칸끼리 먼저,
+    묶음 하나에 표시 유형(어법·낱말·빈칸)은 하나 + 그대로 묻는 유형(주제·제목·일치 …). 순서·삽입은 꼭 필요할 때만 그대로 묻는 유형으로 바꿔 묶고, 서술형은 묶지 않음"""
+    S = len(slots)
+    out = [dict(s) for s in slots]
+    if not S:
+        return out
+    G = max(1, min(int(n_passages or 0) or S, S))
+    base_n, extra = S // G, S % G  # 묶음 크기: extra개는 base_n+1문제, 나머지는 base_n문제 (문항이 지문의 2배 이하면 2문제 묶음 extra개 + 한 문제)
+    tmpl = {i: s.get("grp", ("i", i)) for i, s in enumerate(slots)}
+    gs = [[i] for i in range(S)]
+
+    def cost(a: List[int], b: List[int]):
+        idx = a + b
+        if any(out[i]["q_type"] in QB_ESSAY_TYPES for i in idx):
+            return None
+        kinds = [_final_kind(out[i]["q_type"]) for i in idx]
+        c = 8.0 * kinds.count("no") + 5.0 * max(0, kinds.count("mark") - 1)  # 바꿔야 하는 유형이 있으면 나중에
+        if "mark" not in kinds and "any" not in kinds:
+            c += 1.0  # 그대로 묻는 유형끼리 (실제로도 가끔: 주제 + 내용 일치)
+        if any(tmpl[i] == tmpl[j] for i in a for j in b):
+            c -= 4.0  # 실제 기출에서 한 지문에 묶였던 칸끼리
+        return c + 0.01 * abs(min(a) - min(b)) / S
+
+    # 크기 단계별로: 2문제 묶음을 필요한 만큼 → (모자라면) 그중 일부에 한 문제씩 더해 3문제 … (한 문제 칸을 남겨 두어야 다음 단계가 됨)
+    for size in range(2, base_n + 2):
+        need = G if size <= base_n else extra  # 이 크기 이상이어야 하는 묶음 수
+        while sum(1 for g in gs if len(g) >= size) < need:
+            best = None
+            for x in range(len(gs)):
+                if len(gs[x]) != size - 1:
+                    continue
+                for y in range(len(gs)):
+                    if y == x or len(gs[y]) != 1 or (size == 2 and y < x):
+                        continue
+                    c = cost(gs[x], gs[y])
+                    if c is not None and (best is None or c < best[0]):
+                        best = (c, x, y)
+            if best is None:
+                break  # 서술형만 남는 등 더 묶을 수 없음
+            _, x, y = best
+            gs[x] = sorted(gs[x] + gs[y])
+            del gs[y]
+    used = {}
+    for s in out:
+        used[s["q_type"]] = used.get(s["q_type"], 0) + 1
+
+    def swap(i: int, pool: List[str]):
+        new = min(pool, key=lambda t: (used.get(t, 0), pool.index(t)))
+        used[out[i]["q_type"]] = used.get(out[i]["q_type"], 1) - 1
+        out[i]["q_type"] = new
+        used[new] = used.get(new, 0) + 1
+
+    for g in gs:
+        if len(g) < 2:
+            continue
+        marks = [i for i in g if _final_kind(out[i]["q_type"]) == "mark"]
+        for i in g:
+            if _final_kind(out[i]["q_type"]) == "no" or (i in marks and i != marks[0]):
+                swap(i, [t for t in FINAL_SET_PLAIN if t not in [out[j]["q_type"] for j in g]] or FINAL_SET_PLAIN)
+        for i in g:
+            if out[i]["q_type"] == FINAL_ANY:
+                has_mark = any(_final_kind(out[j]["q_type"]) == "mark" for j in g)
+                pool = [t for t in (FINAL_SET_PLAIN if has_mark else FINAL_SET_MARK) if t not in [out[j]["q_type"] for j in g]]
+                swap(i, pool or FINAL_SET_PLAIN)
+    for k, g in enumerate(sorted(gs, key=min)):
+        for i in g:
+            out[i]["grp"] = k
+    return out
+
+def final_passage_plan(labels: List[str], by_label: Dict, slots: List[Dict]) -> (List[str], List, List[str], Dict):
+    """고른 지문 → (쓸 지문, 칸별 정해진 지문 — 묶음 칸만, 뺀 지문, {지문: (가능성, 이유)})
+    지문이 묶음 수보다 많으면 시험에 나올 가능성이 높은 지문만 · 2문제 묶음 지문은 그중 가능성이 높고 긴 지문 (큰 묶음일수록 위에서부터)"""
+    gs = final_groups(slots)
+    order = {l: i for i, l in enumerate(labels)}
+    lk = {l: final_likely(by_label.get(l) or {"label": l}) for l in labels}
+    keep, dropped = list(labels), []
+    if len(labels) > len(gs):
+        top = set(sorted(labels, key=lambda l: (-lk[l][0], order[l]))[:len(gs)])
+        keep = [l for l in labels if l in top]
+        dropped = [l for l in labels if l not in top]
+    multi = sorted([g for g in gs if len(g) > 1], key=lambda g: (-len(g), min(g)))
+    set_labs = sorted(keep, key=lambda l: (-lk[l][0], order[l]))[:len(multi)]
+    want = [None] * len(slots)
+    for g, l in zip(multi, set_labs):
+        for i in g:
+            want[i] = l
+    return keep, want, dropped, lk
+
+def final_used_sources(sb) -> List[tuple]:
+    """'클리닉·시험지에 쓴 문제 빼기'가 빼는 기록 → [(종류, 이름, 문제 id 집합)]: 변형문제 시험지 '문항 기록 저장'·시험지 보관함·클리닉 보관함"""
+    out = []
+    for kind, recs in (("시험지 문항 기록", qb_exam_log(sb)), ("시험지 보관함", qb_exam_saved(sb)), ("클리닉", qb_clinic_saved(sb))):
+        for r in recs or []:
+            if isinstance(r, dict):
+                q = {x for x in (r.get("qids") or []) if isinstance(x, str)}
+                if q:
+                    out.append((kind, str(r.get("title") or r.get("name") or "")[:40], q))
+    return out
 
 def final_load(sb) -> List[Dict]:
     return (_store_get(sb, FINAL_FILE, {}) or {}).get("records", [])
@@ -12200,8 +12451,11 @@ def final_row_words(r: Dict) -> int:
     return _final_words(" ".join(str(c.get(k) or "") for k in ("given", "passage", "box")))
 
 def _final_pkey(r: Dict) -> str:
-    """같은 글을 그대로 쓰는 문제끼리 묶는 열쇠 (원문 지문을 그대로 쓰는 주제·일치형 등은 한 지문에 여러 문제로 묶임)"""
-    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", str((r.get("content") or {}).get("passage", "")))).strip()
+    """같은 글을 그대로 쓰는 문제끼리 묶는 열쇠 (원문 지문을 그대로 쓰는 주제·일치형 등은 한 지문에 여러 문제로 묶임 · 한 지문 묶음은 묶음 표시로)"""
+    c = r.get("content") or {}
+    if c.get("set_id"):
+        return "SET:" + str(c["set_id"])
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", str(c.get("passage", "")))).strip()
 
 def _final_row_parts(r: Dict, base: Dict) -> List[str]:
     """문제가 다루는 고른 지문 (묶은 지문 문제는 고른 지문마다)"""
@@ -12217,9 +12471,11 @@ def final_pred(slots: List[Dict], assign: List) -> float:
     chosen = [(s, r) for s, r in zip(slots, assign) if r is not None]
     return sum(s["points"] * FINAL_P.get(r["difficulty"], 0.6) for s, r in chosen) * 100 / (sum(s["points"] for s, _ in chosen) or 1)
 
-def final_assign(rows: List[Dict], slots: List[Dict], labels: List[str], target_raw: float, word_target: int, seed: int) -> (List, List[str], float):
+def final_assign(rows: List[Dict], slots: List[Dict], labels: List[str], target_raw: float, word_target: int, seed: int,
+                 distinct: bool = False) -> (List, List[str], float):
     """문항 칸마다 맞는 유형 문제를 고름 (AI 호출 없음) → (칸별 문제 또는 None, 알림, 예상 평균)
-    목표: 고른 지문을 모두 한 문제 이상 (지문이 칸보다 많으면 칸마다 서로 다른 지문) · 예상 평균 ≈ 목표 · 지문을 골고루 · 지문 단어 수 ≈ 실제 기출"""
+    목표: 고른 지문을 모두 한 문제 이상 (지문이 칸보다 많으면 칸마다 서로 다른 지문) · 예상 평균 ≈ 목표 · 지문을 골고루 · 지문 단어 수 ≈ 실제 기출
+    distinct: 한 지문은 한 칸에만 (같은 지문을 따로 낸 문제끼리 비교해 답을 맞히지 못하게 — 2026-11-16)"""
     rnd = random.Random(seed)
     rows = qb_dedupe_rows(rows)
     base = {l: i for i, l in enumerate(labels)}
@@ -12251,7 +12507,7 @@ def final_assign(rows: List[Dict], slots: List[Dict], labels: List[str], target_
     # 처음 배치: 칸 순서를 섞어, 아직 안 들어간 지문의 문제를 먼저
     used, assign, covered = set(), [None] * len(slots), set()
     for i in rnd.sample(range(len(slots)), len(slots)):
-        free = [r for r in cands[i] if id(r) not in used]
+        free = [r for r in cands[i] if id(r) not in used and not (distinct and set(parts[id(r)]) & covered)]
         if not free:
             continue
         new = [r for r in free if not set(parts[id(r)]) <= covered]
@@ -12259,6 +12515,24 @@ def final_assign(rows: List[Dict], slots: List[Dict], labels: List[str], target_
         used.add(id(r))
         covered |= set(parts[id(r)])
         assign[i] = r
+    if distinct:
+        # 빈 칸: 그 칸에 맞는 문제의 지문을 다른 칸이 쓰고 있으면, 그 칸을 다른 지문 문제로 바꿀 수 있을 때 옮김 (한 단계)
+        for i in [k for k, r in enumerate(assign) if r is None]:
+            done = False
+            for r in cands[i]:
+                if id(r) in used or done:
+                    continue
+                hold = [j for j, x in enumerate(assign) if x is not None and set(parts[id(x)]) & set(parts[id(r)])]
+                if len(hold) != 1:
+                    continue
+                j = hold[0]
+                taken = {p for k, x in enumerate(assign) if x is not None and k != j for p in parts[id(x)]} | set(parts[id(r)])
+                alt = next((x for x in cands[j] if id(x) not in used and not set(parts[id(x)]) & taken), None)
+                if alt is not None:
+                    used.discard(id(assign[j]))
+                    assign[j], assign[i] = alt, r
+                    used |= {id(alt), id(r)}
+                    done = True
     best, _ = score(assign)
     idx = [i for i, r in enumerate(assign) if r is not None]
     for _ in range(5000 if idx else 0):
@@ -12266,6 +12540,8 @@ def final_assign(rows: List[Dict], slots: List[Dict], labels: List[str], target_
         r = rnd.choice(cands[i])
         if id(r) in used:
             continue  # 같은 유형 두 칸끼리 맞바꾸기는 점수가 같으니 건너뜀
+        if distinct and any(set(parts[id(r)]) & set(parts[id(x)]) for j, x in enumerate(assign) if j != i and x is not None):
+            continue  # 다른 칸이 이미 쓴 지문
         old = assign[i]
         assign[i] = r
         e, _ = score(assign)
@@ -12327,51 +12603,138 @@ def final_pick(rows: List[Dict], slots: List[Dict], labels: List[str], target_ra
     assign, notes, pred = final_assign(rows, slots, labels, target_raw, word_target, seed)
     return final_order(slots, assign, labels), notes, pred
 
-def final_fill_plan(slots: List[Dict], assign: List, labels: List[str], target_raw: float, fix_level: bool = False) -> (List, List[Dict]):
-    """빈 칸과 안 들어간 지문을 새 문제로 채울 계획 → (칸별 문제 — 일부 칸을 비울 수 있음, [{i, label, q_type, level, why}])
-    - 고른 지문이 칸 수 이하면 모든 지문이 한 문제 이상: 빈 칸이 모자라면 두 문제 이상 든 지문의 선택형 칸 하나를 새 문제 칸으로
-    - 빈 칸에는 안 들어간 지문 먼저, 그다음 문제가 적게 든 지문 · '아무 유형' 칸은 이 시험에 적게 쓴 유형으로
+def final_assign_groups(rows: List[Dict], slots: List[Dict], labels: List[str], want: List, target_raw: float, word_target: int,
+                        seed: int) -> (List, List[str]):
+    """묶음 구조대로 은행에서 채움 (AI 호출 없음) → (칸별 문제 또는 None, 알림)
+    한 문제 칸: 묶음 지문이 아닌 지문에서 서로 다른 지문으로 (한 지문은 한 칸에만) · 묶음 칸: 정해진 지문의 은행 묶음(같은 지문으로 함께 만든 문제)이 있으면 그것
+    (묶음 짝 문제는 첫 문제의 밑줄·빈칸이 남은 지문이라 한 문제 칸에는 안 씀)"""
+    base = {l: i for i, l in enumerate(labels)}
+    gs = final_groups(slots)
+    singles = [g[0] for g in gs if len(g) == 1]
+    set_labs = {l for l in want if l}
+    one_labs = [l for l in labels if l not in set_labs]
+    one_rows = [r for r in rows if len(_final_row_parts(r, base)) == 1 and _final_row_parts(r, base)[0] in one_labs
+                and int((r.get("content") or {}).get("set_no") or 1) < 2]
+    a1, _, _ = final_assign(one_rows, [slots[i] for i in singles], one_labs, target_raw, word_target, seed, distinct=True)
+    assign = [None] * len(slots)
+    for i, r in zip(singles, a1):
+        assign[i] = r
+    by_set = {}
+    for r in rows:
+        c = r.get("content") or {}
+        if c.get("set_id"):
+            by_set.setdefault((r["passage_label"], str(c["set_id"])), []).append(r)
+    n_bank_set = 0
+    for g in gs:
+        if len(g) < 2 or not want[g[0]]:
+            continue
+        for (l, _sid), mem in by_set.items():
+            if l != want[g[0]]:
+                continue
+            pool, pick = sorted(mem, key=_qb_src_no), {}
+            for i in g:
+                r = next((x for x in pool if x["q_type"] == slots[i]["q_type"]), None)
+                if r is None:
+                    break
+                pick[i] = r
+                pool.remove(r)
+            if len(pick) == len(g) and any(int((x.get("content") or {}).get("set_no") or 1) == 1 for x in pick.values()):
+                for i, r in pick.items():
+                    assign[i] = r
+                n_bank_set += 1
+                break
+    notes = []
+    empty = {}
+    for i in singles:
+        if assign[i] is None:
+            empty[slots[i]["q_type"]] = empty.get(slots[i]["q_type"], 0) + 1
+    if empty:
+        notes.append("은행에 맞는 문제가 없는 한 문제 칸: " + ", ".join(f"{t} {n}칸" for t, n in empty.items())
+                     + " → 아래 '새 문제로 채우기'로 그 칸 지문에 맞게 새로 만들어요.")
+    have = {}
+    for r in one_rows:
+        for p in _final_row_parts(r, base):
+            have[p] = have.get(p, 0) + 1
+    got = {p for i in singles if assign[i] is not None for p in _final_row_parts(assign[i], base)}
+    miss = [l for l in one_labs if l not in got]
+    if miss:
+        why = lambda l: f"{l}(고를 수 있는 문제 0개)" if not have.get(l) else f"{l}(문제 {have[l]}개 있지만 남은 칸 유형과 안 맞음)"
+        notes.append(f"은행 문제가 안 들어간 지문 {len(miss)}개: " + ", ".join(why(l) for l in miss[:5]) + (f" 외 {len(miss) - 5}개" if len(miss) > 5 else "")
+                     + " → '새 문제로 채우기'로 그 지문 문제를 새로 만들어 넣어요.")
+    n_sets = sum(1 for g in gs if len(g) > 1)
+    if n_sets > n_bank_set:
+        notes.append(f"한 지문 묶음 {n_sets - n_bank_set}개는 은행에 같은 지문으로 함께 만든 묶음이 없어서 새로 만들어요 "
+                     "(지문은 한 번만 싣고 그 지문으로 문제 2개).")
+    return assign, notes
+
+def final_fill_plan(slots: List[Dict], assign: List, labels: List[str], target_raw: float, fix_level: bool = False,
+                    want: List = None) -> (List, List[Dict]):
+    """빈 칸을 새 문제로 채울 계획 → (칸별 문제 — 일부 칸을 비울 수 있음, [{i, label, q_type, level, why, (set, set_no, lead_id)}])
+    - 묶음 칸(한 지문 2~3문제): 정해진 지문(want)으로 묶음 통째로 · 첫 문제가 이미 있으면 그 지문에 짝만
+    - 한 문제 칸: 안 들어간 지문 먼저 (한 지문은 한 칸에만), '아무 유형' 칸은 이 시험에 적게 쓴 유형으로
     - 난이도는 채운 칸과 합쳐 예상 평균이 목표에 가깝게 (어법 단일형은 최상이면 조합형으로 바뀌어 상까지)
-    - fix_level: 그래도 예상 평균이 목표와 3점 넘게 다르면, 너무 어려운(쉬운) 문제 칸을 같은 지문·유형의 새 문제 칸으로 바꿔 맞춤"""
+    - fix_level: 그래도 예상 평균이 목표와 3점 넘게 다르면, 한 문제 칸 중 너무 어려운(쉬운) 문제를 같은 지문·유형의 새 문제로 바꿔 맞춤"""
     base = {l: i for i, l in enumerate(labels)}
     assign = list(assign)
+    want = list(want) if want else [None] * len(slots)
+    gs = final_groups(slots)
     cnt = {l: 0 for l in labels}
     for r in assign:
         if r is not None:
             for p in _final_row_parts(r, base):
                 if p in cnt:
                     cnt[p] += 1
-    empty = [i for i, r in enumerate(assign) if r is None]
-    uncovered = [l for l in labels if cnt[l] == 0]
-    if len(labels) <= len(slots) and len(uncovered) > len(empty):
-        need = len(uncovered) - len(empty)
-        order = sorted([i for i, r in enumerate(assign) if r is not None and slots[i]["q_type"] not in QB_ESSAY_TYPES],
-                       key=lambda i: (-min(cnt.get(p, 0) for p in _final_row_parts(assign[i], base)), slots[i]["points"]))
-        for i in order:
-            if need <= 0:
-                break
-            ps = _final_row_parts(assign[i], base)
-            if all(cnt.get(p, 0) >= 2 for p in ps):
-                for p in ps:
-                    cnt[p] -= 1
-                assign[i] = None
-                empty.append(i)
-                need -= 1
     used_pt = {(p, r["q_type"]) for r in assign if r is not None for p in _final_row_parts(r, base)}
     t_used = {}
     for r in assign:
         if r is not None:
             t_used[r["q_type"]] = t_used.get(r["q_type"], 0) + 1
-    queue, plan = list(uncovered), []
+    plan = []
+    # 1) 한 지문 묶음
+    for g in gs:
+        if len(g) < 2 or all(assign[i] is not None for i in g):
+            continue
+        have = [assign[i] for i in g if assign[i] is not None]
+        lead = next((r for r in have if (r.get("content") or {}).get("set_id")), None)
+        if have and lead is None:  # 묶음이 아닌 문제가 섞여 있으면 묶음 통째로 다시
+            for i in g:
+                if assign[i] is not None:
+                    for p in _final_row_parts(assign[i], base):
+                        cnt[p] = cnt.get(p, 1) - 1
+                    assign[i] = None
+            have = []
+        lab = want[g[0]] or (_final_row_parts(have[0], base)[0] if have else None)
+        if not lab:
+            free = [l for l in labels if cnt.get(l, 0) == 0] or labels
+            if not free:
+                continue
+            lab = min(free, key=lambda l: (cnt.get(l, 0), base[l]))
+        key = ("lead:" + lead["id"]) if lead else uuid.uuid4().hex[:12]
+        for no, i in enumerate(g, 1):
+            if assign[i] is not None:
+                continue
+            t = slots[i]["q_type"]
+            if t == FINAL_ANY:
+                t = min(FINAL_SET_PLAIN, key=lambda x: (t_used.get(x, 0), FINAL_SET_PLAIN.index(x)))
+            plan.append({"i": i, "label": lab, "q_type": t, "level": "", "why": "set", "set": key, "set_no": no,
+                         **({"lead_id": lead["id"]} if lead else {})})
+            cnt[lab] = cnt.get(lab, 0) + 1
+            used_pt.add((lab, t))
+            t_used[t] = t_used.get(t, 0) + 1
+    # 2) 한 문제 칸
+    singles = {g[0] for g in gs if len(g) == 1}
+    empty = [i for i in sorted(singles) if assign[i] is None]
+    uncovered = [l for l in labels if cnt.get(l, 0) == 0]
+    queue = list(uncovered)
     if len(queue) > len(empty) and empty:
-        # 안 들어간 지문이 빈 칸보다 많으면 (고른 지문이 문항보다 많을 때) 범위 앞쪽만 쓰지 않게 고르게 띄엄띄엄
+        # 안 들어간 지문이 빈 칸보다 많으면 범위 앞쪽만 쓰지 않게 고르게 띄엄띄엄
         queue = [queue[int(k * len(queue) / len(empty))] for k in range(len(empty))]
-    for i in sorted(empty):
+    for i in empty:
         t = slots[i]["q_type"]
         if queue:
             lab = queue.pop(0)
         elif labels:
-            lab = min(labels, key=lambda l: (cnt[l], (l, t) in used_pt, base[l]))
+            lab = min(labels, key=lambda l: (cnt.get(l, 0), (l, t) in used_pt, base[l]))
         else:
             continue
         if t == FINAL_ANY:
@@ -12390,9 +12753,9 @@ def final_fill_plan(slots: List[Dict], assign: List, labels: List[str], target_r
         rest = sum(slots[x["i"]]["points"] for x in free)
         for x in sorted(free, key=lambda x: -slots[x["i"]]["points"]):
             pt = slots[x["i"]]["points"]
-            want = (goal - have) / max(rest, 0.1)
+            want_p = (goal - have) / max(rest, 0.1)
             lvs = [lv for lv in QB_LEVELS if not (x["q_type"] == "어법 (단일)" and lv == "최상")]
-            x["level"] = min(lvs, key=lambda lv: abs(FINAL_P[lv] - want))
+            x["level"] = min(lvs, key=lambda lv: abs(FINAL_P[lv] - want_p))
             have += pt * FINAL_P[x["level"]]
             rest -= pt
 
@@ -12406,8 +12769,8 @@ def final_fill_plan(slots: List[Dict], assign: List, labels: List[str], target_r
         if abs(e - target_raw) <= 3:
             break
         low = e < target_raw
-        cand = [i for i, r in enumerate(assign) if r is not None and slots[i]["q_type"] not in QB_ESSAY_TYPES
-                and r.get("difficulty") in (("최상", "상") if low else ("하", "중"))]
+        cand = [i for i in singles if assign[i] is not None and slots[i]["q_type"] not in QB_ESSAY_TYPES
+                and assign[i].get("difficulty") in (("최상", "상") if low else ("하", "중"))]
         if not cand:
             break
         i = (min if low else max)(cand, key=lambda i: (FINAL_P.get(assign[i]["difficulty"], 0.6), -slots[i]["points"] if low else slots[i]["points"]))
@@ -12438,13 +12801,27 @@ def final_plan_cost(model_spec: str, plan: List[Dict]) -> float:
 
 def final_plan_enqueue(plan: List[Dict], by_label: Dict, school: str, grade: str, tag: str, text_model: str, api_delay: int,
                        academy_name: str, school_name: str) -> int:
-    """계획대로 (지문, 유형, 난이도)마다 필요한 개수만 만들기 작업에 추가 — 만든 문제에 초안 id가 붙어 그 칸에 바로 들어감"""
-    groups = {}
+    """계획대로 (지문, 유형, 난이도)마다 필요한 개수만 만들기 작업에 추가 — 만든 문제에 초안 id가 붙어 그 칸에 바로 들어감
+    한 지문 묶음은 묶음마다 작업 1건 (첫 문제 + 짝 문제들, 지문은 첫 문제 지문 하나) · 첫 문제가 이미 있으면 짝만"""
+    groups, sets = {}, {}
     for x in plan:
-        if x["label"] in by_label:
-            k = (x["label"], x["q_type"], x["level"])
-            groups[k] = groups.get(k, 0) + 1
+        if x["label"] not in by_label:
+            continue
+        if x.get("set"):
+            sets.setdefault(x["set"], []).append(x)
+            continue
+        k = (x["label"], x["q_type"], x["level"])
+        groups[k] = groups.get(k, 0) + 1
     tuples = [(by_label[l], t, lv, n) for (l, t, lv), n in groups.items()]
+    for key, xs in sets.items():
+        xs = sorted(xs, key=lambda x: x.get("set_no", 0))
+        mates = lambda ys: [{"q_type": y["q_type"], "difficulty": y["level"], "set_no": y.get("set_no", 0)} for y in ys]
+        if xs[0].get("lead_id"):
+            tuples.append((by_label[xs[0]["label"]], xs[0]["q_type"], xs[0]["level"], 1, {"set_lead_id": xs[0]["lead_id"], "set_with": mates(xs)}))
+        else:
+            lead = next((x for x in xs if x["q_type"] in FINAL_SET_MARK), xs[0])
+            tuples.append((by_label[lead["label"]], lead["q_type"], lead["level"], 1,
+                           {"set_id": key, "set_no": lead.get("set_no", 1), "set_with": mates([x for x in xs if x is not lead])}))
     if not tuples:
         return 0
     return enqueue_qbank([], [], [], school, 1, True, text_model, api_delay, academy_name, school_name, True, "mix", False,
@@ -12463,6 +12840,11 @@ def final_draft_assign(sb, d: Dict) -> List:
         if i >= len(assign) or assign[i] is not None:
             continue
         pool = [r for r in tagged if r["id"] not in used and r["passage_label"] == x["label"]]
+        if x.get("set"):  # 한 지문 묶음: 묶음 안 같은 자리 문제만 (첫 문제가 짝 칸에 들어가지 않게)
+            pool = [r for r in pool if (r.get("content") or {}).get("set_id")
+                    and int((r.get("content") or {}).get("set_no") or 0) == int(x.get("set_no") or 0)]
+        else:
+            pool = [r for r in pool if not (r.get("content") or {}).get("set_id")]
         if pool:
             r = min(pool, key=lambda r: (r["q_type"] != x["q_type"], r["difficulty"] != x["level"], str(r.get("created_at", ""))))
             assign[i] = r
@@ -12586,7 +12968,8 @@ def render_final_exam(qs: List[Dict], meta: Dict) -> str:
             o.append(f"<div class='q'><div class='sethead'>[{mc_no}~{mc_no + last - i}] 다음 글을 읽고, 물음에 답하시오.</div>"
                      f"<div class='passage'>{qb_paras(c.get('passage'))}</div></div>")
         pt = r.get("points", 0)
-        o.append(f"<div class='q'><div class='stem'><span class='no'>{label}</span> {qb_html(c.get('stem'))} <span class='pt'>[{pt:g}점]</span></div>")
+        stem = qb_set_stem(c.get("stem")) if in_set and str(k).startswith("SET:") else c.get("stem")  # 한 지문 묶음: '윗글의 ~'
+        o.append(f"<div class='q'><div class='stem'><span class='no'>{label}</span> {qb_html(stem)} <span class='pt'>[{pt:g}점]</span></div>")
         if c.get("given"):
             o.append(f"<div class='given'>{qb_paras(c['given'])}</div>")
         if not in_set:
@@ -12711,7 +13094,8 @@ def render_final_tab(text_model: str, api_delay: int, academy_name: str, school_
                                 placeholder="과목 (예: 공통영어2, 영어Ⅱ)", label_visibility="collapsed")
         from datetime import datetime, timedelta, timezone
         today = datetime.now(timezone(timedelta(hours=9)))
-        date = c2.text_input("시행일", value=f"{today.year}년 {today.month}월 {today.day}일", key="final_date", label_visibility="collapsed")
+        # 시행일은 비워 두면 시험지에 빈칸 (2026-11-16 선생님 요청: 나중에 손으로 씀)
+        date = c2.text_input("시행일", value="", placeholder="시행일 (비우면 시험지에 빈칸)", key="final_date2", label_visibility="collapsed").strip()
 
     delta, n_cal = final_delta(recs, school, grade)
     if rounds:
@@ -12760,7 +13144,7 @@ def render_final_tab(text_model: str, api_delay: int, academy_name: str, school_
             if len(qs) < len(rec.get("items", [])):
                 st.warning(f"저장 뒤에 지워진 문제 {len(rec['items']) - len(qs)}개는 빼고 만들었어요.")
             meta = {"school": school, "grade": grade, "round": rec["round"], "subject": rec.get("subject", subject), "term": series,
-                    "date": rec.get("exam_date", date), "academy": academy_name, "predicted": rec.get("predicted")}
+                    "date": date, "academy": academy_name, "predicted": rec.get("predicted")}  # 시행일은 지금 칸 그대로 (비우면 빈칸)
             st.session_state.final_re = (rec["round"], render_final_exam(qs, {**meta, "with_answers": False}), render_final_exam(qs, {**meta, "with_answers": True}))
         if st.session_state.get("final_re"):
             rn, stu, tea = st.session_state.final_re
@@ -12789,15 +13173,24 @@ def render_final_tab(text_model: str, api_delay: int, academy_name: str, school_
         t_id = _qb_row("참고 기출").selectbox("참고 기출", [e for e, _ in tmpls], key=f"final_tmpl_{school}_{grade}", label_visibility="collapsed",
                                              format_func=lambda e: (lambda x: f"{x['display']} · {len(x.get('questions', []))}문항")(gmap["exams"][e]),
                                              index=next((i for i, (e, _) in enumerate(tmpls) if e == last.get("template")), 0))
-        slots = final_slots(gmap["exams"][t_id])
+        ex_t = gmap["exams"][t_id]
+        full_types = final_full_types(sb, t_id) if any(q.get("q_type") not in QB_TYPES for q in ex_t.get("questions", [])) else {}
+        slots_t = final_slots(ex_t, full_types)
+        lab_order0 = sorted(sel, key=lambda l: natural_sort_key({"label": l}))
+        slots = final_structure(slots_t, len(sel))  # 고른 지문 수에 맞춘 한 지문 묶음 구조
+        keep, want, dropped, lk = final_passage_plan(lab_order0, by_label, slots)
         tcount = {}
         for s in slots:
             tcount[s["q_type"]] = tcount.get(s["q_type"], 0) + 1
         n_essay = sum(1 for s in slots if s["q_type"] in QB_ESSAY_TYPES)
         st.markdown(f"<div class='qb-note'>총 <b>{len(slots)}문항</b> (선택형 {len(slots) - n_essay} · 서술형 {n_essay}) · "
                     f"총 <b>{sum(s['points'] for s in slots):g}점</b> &nbsp;|&nbsp; " + " · ".join(f"{t} {n}" for t, n in tcount.items()) + "</div>", unsafe_allow_html=True)
+        t_sets = [g for g in final_groups(slots_t) if len(g) > 1]
+        st.markdown(f"<div class='qb-note'>📐 참고 기출은 지문 {len(final_groups(slots_t))}개로 {len(slots_t)}문항 — 한 지문에 여러 문제를 묶은 곳 {len(t_sets)}개"
+                    + (" (" + " · ".join(f"{slots_t[g[0]]['no']}~{slots_t[g[-1]]['no']}번" for g in t_sets) + ")" if t_sets else "") + "</div>",
+                    unsafe_allow_html=True)
         if tcount.get(FINAL_ANY):
-            st.markdown(f"<div class='qb-note'>'{FINAL_ANY}' {tcount[FINAL_ANY]}칸은 기출 표시에서 유형을 알아보지 못한 문항이에요. "
+            st.markdown(f"<div class='qb-note'>'{FINAL_ANY}' {tcount[FINAL_ANY]}칸은 기출 분석에서 유형을 알아보지 못한 문항이에요 (예: 지칭). "
                         "문항 수를 실제 시험과 같게 하려고 다른 선택형 문제로 채워요.</div>", unsafe_allow_html=True)
         tgt_words = final_word_target(words, gmap, school, grade)
         if tgt_words:
@@ -12824,24 +13217,37 @@ def render_final_tab(text_model: str, api_delay: int, academy_name: str, school_
             other_school = o3.checkbox("다른 학교 스타일 변형도 쓰기", value=False, key="final_other", help="끄면 이 학교 스타일로 만든 변형문제만 써요")
             use_imp = bool(qb_import_log(sb)) and _qb_row("가져온 TEST 문제").checkbox(
                 "파일로 가져온 TEST 문제도 넣기", value=False, key="final_imp", help="끄면 이 앱에서 만든 문제만 써요 (학생이 이미 푼 TEST 문제가 FINAL에 다시 나오지 않게)")
-    lab_order = sorted(sel, key=lambda l: natural_sort_key({"label": l}))
+    lab_order = keep  # 시험에 넣을 지문 (지문이 문항보다 많으면 나올 가능성이 높은 지문만)
     if sel:
-        if len(sel) <= len(slots):
-            st.caption(f"📌 고른 지문 {len(sel)}개를 모두 한 문제 이상 넣어요 (문항 {len(slots)}개).")
+        multi = [g for g in final_groups(slots) if len(g) > 1]
+        set_labs = list(dict.fromkeys(l for l in want if l))
+        if dropped:
+            st.warning(f"고른 지문 {len(sel)}개가 문항 {len(slots)}개보다 많아서, 시험에 나올 가능성이 높은 지문 {len(keep)}개만 한 문제씩 넣어요. 뺀 지문: "
+                       + ", ".join(l + (f"({lk[l][1]})" if lk[l][1] else "") for l in dropped))
         else:
-            st.warning(f"고른 지문 {len(sel)}개가 문항 {len(slots)}개보다 많아서 모든 지문을 넣을 수는 없어요. 서로 다른 지문 {len(slots)}개에서 한 문제씩 내요.")
+            st.caption(f"📌 고른 지문 {len(keep)}개를 모두 넣고, 한 지문은 시험지에 한 번만 실어요 (같은 지문을 따로 내면 학생이 서로 비교해 답을 맞힐 수 있어서)."
+                       + (f" 문항이 {len(slots)}개라 지문 {len(multi)}개는 실제 기출처럼 한 지문에 "
+                          + ("2문제" if all(len(g) == 2 for g in multi) else "2~3문제") + " 묶음으로 내요." if multi else ""))
+        if set_labs:
+            st.caption("🧩 묶음 지문 (시험에 나올 가능성이 높고 긴 지문부터): " + ", ".join(set_labs)
+                       + " — 묶음 문제는 은행에 같은 지문으로 함께 만든 묶음이 없으면 새로 만들어요.")
     used_ids = {x["id"] for r in mine for x in r.get("items", [])}
-    used_other = (final_used_elsewhere(sb) - used_ids) if excl_used else set()
+    srcs = final_used_sources(sb) if excl_used else []
+    used_other = set().union(*(q for _, _, q in srcs)) - used_ids if srcs else set()
     if not fresh:
-        st.caption(f"🔁 {school} {grade} FINAL에서 이미 낸 문제 {len(used_ids)}개" + (f"와 클리닉·시험지에 쓴 문제 {len(used_other)}개" if used_other else "")
-                   + "는 빼고 뽑아요.")
+        kinds = {}
+        for kind, title, _q in srcs:
+            kinds.setdefault(kind, []).append(title)
+        st.caption(f"🔁 빼는 문제: {school} {grade} FINAL에서 이미 낸 문제 {len(used_ids)}개"
+                   + "".join(f" · {k} {len(ts)}개 (" + ", ".join(ts[:4]) + (f" 외 {len(ts) - 4}개" if len(ts) > 4 else "") + ")" for k, ts in kinds.items())
+                   + (" — 이 범위·이 학교 문제만 실제로 빠져요." if kinds else ""))
     draft = next((d for d in drafts if (d.get("school"), d.get("grade"), d.get("series")) == (school, grade, series)), None)
     active_drafts = {d["id"] for d in drafts}
 
     b1, b2 = st.columns([2, 1])
     again = False
     if fresh:
-        fplan = final_fill_plan(slots, [None] * len(slots), lab_order, target - delta)[1] if sel else []
+        fplan = final_fill_plan(slots, [None] * len(slots), lab_order, target - delta, want=want)[1] if sel else []
         fcost = final_plan_cost(text_model, fplan)
         make = b1.button(f"🤖 새 문제 {len(slots)}개로 {FINAL_TITLE} {next_round}회차 만들기 · 약 {fcost:,.0f}원", type="primary",
                          disabled=not sel or not series or draft is not None, use_container_width=True, key="final_make_new")
@@ -12859,7 +13265,7 @@ def render_final_tab(text_model: str, api_delay: int, academy_name: str, school_
         return {"id": uuid.uuid4().hex[:10], "school": school, "grade": grade, "series": series, "round": src["round"], "template": src["template"],
                 "subject": src["subject"], "date": src["date"], "labels": list(src["labels"]), "lab_order": list(src["lab_order"]),
                 "target": src["target"], "delta": src["delta"], "slots": src["slots"], "assign": assign_ids, "plan": plan,
-                "at": time.strftime("%Y-%m-%d %H:%M"), "mode": kind}
+                "want": list(src.get("want") or []), "at": time.strftime("%Y-%m-%d %H:%M"), "mode": kind}
 
     def start_draft(d: Dict, cost: float):
         key3 = (school, grade, series)
@@ -12871,24 +13277,35 @@ def render_final_tab(text_model: str, api_delay: int, academy_name: str, school_
         st.rerun()
 
     cur_src = {"round": next_round, "template": t_id, "subject": subject, "date": date, "labels": sel, "lab_order": lab_order,
-               "target": target, "delta": delta, "slots": slots}
+               "target": target, "delta": delta, "slots": slots, "want": want}
     if make and fresh:
         start_draft(new_draft(cur_src, [None] * len(slots), fplan, "new"), fcost)
     if (make or again) and not fresh:
-        sel_links = [l for l in links if set(qb_link_parts(l)[1]) <= set(sel)]
-        rows = [r for r in qb_fetch(sb, lab_order + sel_links)
-                if r["id"] not in used_ids and r["id"] not in used_other and (use_real or r["difficulty"] != QB_GICHUL_LEVEL)
-                and (other_school or r.get("school") == school or r["difficulty"] == QB_GICHUL_LEVEL)
-                and (use_imp or not (r.get("content") or {}).get("import"))
-                and (r.get("content") or {}).get("final_draft") not in active_drafts]
-        assign, notes, _ = final_assign(rows, slots, lab_order, target - delta, (tgt_words or {}).get("passage_words", 0), random.randint(1, 10**9))
+        all_rows = qb_fetch(sb, lab_order)  # 한 지문은 한 번만 실으니 두 지문을 묶은 연결 지문 문제는 쓰지 않음
+        ok_row = lambda r: ((use_real or r["difficulty"] != QB_GICHUL_LEVEL)
+                            and (other_school or r.get("school") == school or r["difficulty"] == QB_GICHUL_LEVEL)
+                            and (use_imp or not (r.get("content") or {}).get("import"))
+                            and (r.get("content") or {}).get("final_draft") not in active_drafts)
+        rows = [r for r in all_rows if ok_row(r) and r["id"] not in used_ids and r["id"] not in used_other]
+        assign, notes = final_assign_groups(rows, slots, lab_order, want, target - delta, (tgt_words or {}).get("passage_words", 0),
+                                            random.randint(1, 10**9))
+        # 이 범위에서 실제로 뺀 문제를 기록 이름별로 (VISION 시험지·클리닉 등)
+        cand_ids = {r["id"] for r in all_rows if ok_row(r)}
+        ex_txt = [f"'{t}' {len(q & cand_ids)}개" for _k, t, q in srcs if q & cand_ids]
+        if ex_txt or (used_ids & cand_ids):
+            notes.insert(0, "이 범위에서 뺀 문제: " + " · ".join(([f"이전 FINAL {len(used_ids & cand_ids)}개"] if used_ids & cand_ids else []) + ex_txt))
         st.session_state.final_built = {**cur_src, "school": school, "grade": grade, "series": series, "assign": assign, "notes": notes}
 
     fb = st.session_state.get("final_built")
     view = None
     if draft is not None:
+        d_want = list(draft.get("want") or []) or [None] * len(draft.get("slots") or [])
+        for x in draft.get("plan", []):  # 예전 초안: 묶음 칸 지문은 계획에서
+            if x.get("set") and x["i"] < len(d_want) and not d_want[x["i"]]:
+                d_want[x["i"]] = x["label"]
         view = {**{k: draft.get(k) for k in ("round", "template", "subject", "date", "labels", "target", "delta", "slots")},
-                "lab_order": draft.get("lab_order") or draft.get("labels") or [], "assign": final_draft_assign(sb, draft), "notes": [], "kind": "draft"}
+                "lab_order": draft.get("lab_order") or draft.get("labels") or [], "assign": final_draft_assign(sb, draft), "notes": [], "kind": "draft",
+                "want": d_want}
     elif fb and (fb.get("school"), fb.get("grade"), fb.get("series")) == (school, grade, series) and "assign" in fb:
         view = {**fb, "kind": "built"}
     if not view:
@@ -12904,6 +13321,8 @@ def render_final_tab(text_model: str, api_delay: int, academy_name: str, school_
     base = {l: i for i, l in enumerate(view["lab_order"])}
     covered = {p for r in qs for p in _final_row_parts(r, base)}
     n_cov = sum(1 for l in view["lab_order"] if l in covered)
+    n_set_now = sum(1 for g in final_groups(v_slots) if len(g) > 1)
+    n_drop = len(view.get("labels") or []) - len(view["lab_order"])
     working, failed = [], []
     if view["kind"] == "draft":
         job = load_gen_job()
@@ -12917,7 +13336,8 @@ def render_final_tab(text_model: str, api_delay: int, academy_name: str, school_
     st.markdown(f"<div class='qb-basket'><b>{FINAL_TITLE} {view['round']}회차</b> · {len(qs)}문항 / 칸 {len(v_slots)}개 · "
                 f"예상 평균 <b>{pred:g}점</b> (목표 {view['target']:g}점" + (f", 기록 보정 {view['delta']:+.1f}점 포함" if view["delta"] else "") + ")<br>"
                 f"난이도: " + " · ".join(f"{k} {lv[k]}" for k in QB_LEVELS + [QB_GICHUL_LEVEL] if lv.get(k)) +
-                f" &nbsp;|&nbsp; 고른 지문 {len(view['lab_order'])}개 중 <b>{n_cov}개</b>에서 출제 · 글 {len(uniq)}개 · 단어 합계 약 {sum(uniq.values()):,}"
+                f" &nbsp;|&nbsp; 쓸 지문 {len(view['lab_order'])}개 중 <b>{n_cov}개</b>에서 출제" + (f" (고른 지문 중 {n_drop}개는 뺌)" if n_drop > 0 else "")
+                + (f" · 한 지문 묶음 {n_set_now}개" if n_set_now else "") + f" · 글 {len(uniq)}개 · 단어 합계 약 {sum(uniq.values()):,}"
                 + (f" (실제 기출 평균 {tgt_words['passage_words']:,})" if tgt_words else "") + "</div>", unsafe_allow_html=True)
     for n in view.get("notes") or []:
         st.warning(n)
@@ -12929,7 +13349,8 @@ def render_final_tab(text_model: str, api_delay: int, academy_name: str, school_
         elif abs(off) > 5 and all(r is not None for r in v_assign):
             st.info(f"예상 평균이 목표보다 {abs(off):.0f}점 {'낮아요' if off < 0 else '높아요'} (새 문제가 정답 검증에서 난이도가 낮춰지거나 바뀌었을 수 있어요).")
         elif any(r is None for r in v_assign):
-            plan2 = [x for x in final_fill_plan(v_slots, v_assign, view["lab_order"], view["target"] - view["delta"])[1] if v_assign[x["i"]] is None]
+            plan2 = [x for x in final_fill_plan(v_slots, v_assign, view["lab_order"], view["target"] - view["delta"], want=view.get("want"))[1]
+                     if v_assign[x["i"]] is None]
             n_empty = sum(1 for r in v_assign if r is None)
             st.warning(f"{n_empty}칸은 새 문제가 들어오지 못했어요" + (f" (작업 {len(failed)}건 실패)" if failed else " (정답 검증에서 빠짐 등)")
                        + ". 그 칸만 다시 만들거나, 빈 칸은 둔 채 저장할 수 있어요.")
@@ -12944,12 +13365,12 @@ def render_final_tab(text_model: str, api_delay: int, academy_name: str, school_
                     st.rerun()
     else:
         tgt_raw = view["target"] - view["delta"]
-        a2, plan = final_fill_plan(v_slots, v_assign, view["lab_order"], tgt_raw)
+        a2, plan = final_fill_plan(v_slots, v_assign, view["lab_order"], tgt_raw, want=view.get("want"))
         use_fix = False
         if abs(off) > 5:
             st.warning(f"예상 평균이 목표보다 {abs(off):.0f}점 {'낮아요' if off < 0 else '높아요'}. 고른 범위에 남은 문제가 "
                        f"{'어려운(최상·상)' if off < 0 else '쉬운(중·하)'} 문제 위주라서예요.")
-            a3, plan3 = final_fill_plan(v_slots, v_assign, view["lab_order"], tgt_raw, fix_level=True)
+            a3, plan3 = final_fill_plan(v_slots, v_assign, view["lab_order"], tgt_raw, fix_level=True, want=view.get("want"))
             n_lv = sum(1 for x in plan3 if x.get("why") == "level")
             if n_lv:
                 est3 = round(final_plan_est(v_slots, a3, plan3) + view["delta"], 1)
@@ -12958,18 +13379,20 @@ def render_final_tab(text_model: str, api_delay: int, academy_name: str, school_
                 if use_fix:
                     a2, plan = a3, plan3
         if plan:
-            n_empty = sum(1 for x in plan if v_assign[x["i"]] is None)
-            n_swap = sum(1 for x in plan if v_assign[x["i"]] is not None and x.get("why") != "level")
+            n_one = sum(1 for x in plan if x.get("why") in ("cover", "empty"))
+            n_setk = len({x["set"] for x in plan if x.get("set")})
+            n_setq = sum(1 for x in plan if x.get("set"))
             n_lv2 = sum(1 for x in plan if x.get("why") == "level")
-            txt = " + ".join(t for t in (f"빈 칸 {n_empty}개" if n_empty else "", f"안 들어간 지문 {n_swap}개" if n_swap else "",
+            txt = " + ".join(t for t in (f"한 문제 칸 {n_one}개" if n_one else "", f"한 지문 묶음 {n_setk}개({n_setq}문제)" if n_setk else "",
                                          f"난이도 맞추기 {n_lv2}개" if n_lv2 else "") if t)
             cost = final_plan_cost(text_model, plan)
-            if n_swap:
-                st.caption(f"안 들어간 지문 {n_swap}개는 문제가 두 개 이상 든 지문의 칸 하나를 그 지문의 새 문제로 바꿔 넣어요.")
+            if n_setk:
+                st.caption(f"🧩 묶음은 지문마다 첫 문제(밑줄·빈칸 유형)를 만든 뒤, 그 지문 그대로 짝 문제를 만들어 한 번만 실어요 "
+                           f"({', '.join(dict.fromkeys(x['label'] for x in plan if x.get('set')))}).")
             if st.button(f"🛠️ 새 문제로 채우기: {txt} · 약 {cost:,.0f}원", type="primary", key="final_fill_new"):
                 start_draft(new_draft(view, [r["id"] if r else None for r in a2], plan, "fill"), cost)
-    meta = {"school": school, "grade": grade, "round": view["round"], "subject": view["subject"], "term": series, "date": view["date"],
-            "academy": academy_name, "predicted": pred}
+    meta = {"school": school, "grade": grade, "round": view["round"], "subject": view["subject"], "term": series, "date": date,
+            "academy": academy_name, "predicted": pred}  # 시행일은 지금 칸 그대로 (비우면 시험지에 빈칸)
     stu = render_final_exam(qs, {**meta, "with_answers": False})
     tea = render_final_exam(qs, {**meta, "with_answers": True})
     d1, d2, d3 = st.columns([1, 1, 1.3])
@@ -12979,7 +13402,7 @@ def render_final_tab(text_model: str, api_delay: int, academy_name: str, school_
                  disabled=not qs or bool(working)):
         rnd_no = view["round"] if not any(r.get("round") == view["round"] for r in rounds) else next_round
         rec = {"id": uuid.uuid4().hex[:10], "school": school, "grade": grade, "series": series, "round": rnd_no,
-               "date": today.strftime("%Y-%m-%d"), "exam_date": view["date"], "subject": view["subject"], "labels": view["labels"], "template": view["template"],
+               "date": today.strftime("%Y-%m-%d"), "exam_date": date, "subject": view["subject"], "labels": view["labels"], "template": view["template"],
                "items": [{"id": r["id"], "points": r["points"], "level": r["difficulty"], "q_type": r["q_type"]} for r in qs],
                "target": view["target"], "predicted_raw": pred_raw, "delta": view["delta"], "predicted": pred,
                "actual": None, "n_students": None, "note": ""}
