@@ -2212,8 +2212,12 @@ def build_css_anatomy(h_logo, f_logo, e_logo):
     .quiz-choice {{ white-space: nowrap; font-weight: bold; color: #0047AB; margin-left: calc(10px * var(--scale)); font-size: calc(12px * var(--scale)); letter-spacing: 1px; flex-shrink: 0; align-self: center; }}
     .quiz-answer-key {{ margin-top: calc(8px * var(--scale)); text-align: right; font-size: calc(10px * var(--scale)); color: #bbb; letter-spacing: 1px; flex: 0 0 auto; }}
     /* SELF-NOTE 2단 구성: 왼쪽 지문·해석 + 오른쪽 한줄 요약·필기노트·어휘 (기존 파란 상자 스타일 유지) */
-    .sn-cols {{ flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) calc(56mm * var(--scale)); gap: calc(14px * var(--scale)); }}
-    .sn-left, .sn-right {{ display: flex; flex-direction: column; gap: calc(8px * var(--scale)); min-height: 0; overflow: hidden; }}
+    /* 두 열의 높이를 본문 칸에 딱 고정 (2026-11-17: 브라우저에 따라 열이 글 길이만큼 늘어 아래 해석·단어가 잘리던 문제) */
+    .sn-cols {{ flex: 1 1 auto; min-height: 0; position: relative; }}
+    .sn-left, .sn-right {{ position: absolute; top: 0; bottom: 0; display: flex; flex-direction: column; gap: calc(8px * var(--scale)); min-height: 0; overflow: hidden; }}
+    .sn-left {{ left: 0; right: calc(56mm * var(--scale) + 14px * var(--scale)); }}
+    .sn-right {{ right: 0; width: calc(56mm * var(--scale)); }}
+    .sn-left .passage-box {{ flex: 1 1 0; }}
     .sn-qtag {{ color: #9a5a00; background: #fff4e5; border: 1px solid #f5c27a; border-radius: 999px; font-weight: 900; font-size: 0.75em; padding: 1px 9px; margin-left: 10px; vertical-align: 1px; white-space: nowrap; }}
     .sn-passage-fit {{ font-weight: 800; word-break: keep-all; line-height: 2.6 !important; }}
     /* 제목 줄은 한 줄 유지: 시험 정보가 길면 끝을 …로 줄임 */
@@ -2242,6 +2246,24 @@ function innerHeight(box) {
     const cs = getComputedStyle(box);
     return box.clientHeight - parseFloat(cs.paddingTop || 0) - parseFloat(cs.paddingBottom || 0);
 }
+function colOverflows(col) {
+    // 열 안의 글이 열 아래로 나갔는지: 브라우저마다 칸 높이 계산이 달라도 실제 위치로 잼
+    if (col.scrollHeight > col.clientHeight + 1) return true;
+    const b = col.getBoundingClientRect().bottom;
+    for (const ch of col.children) if (ch.getBoundingClientRect().bottom > b + 1) return true;
+    return false;
+}
+function pageOverflows(page) {
+    // 쪽 안 어디든 잘리는 글이 있는지: 본문 칸 · 두 열(Self-Note) · 글자 맞춤 칸(가장 작은 글자로도 안 들어가는 칸)
+    const content = page.querySelector('.page-content');
+    if (content && content.scrollHeight > content.clientHeight + 1) return true;
+    for (const col of page.querySelectorAll('.sn-left, .sn-right')) if (colOverflows(col)) return true;
+    for (const box of page.querySelectorAll('.auto-fit-box')) {
+        const t = box.querySelector('.auto-fit-target');
+        if (t && t.scrollHeight > innerHeight(box) + 2) return true;
+    }
+    return false;
+}
 function fitTextBox(box) {
     const target = box.querySelector('.auto-fit-target');
     if (!target) return;
@@ -2253,10 +2275,12 @@ function fitTextBox(box) {
         if (growBox) target.style.setProperty('line-height', box.dataset.minLh || '2.3', 'important');
         else target.style.lineHeight = (size * ratio) + "px";
     };
+    // data-reserve: 인쇄할 때 줄바꿈이 조금 달라져도 잘리지 않게 칸 아래에 남겨 두는 여유(px)
+    const reserve = parseFloat(box.dataset.reserve || "0");
     let size = max, guard = 0;
     target.style.fontSize = size + "px";
     setLh(size, 1.40);
-    while ((target.scrollHeight > innerHeight(box) || target.scrollWidth > box.clientWidth) && size > min && guard < 120) {
+    while ((target.scrollHeight > innerHeight(box) - reserve || target.scrollWidth > box.clientWidth) && size > min && guard < 120) {
         size -= 0.2; target.style.fontSize = size + "px"; setLh(size, 1.36); guard++;
     }
 }
@@ -2265,24 +2289,40 @@ function fitOnePage(page) {
     const content = page.querySelector('.page-content');
     if (!content) return;
     page.style.setProperty('--scale', scale.toFixed(2));
+    page.querySelectorAll('.sn-trans, .sn-vocab').forEach(el => el.style.removeProperty('font-size'));  // 지난번 맞춤에서 줄인 글자는 처음 크기로
+    // 오른쪽 열(요약·필기·단어)만 넘치면 쪽 전체를 줄이기 전에 단어 글자부터 8px까지 줄임 (왼쪽 지문·해석은 그대로)
+    const right = page.querySelector('.sn-right'), voc = page.querySelector('.sn-vocab');
+    if (right && voc) {
+        let f = parseFloat(getComputedStyle(voc).fontSize), g = 0;
+        while (colOverflows(right) && f > 8 && g < 40) { f -= 0.25; voc.style.setProperty('font-size', f + 'px', 'important'); g++; }
+    }
     let guard = 0;
-    while (content.scrollHeight > content.clientHeight && scale > 0.72 && guard < 20) {
+    while (pageOverflows(page) && scale > 0.72 && guard < 20) {
         scale -= 0.03; page.style.setProperty('--scale', scale.toFixed(2)); guard++;
     }
-    while (content.scrollHeight > content.clientHeight && scale > 0.64 && guard < 40) {
+    while (pageOverflows(page) && scale > 0.64 && guard < 40) {
         scale -= 0.01; page.style.setProperty('--scale', scale.toFixed(2)); guard++;
     }
+    // 쪽을 가장 작게 줄여도 열이 넘치면 그 열의 해석·단어 글자만 더 줄임 (6px까지)
+    page.querySelectorAll('.sn-left, .sn-right').forEach(col => {
+        const el = col.querySelector('.sn-trans, .sn-vocab');
+        if (!el) return;
+        let f = parseFloat(getComputedStyle(el).fontSize), g = 0;
+        while (colOverflows(col) && f > 6 && g < 60) { f -= 0.25; el.style.setProperty('font-size', f + 'px', 'important'); g++; }
+    });
 }
 function growLineHeight(box) {
-    // 지문이 짧아 아래가 비면 줄 간격을 넓혀 칸을 채움 (필기 공간 확보)
+    // 지문이 짧아 아래가 비면 줄 간격을 넓혀 칸을 채움 (필기 공간 확보) — 쪽 어디든 잘리기 시작하면 한 단계 되돌림
     const target = box.querySelector('.auto-fit-target');
     if (!target) return;
     const minLh = parseFloat(box.dataset.minLh || "2.3"), maxLh = parseFloat(box.dataset.maxLh || "2.9");
+    const reserve = parseFloat(box.dataset.reserve || "0");
+    const page = box.closest('.page');
     let lh = minLh;
     target.style.setProperty('line-height', lh, 'important');
     while (lh + 0.05 <= maxLh) {
         target.style.setProperty('line-height', (lh + 0.05).toFixed(2), 'important');
-        if (target.scrollHeight > innerHeight(box)) { target.style.setProperty('line-height', lh.toFixed(2), 'important'); break; }
+        if (target.scrollHeight > innerHeight(box) - reserve || (page && pageOverflows(page))) { target.style.setProperty('line-height', lh.toFixed(2), 'important'); break; }
         lh += 0.05;
     }
 }
@@ -2301,6 +2341,7 @@ window.addEventListener('load', function() {
     if (document.fonts && document.fonts.ready) { document.fonts.ready.then(() => { setTimeout(fitAllPages, 120); setTimeout(fitAllPages, 260); setTimeout(fitAllPages, 420); }); }
 });
 window.addEventListener('resize', () => setTimeout(fitAllPages, 120));
+window.addEventListener('beforeprint', fitAllPages);  // 인쇄 직전에 한 번 더 맞춤 (글을 고친 뒤 바로 인쇄해도 맞게)
 </script>
 """
 
@@ -2408,7 +2449,7 @@ def render_anatomy(p):
     one_line = esc(data.get("one_line_summary") or data.get("topic", ""))
     sn_vocab = "".join(f'<b>{esc(v.get("word", ""))}</b><span>{esc(v.get("meaning", ""))}</span>' for v in data.get("vocab", []))
 
-    p2 = f"""<div class="page fit-page" {data_attr}><div class="header"><div class="logo-area"><div class="header-char"></div>ANATOMY SELF-NOTE</div><div class="info-area"><b>{academy}</b><br>셀프노트: 너만의 손필기</div></div><div class="page-content"><div class="sn-cols"><div class="sn-left"><div class="section-title">■ Original Text (강의용 필기 노트){exam_tag}</div><div class="passage-box sn-passage auto-fit-box grow-lh" data-min-lh="2.2" data-max-lh="3.6"><div class="sn-passage-fit auto-fit-target" data-max="12.5" data-min="8.0"><div>{numbered_passage}</div></div></div><div class="section-title">■ 지문 해석</div><div class="sn-trans">{trans_html}</div></div><div class="sn-right"><div class="section-title">영쌤의 한줄 요약</div><div class="sn-summary">{one_line}</div><div class="section-title">영쌤의 필기노트</div><div class="sn-note"></div><div class="section-title">Vocabulary</div><div class="sn-vocab">{sn_vocab}</div></div></div></div><div class="footer"><div class="footer-char"></div>{footer_right}</div><div class="page-num"></div></div>"""
+    p2 = f"""<div class="page fit-page" {data_attr}><div class="header"><div class="logo-area"><div class="header-char"></div>ANATOMY SELF-NOTE</div><div class="info-area"><b>{academy}</b><br>셀프노트: 너만의 손필기</div></div><div class="page-content"><div class="sn-cols"><div class="sn-left"><div class="section-title">■ Original Text (강의용 필기 노트){exam_tag}</div><div class="passage-box sn-passage auto-fit-box grow-lh" data-min-lh="2.2" data-max-lh="3.6" data-reserve="12"><div class="sn-passage-fit auto-fit-target" data-max="12.5" data-min="8.0"><div>{numbered_passage}</div></div></div><div class="section-title">■ 지문 해석</div><div class="sn-trans">{trans_html}</div></div><div class="sn-right"><div class="section-title">영쌤의 한줄 요약</div><div class="sn-summary">{one_line}</div><div class="section-title">영쌤의 필기노트</div><div class="sn-note"></div><div class="section-title">Vocabulary</div><div class="sn-vocab">{sn_vocab}</div></div></div></div><div class="footer"><div class="footer-char"></div>{footer_right}</div><div class="page-num"></div></div>"""
     p3 = f"""<div class="page fit-page" {data_attr}><div class="header"><div class="logo-area"><div class="header-char"></div>ANATOMY REVIEW-NOTE</div><div class="info-area"><b>{academy}</b><br>리뷰노트: 따라 쓰며 복습!</div></div><div class="page-content"><div class="section-title">■ Original Text (너만의 복습 노트){exam_tag}</div><div class="passage-box auto-fit-box grow-lh" style="border-color:#0047AB;" data-min-lh="2.3" data-max-lh="3.4"><div class="passage-fit auto-fit-target" data-max="14.5" data-min="8.0"><div class="passage-body">{body_html}</div></div></div><div class="section-title">■ 주요 문법 Point 3 정리</div><div class="grammar-box">{grammar_html}</div></div><div class="footer"><div class="footer-char"></div>{footer_left}</div><div class="page-num"></div></div>"""
     p4 = f"""<div class="page fit-page" {data_attr}><div class="header"><div class="logo-area"><div class="header-char"></div>STRUCTURE & QUIZ</div><div class="info-area"><b>{academy}</b><br>최종 확인 | {school}</div></div><div class="page-content"><div class="section-title">■ 영쌤의 쉬운 지문 설명</div><div class="easy-box"><div class="easy-char"></div><div class="easy-text">{nl2br(data.get('easy_explanation',''))}</div></div><div class="section-title">■ 글의 흐름 (Structure)</div><div class="structure-box">{nl2br(data.get("structure_flow",""))}</div><div class="section-title">■ ANATOMY OX Quiz (5문항)</div><div class="quiz-container">{quiz_html}</div><div class="quiz-answer-key">{esc(answers)}</div></div><div class="footer"><div class="footer-char"></div>{footer_right}</div><div class="page-num"></div></div>"""
     return p1 + p2 + p3 + p4
