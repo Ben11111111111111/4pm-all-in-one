@@ -12893,61 +12893,109 @@ def final_draft_assign(sb, d: Dict) -> List:
     return assign
 
 FINAL_CSS = """
-@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;700;900&family=Noto+Serif+KR:wght@400;700&display=swap');
-@page { size: A4; margin: 13mm 12mm 16mm 12mm; }
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;900&family=Noto+Serif+KR:wght@400;700&display=swap');
 * { box-sizing: border-box; }
-body { font-family: 'Noto Serif KR', 'Times New Roman', serif; font-size: 10.4pt; line-height: 1.66; color: #111; margin: 0; background: #fff;
+html, body { margin: 0; }
+body { font-family: 'Noto Serif KR', 'Batang', serif; font-size: 10.9pt; line-height: 1.62; color: #111; background: #e5e7eb;
   -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-.sheet { max-width: 186mm; margin: 0 auto; }
-.printbar { position: sticky; top: 0; text-align: right; padding: 6px; background: #fff; z-index: 5; }
-.printbar button { font-size: 13px; padding: 6px 14px; cursor: pointer; }
-.printbar .pnote { font-family: 'Noto Sans KR', sans-serif; font-size: 11.5px; color: #64748b; margin-right: 10px; }
-/* 꼬리말: 화면에서는 시험지 끝에 한 줄, 인쇄할 때는 쪽마다 맨 아래 여백 칸(@page @bottom-left/right — render_final_exam이 글자를 넣음) */
-@media print { .printbar { display: none; } .pfoot { display: none !important; } }
-.pfoot { font-family: 'Noto Sans KR'; font-size: 8.5pt; display: flex; justify-content: space-between; padding: 0 2mm; color: #222; }
-.ttl { font-family: 'Noto Sans KR'; font-weight: 900; text-align: center; }
-/* 운양고형 머리말: 위 칸 시험 이름, 가운데 큰 과목명, 오른쪽 실시 학급 */
-.u-head { border: 2px solid #111; margin-bottom: 6px; font-family: 'Noto Sans KR'; }
-.u-head .r1 { border-bottom: 1px solid #111; text-align: center; font-weight: 900; font-size: 14pt; padding: 6px; }
-.u-head .r2 { display: flex; }
-.u-head .logo { width: 30mm; display: flex; align-items: center; justify-content: center; border-right: 1px solid #111; }
-.u-head .logo b { background: #111; color: #fff; padding: 2px 8px; font-size: 11pt; letter-spacing: 1px; }
-.u-head .mid { flex: 1; text-align: center; padding: 4px 0; }
-.u-head .mid .big { font-size: 25pt; font-weight: 900; letter-spacing: 3px; line-height: 1.25; }
-.u-head .mid .date { font-size: 11pt; font-weight: 700; }
-.u-head .cls { width: 48mm; border-left: 1px solid #111; display: flex; flex-direction: column; }
-.u-head .cls div { flex: 1; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 11pt; }
-.u-head .cls div:first-child { border-bottom: 1px solid #111; }
-/* 제일고형 머리말: 위 제목 줄 + 학년 | 과목 | 시행일시 표 */
-.j-title { font-family: 'Noto Sans KR'; font-weight: 900; font-size: 15pt; text-align: center; margin: 2px 0 6px; }
-table.j-head { width: 100%; border-collapse: collapse; border: 2px solid #111; font-family: 'Noto Sans KR'; margin-bottom: 8px; }
-table.j-head td { border: 1px solid #111; text-align: center; padding: 8px 4px; font-weight: 700; font-size: 11.5pt; }
-table.j-head td.big { font-size: 20pt; font-weight: 900; }
-.notice { border: 1px solid #111; padding: 5px 8px; font-family: 'Noto Sans KR'; font-size: 8.8pt; line-height: 1.5; margin-bottom: 8px; break-inside: avoid; }
-.notice b { font-weight: 900; }
-.cols { column-count: 2; column-gap: 8mm; column-rule: 1px solid #111; column-fill: auto; }
-.q { margin: 0 0 15px; }
-.q .stem, .sethead, .q .given { break-after: avoid; }
-.q .stem { font-family: 'Noto Sans KR'; font-size: 10pt; margin-bottom: 4px; }
-.q .stem .no { font-weight: 900; font-size: 11pt; margin-right: 3px; }
-.q .stem .pt { white-space: nowrap; }
-.sethead { font-family: 'Noto Sans KR'; font-weight: 700; font-size: 10.5pt; margin: 0 0 4px; }
-.passage { text-align: justify; margin: 0 0 6px; }
-.passage p { margin: 0 0 3px; text-indent: 1em; orphans: 3; widows: 3; }
-.j .passage { border: 1px solid #111; padding: 6px 9px; }      /* 제일고는 지문을 네모 칸 안에 */
-.given { border: 1px solid #111; padding: 5px 8px; margin: 0 0 7px; }
+.printbar { position: sticky; top: 0; z-index: 9; display: flex; gap: 8px; align-items: center; justify-content: flex-end; flex-wrap: wrap;
+  padding: 7px 12px; background: #fff; border-bottom: 1px solid #cbd5e1; font-family: 'Noto Sans KR', sans-serif; font-size: 12px; line-height: 1.4; }
+.printbar button { font: inherit; font-size: 13px; padding: 5px 13px; cursor: pointer; border: 1px solid #94a3b8; border-radius: 6px; background: #fff; }
+.printbar button.on { background: #0f172a; color: #fff; border-color: #0f172a; }
+.printbar .pnote { color: #64748b; margin-right: auto; }
+/* 쪽: 실제 시험지처럼 B4(257×364mm) 한 장씩 — 시험지 안의 스크립트가 문항을 쪽마다 2단으로 나눠 담음. A4는 같은 쪽을 줄여서 */
+.pg { width: 257mm; height: 364mm; margin: 8mm auto; background: #fff; box-shadow: 0 1px 8px rgba(0,0,0,.18); position: relative; overflow: hidden;
+  break-after: page; page-break-after: always; }
+.pg:last-child { break-after: auto; page-break-after: auto; }
+body.a4 .pg { zoom: 0.8155; }
+.pg-in { position: absolute; top: var(--mt); bottom: var(--mb); left: var(--ml); right: var(--mr); display: flex; flex-direction: column; }
+.pcols { flex: 1 1 0; min-height: 0; overflow: hidden; }
+#pages.measuring .pcols { padding-bottom: 5mm; }  /* 나눌 때는 5mm 짧게 재서, 인쇄할 때 줄바꿈이 조금 달라져도 넘치지 않게 */
+.cols { column-count: 2; column-gap: 9mm; column-rule: 1px solid #111; column-fill: auto; }
+/* 스크립트가 못 돌 때만 보이는 이어진 2단 시험지 */
+#flow { background: #fff; width: 257mm; margin: 8mm auto; padding: 13mm 14mm; }
+body.paged #flow { display: none; }
+.pfoot { flex: 0 0 auto; display: flex; align-items: flex-end; justify-content: space-between; height: 10mm; padding-top: 2.5mm;
+  font-family: 'Noto Sans KR', sans-serif; font-size: 10pt; font-weight: 700; line-height: 1.2; }
+.pfoot .fl, .pfoot .fr { flex: 1; } .pfoot .fr { text-align: right; font-weight: 500; }
+.pno { flex: 0 0 auto; position: relative; width: 13mm; height: 7.5mm; border: 1px solid #111; font-family: 'Noto Serif KR', serif; font-size: 10pt; line-height: 1;
+  background: linear-gradient(to bottom right, transparent calc(50% - .6px), #111 calc(50% - .6px), #111 calc(50% + .6px), transparent calc(50% + .6px)); }
+.pno b { position: absolute; font-weight: 400; } .pno b:first-child { left: 1.4mm; top: .6mm; } .pno .tot { right: 1.4mm; bottom: .6mm; }
+/* 끝 '확인 사항' 칸은 실제 시험지처럼 마지막 쪽 오른쪽 단 맨 아래 (자리가 없으면 글 흐름 그대로) */
+.pg-in > .pinned { position: absolute; right: 0; bottom: 10mm; width: calc((100% - 9mm) / 2); margin: 0; }
+.addl { display: flex; justify-content: space-between; align-items: flex-end; font-family: 'Noto Sans KR', sans-serif; font-size: 9.5pt;
+  line-height: 1.3; margin: 0 0 2.2mm; color: #222; }
+.addl .nm i { display: inline-block; width: 42mm; height: 1em; border-bottom: 1px solid #111; margin-left: 2mm; vertical-align: -1px; }
+.run { flex: 0 0 auto; text-align: center; font-family: 'Noto Sans KR', sans-serif; font-weight: 700; font-size: 12.5pt; line-height: 1.3; margin: 0 0 3mm; }
+.first-head { flex: 0 0 auto; margin-bottom: 3.5mm; }
+/* 문항 */
+.q { margin: 0 0 5.5mm; }
+.q.cont { margin-top: 0; }
+.stem { margin-bottom: 1.6mm; break-after: avoid; break-inside: avoid; }  /* 발문은 단 끝에서 쪼개지지 않고 지문과 같은 단으로 */
+.stem .no { font-weight: 700; margin-right: 1mm; }
+.stem .pt { white-space: nowrap; }
+.sethead { break-after: avoid; break-inside: avoid; margin-bottom: 1.8mm; }
+.passage { text-align: justify; margin: 0 0 2.2mm; break-inside: avoid; }
+.passage p { margin: 0; text-indent: 1em; orphans: 3; widows: 3; }
+.given { border: 1px solid #111; padding: 2mm 3mm; margin: 0 0 2.5mm; break-inside: avoid; text-align: justify; }
 .given p, .box p { margin: 0; }
-.box { border: 1px solid #111; padding: 4px 8px; margin: 2px 0 5px 8px; font-size: 9.8pt; break-inside: avoid; }
+.arrow { text-align: center; font-family: 'Noto Sans KR', sans-serif; font-weight: 900; font-size: 13pt; line-height: 1.1; margin: 0 0 1.2mm; break-after: avoid; }
+.box { border: 1px solid #111; padding: 2mm 3mm; margin: 0 0 2.5mm; break-inside: avoid; text-align: justify; }
 .box.long { break-inside: auto; }
-.box .bx { text-align: center; font-family: 'Noto Sans KR'; font-size: 9pt; margin-bottom: 1px; }
+.box .bx { text-align: center; font-family: 'Noto Sans KR', sans-serif; font-size: 9.5pt; }
 u { text-underline-offset: 2px; }
-.choices { margin: 0 0 0 8px; break-inside: avoid; }
-.choices div { padding-left: 1.3em; text-indent: -1.3em; }
-.choices.inline { display: flex; justify-content: space-between; padding-right: 12px; }
-.choices.inline div { padding: 0; text-indent: 0; }
-.essay-h { column-span: all; font-family: 'Noto Sans KR'; font-weight: 900; font-size: 12pt; border-top: 2px solid #111; border-bottom: 1px solid #111; padding: 4px 0; margin: 4px 0 10px; text-align: center; }
-.write { border: 1px solid #111; height: 54px; margin: 2px 0 6px 8px; }
-.ans-page { break-before: page; page-break-before: always; }
+.choices { margin: 0 0 0 1mm; break-inside: avoid; }
+.choices div { padding-left: 1.4em; text-indent: -1.4em; }
+.ch-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: .4mm 3mm; margin-left: 1mm; break-inside: avoid; }
+.ch-inline { display: flex; justify-content: space-around; break-inside: avoid; }
+table.ch-tbl { border-collapse: collapse; margin: 0 0 0 2mm; break-inside: avoid; line-height: 1.55; }
+table.ch-tbl th { font-weight: 400; padding: 0 3mm; text-align: center; }
+table.ch-tbl td { padding: 0 3mm; text-align: center; }
+table.ch-tbl td.cn { padding: 0 2mm 0 0; }
+table.ch-tbl td.dots { padding: 0 1mm; letter-spacing: 1px; color: #333; }
+.write { border: 1px solid #111; height: 26mm; margin: 1mm 0 2mm; }
+/* 운양고: 머리말 표(시험 이름 · 로고 자리 · 큰 과목명 · 실시 학급), 안내 상자, 지문은 테두리 없이, 쪽 아래 '학년 (과목) · 쪽 · 학원' */
+body.u { --mt: 12mm; --mb: 8mm; --ml: 13mm; --mr: 13mm; }
+.u-head { border: 1.6px solid #111; font-family: 'Noto Sans KR', sans-serif; line-height: 1.3; }
+.u-head .r1 { text-align: center; font-weight: 700; font-size: 15.5pt; padding: 2.2mm 0; border-bottom: 1.6px solid #111; }
+.u-head .r2 { display: flex; height: 27mm; }
+.u-head .logo { width: 36mm; display: flex; align-items: center; justify-content: center; }
+.u-head .emb { width: 22mm; height: 22mm; border-radius: 50%; border: 2px solid #111; box-shadow: 0 0 0 1.2mm #fff, 0 0 0 1.5mm #111;
+  display: flex; align-items: center; justify-content: center; text-align: center; font-weight: 900; font-size: 9.5pt; line-height: 1.15; }
+.u-head .mid { flex: 1; display: flex; flex-direction: column; justify-content: center; text-align: center; font-family: 'Noto Serif KR', serif; }
+.u-head .big { font-size: 29pt; letter-spacing: 4px; line-height: 1.2; }
+.u-head .date { font-size: 13.5pt; letter-spacing: 1px; margin-top: 1.2mm; }
+.u-head .cls { width: 56mm; border-left: 1.6px solid #111; display: flex; flex-direction: column; }
+.u-head .cls div { flex: 1; display: flex; align-items: center; justify-content: center; }
+.u-head .cls div:first-child { border-bottom: 1px dotted #555; font-size: 13pt; }
+.u-head .cls div:last-child { font-weight: 700; font-size: 12.5pt; }
+.u-notice { border: 1px solid #111; padding: 1.5mm 2.5mm; font-family: 'Noto Sans KR', sans-serif; font-size: 9.6pt; line-height: 1.5; margin: 0 0 4mm; break-inside: avoid; }
+.u-notice .l0 { padding-left: 1em; text-indent: -1em; }
+.u-notice .row { display: flex; } .u-notice .row b { flex: 0 0 11mm; font-weight: 900; } .u-notice .row span { flex: 1; }
+.u .stem, .u .stem .no { font-family: 'Noto Serif KR', serif; }
+.u .sethead { font-family: 'Noto Sans KR', sans-serif; font-weight: 700; font-size: 12.5pt; }
+.u-end { border: 1px solid #111; padding: 2mm 3mm; font-family: 'Noto Sans KR', sans-serif; font-size: 9.8pt; line-height: 1.55; margin-top: 8mm; break-inside: avoid; }
+/* 제일고: 제목 줄 + '학 년 | 학년 | 과목 | 시 행 일 시 | 날짜' 표, 줄 그은 안내, 지문은 네모 칸, 2쪽부터 맨 위 '학년 과목', 쪽 아래 쪽번호 상자만 */
+body.j { --mt: 12mm; --mb: 8mm; --ml: 15mm; --mr: 15mm; }
+.j-title { text-align: center; font-family: 'Noto Sans KR', sans-serif; font-weight: 700; font-size: 16.5pt; line-height: 1.3; margin: 1mm 0 3.5mm; }
+table.j-head { width: 100%; height: 17mm; border-collapse: collapse; border: 2px solid #111; font-family: 'Noto Sans KR', sans-serif; line-height: 1.2; }
+table.j-head td { border: 1px solid #111; text-align: center; font-weight: 700; font-size: 12.5pt; }
+table.j-head td.k { width: 15%; letter-spacing: 5px; } table.j-head td.k2 { width: 15%; letter-spacing: 3px; }
+table.j-head td.g { width: 17%; font-size: 24pt; font-weight: 500; } table.j-head td.s { width: 24%; font-size: 23pt; font-weight: 900; }
+table.j-head td.d { width: 29%; }
+.j-notice { font-family: 'Noto Sans KR', sans-serif; font-size: 9.8pt; font-weight: 700; line-height: 1.55; margin: 1mm 0 5mm; break-inside: avoid; }
+.j-notice .t { margin-bottom: 2.5mm; }
+.j-notice .sec { border-top: 1px solid #555; padding-top: .8mm; }
+.j-notice table { width: 100%; border-collapse: collapse; margin-top: .5mm; }
+.j-notice td { border-top: 1px solid #555; border-bottom: 1px solid #555; padding: .2mm 2mm; } .j-notice td.r { text-align: right; }
+.j .stem, .j .sethead { font-family: 'Noto Sans KR', sans-serif; font-size: 10.5pt; }
+.j .stem .no { font-weight: 900; font-size: 11.5pt; }
+.j .passage { border: 1px solid #111; padding: 2mm 3mm; }
+.j-end { margin-top: 8mm; break-inside: avoid; font-family: 'Noto Sans KR', sans-serif; font-size: 10pt; line-height: 1.5; }
+.j-end .bx { border: 1px solid #111; padding: 1.5mm 3mm; }
+.j-end .cp { text-align: right; font-weight: 900; margin-top: 1.8mm; }
+/* 교사용 정답·해설 (시험지 뒤에 이어서) */
+.ans { page: ans; background: #fff; width: 257mm; margin: 8mm auto; padding: 14mm; break-before: page; page-break-before: always; font-size: 10.4pt; }
 .anshead { border: 2px solid #111; text-align: center; font-family: 'Noto Sans KR'; font-weight: 900; font-size: 15pt; padding: 6px; margin-bottom: 8px; }
 table.key { width: 100%; border-collapse: collapse; font-family: 'Noto Sans KR'; font-size: 9pt; margin-bottom: 6px; text-align: center; table-layout: fixed; }
 table.key th, table.key td { border: 1px solid #111; padding: 3px 1px; }
@@ -12957,46 +13005,296 @@ table.key th { background: #e8e8e8; }
 .exp h3 { font-family: 'Noto Sans KR'; font-size: 10pt; margin: 0 0 2px; border-bottom: 1px solid #999; padding-bottom: 1px; }
 .exp h3 span { font-weight: 400; font-size: 8.2pt; color: #444; margin-left: 4px; }
 .exp ul { margin: 0; padding-left: 14px; }
+@media print {
+  body { background: #fff; }
+  .printbar { display: none !important; }
+  .pg { margin: 0; box-shadow: none; }
+  #flow { page: flowp; width: auto; margin: 0; padding: 0; }
+  .ans { width: auto; margin: 0; padding: 0; }
+}
 """
 
+def final_page_css(paper: str = "B4") -> str:
+    """쪽 크기: 시험지 쪽은 여백 0(쪽 안에 여백을 그려 둠) · 스크립트 없이 이어진 시험지·정답 쪽은 여백 있음 (FINAL_PAGER_JS의 pageCss와 같게)"""
+    a4 = paper == "A4"
+    size, k = ("210mm 297mm", 0.8155) if a4 else ("257mm 364mm", 1.0)
+    m = lambda xs: " ".join(f"{x * k:.1f}mm" for x in xs)
+    return (f"@page {{ size: {size}; margin: 0; }} @page flowp {{ size: {size}; margin: {m([13, 14, 16, 14])}; }} "
+            f"@page ans {{ size: {size}; margin: {m([14, 14, 16, 14])}; }}")
+
+FINAL_PAGER_JS = r"""<script>
+(function () {
+  /* 문항을 B4 쪽마다 2단으로 나눠 담음: 문항이 쪽을 넘으면 다음 쪽으로 (쪽이 많이 비면 선지·보기만 다음 쪽으로).
+     원본(#flow)은 그대로 두고 매번 복사해서 다시 나눔 — 글꼴이 늦게 와도, 인쇄 직전에도, 용지를 바꿔도 다시 맞춤 */
+  var SRC = null, timer = null;
+  function over(cols) { return cols.scrollWidth > cols.clientWidth + 1; }
+  function room(cols) {  // 이 쪽에 남은 높이 (왼쪽 단에 있으면 오른쪽 단 전체를 더함)
+    var m = document.createElement('div'); m.style.height = '1px';
+    cols.appendChild(m);
+    var r = m.getBoundingClientRect(), c = cols.getBoundingClientRect();
+    cols.removeChild(m);
+    var rest = Math.max(0, c.bottom - r.top);
+    return (r.left < c.left + c.width / 2) ? rest + c.height : rest;
+  }
+  function hasBody(b) {  // 발문만 덩그러니 남지 않게: 지문이나 주어진 글이 함께 있어야
+    for (var i = 0; i < b.children.length; i++) {
+      var x = b.children[i];
+      if ((x.classList.contains('passage') || x.classList.contains('given')) && x.textContent.trim()) return true;
+    }
+    return false;
+  }
+  function split(cols, b) {  // b의 뒷부분(선지·보기·지문 뒷문단)을 떼어 냄. 못 나누면 null
+    var cont = b.cloneNode(false), pc = null;
+    cont.classList.add('cont');
+    cols.appendChild(b);
+    while (over(cols) && b.children.length > 1) {
+      var last = b.lastElementChild;
+      if (last.classList.contains('passage') && last.children.length > 1) {
+        if (!pc) { pc = last.cloneNode(false); cont.insertBefore(pc, cont.firstChild); }
+        pc.insertBefore(last.lastElementChild, pc.firstChild);
+      } else if (last.classList.contains('passage') && pc) {
+        while (last.lastElementChild) pc.insertBefore(last.lastElementChild, pc.firstChild);
+        b.removeChild(last);
+      } else {
+        cont.insertBefore(last, cont.firstChild);
+      }
+    }
+    if (over(cols) || !cont.children.length || !hasBody(b)) { cols.removeChild(b); return null; }
+    return cont;
+  }
+  function pinFits(cols, end) {  // 오른쪽 단 맨 아래에 붙인 끝 칸이 오른쪽 단 글과 겹치지 않는지
+    var c = cols.getBoundingClientRect(), mid = c.left + c.width / 2, low = c.top;
+    Array.prototype.forEach.call(cols.querySelectorAll('*'), function (e) {
+      if (e.children.length || !e.textContent.trim()) return;
+      Array.prototype.forEach.call(e.getClientRects(), function (r) { if (r.right > mid) low = Math.max(low, r.bottom); });
+    });
+    return end.getBoundingClientRect().top >= low + 6;
+  }
+  function placeEnd(cols, end, newPage) {  // 끝 '확인 사항' 칸: 실제 시험지처럼 마지막 쪽 오른쪽 단 맨 아래 → 자리 없으면 글 끝에 → 그래도 없으면 새 쪽
+    var inn = cols.parentNode;
+    end.classList.add('pinned'); inn.appendChild(end);
+    if (pinFits(cols, end)) return cols;
+    inn.removeChild(end); end.classList.remove('pinned');
+    cols.appendChild(end);
+    if (!over(cols)) return cols;
+    cols.removeChild(end);
+    cols = newPage(false);
+    end.classList.add('pinned'); cols.parentNode.appendChild(end);
+    return cols;
+  }
+  function paginate() {
+    var flow = document.getElementById('flow'), pages = document.getElementById('pages');
+    try {
+      var cfg = JSON.parse(document.getElementById('pgcfg').textContent);
+      if (!SRC) SRC = flow.cloneNode(true);
+      var src = SRC.cloneNode(true);
+      var head = src.querySelector('.first-head');
+      var blocks = Array.prototype.slice.call(src.querySelector('.cols').children);
+      var end = blocks.length && /(^| )(u|j)-end( |$)/.test(blocks[blocks.length - 1].className) ? blocks.pop() : null;
+      pages.innerHTML = '';
+      pages.classList.add('measuring');
+      document.body.classList.add('paged');
+      var n = 0, bad = 0;
+      var newPage = function (first) {
+        n++;
+        var pg = document.createElement('div'); pg.className = 'pg';
+        var inn = document.createElement('div'); inn.className = 'pg-in'; pg.appendChild(inn);
+        if (first && head) inn.appendChild(head);
+        else if (cfg.run) { var rh = document.createElement('div'); rh.className = 'run'; rh.innerHTML = cfg.run; inn.appendChild(rh); }
+        var cols = document.createElement('div'); cols.className = 'cols pcols'; inn.appendChild(cols);
+        var f = document.createElement('div'); f.className = 'pfoot';
+        f.innerHTML = '<span class="fl">' + (cfg.fl || '') + '</span><span class="pno"><b>' + n + '</b><b class="tot"></b></span><span class="fr">' + (cfg.fr || '') + '</span>';
+        inn.appendChild(f);
+        pages.appendChild(pg);
+        return cols;
+      };
+      var cols = newPage(true);
+      for (var i = 0; i < blocks.length; i++) {
+        var b = blocks[i];
+        cols.appendChild(b);
+        if (!over(cols)) continue;
+        cols.removeChild(b);
+        var cont = null;
+        if (cols.children.length && room(cols) > 0.6 * cols.clientHeight) {  // 오른쪽 단이 거의 빌 때만 문항을 나눔 (보통은 통째로 다음 쪽)
+          var orig = b.cloneNode(true);
+          cont = split(cols, b);
+          if (cont === null) b = orig;
+        }
+        if (cont || cols.children.length) cols = newPage(false);
+        cols.appendChild(cont || b);
+        if (over(cols)) bad++;
+      }
+      if (end) cols = placeEnd(cols, end, newPage);
+      pages.classList.remove('measuring');
+      var tot = String(n);
+      Array.prototype.forEach.call(document.querySelectorAll('#pages .tot, .totp'), function (e) { e.textContent = tot; });
+      document.body.setAttribute('data-pages', tot);
+      if (bad) { document.body.setAttribute('data-overflow', String(bad)); console.warn('FINAL: 한 쪽에 다 안 들어가는 문항 ' + bad); }
+      else document.body.removeAttribute('data-overflow');
+    } catch (err) {
+      pages.innerHTML = ''; pages.classList.remove('measuring');
+      document.body.classList.remove('paged');
+      console.error(err);
+    }
+  }
+  function pageCss(p) {
+    var a4 = p === 'A4', s = a4 ? '210mm 297mm' : '257mm 364mm', k = a4 ? 0.8155 : 1;
+    var m = function (xs) { return xs.map(function (x) { return (x * k).toFixed(1) + 'mm'; }).join(' '); };
+    return '@page { size: ' + s + '; margin: 0; } @page flowp { size: ' + s + '; margin: ' + m([13, 14, 16, 14]) + '; } '
+         + '@page ans { size: ' + s + '; margin: ' + m([14, 14, 16, 14]) + '; }';
+  }
+  window.setPaper = function (p) {
+    document.getElementById('psize').textContent = pageCss(p);
+    document.body.classList.toggle('a4', p === 'A4');
+    var b4 = document.getElementById('pb4'), a4 = document.getElementById('pa4');
+    if (b4 && a4) { b4.classList.toggle('on', p !== 'A4'); a4.classList.toggle('on', p === 'A4'); }
+    try { localStorage.setItem('final_paper', p); } catch (e) {}
+    paginate();
+  };
+  function start() {
+    var p = null;
+    try { p = localStorage.getItem('final_paper'); } catch (e) {}
+    if (p === 'A4') window.setPaper('A4'); else paginate();
+  }
+  function later() { clearTimeout(timer); timer = setTimeout(paginate, 150); }
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(start);
+    if (document.fonts.addEventListener) document.fonts.addEventListener('loadingdone', later);
+  } else {
+    window.addEventListener('load', start);
+  }
+  window.addEventListener('beforeprint', paginate);
+})();
+</script>"""
+
+def final_exam_info(series: str) -> Dict:
+    """시험 이름('26년 2학기 기말 제일고2') → 학년도·학기·차수 (실제 시험지 제목 줄용). 없으면 오늘 날짜 기준"""
+    from datetime import datetime, timedelta, timezone
+    s = str(series or "")
+    now = datetime.now(timezone(timedelta(hours=9)))
+    m = re.search(r"(20\d{2}|\d{2})\s*(?:년|학년도)", s) or re.search(r"(?<!\d)(20\d{2})(?!\d)", s)
+    year = int(m.group(1)) if m else now.year
+    year = year + 2000 if year < 100 else year
+    m = re.search(r"([12])\s*학기", s)
+    sem = int(m.group(1)) if m else (2 if now.month >= 8 else 1)
+    m = re.search(r"([1-4])\s*차", s)
+    cha = int(m.group(1)) if m else (2 if "기말" in s else 1)
+    return {"year": year, "sem": sem, "cha": cha}
+
+def final_default_subject(school: str, grade: str, series: str = "") -> str:
+    """실제 시험지 과목명: 고1 공통영어1·2, 고2 운양고 영어1·2 / 제일고 영어Ⅰ·Ⅱ (학기는 시험 이름에서)"""
+    sem = final_exam_info(series)["sem"]
+    g = re.sub(r"\D", "", str(grade)) or "1"
+    if g == "1":
+        return f"공통영어{sem}"
+    if g == "2":
+        return ("영어Ⅰ" if sem == 1 else "영어Ⅱ") if school == "제일고" else f"영어{sem}"
+    return "영어"
+
+def final_subject(subj, school: str, grade: str, series: str = "") -> str:
+    """적어 둔 과목명 (비었거나 예전 기본값 '영어'면 실제 시험지 과목명)"""
+    d = final_default_subject(school, grade, series)
+    s = str(subj or "").strip()
+    return d if (not s or (s == "영어" and d != "영어")) else s
+
+def final_choices_html(ch: List) -> str:
+    """선지: 빈 선지(밑줄 번호형)는 ①~⑤만 한 줄, '단어 …… 단어'는 실제 시험지처럼 (A)(B) 표, ⓐⓑ 조합·순서형은 한 줄에 3개, 나머지는 한 줄에 하나"""
+    ch = [re.sub(r"^\s*[①-⑤]\s*", "", str(x)) for x in list(ch)[:5]]
+    if all(not x.strip() for x in ch):
+        return "<div class='ch-inline'>" + "".join(f"<span>{c}</span>" for c in CIRCLED) + "</div>"
+    parts = [[p.strip() for p in re.split(r"\s*(?:…+|⋯+|·{3,}|\.{4,})\s*", x.strip())] for x in ch]
+    n = len(parts[0])
+    if len(ch) == 5 and 2 <= n <= 3 and all(len(p) == n and all(p) for p in parts):
+        dots = "<td class='dots'>……</td>"
+        head = "<th></th>" + "<th></th>".join(f"<th>({'ABC'[k]})</th>" for k in range(n))
+        rows = "".join(f"<tr><td class='cn'>{CIRCLED[i]}</td>" + dots.join(f"<td>{qb_html(x)}</td>" for x in p) + "</tr>" for i, p in enumerate(parts))
+        return f"<table class='ch-tbl'><tr>{head}</tr>{rows}</table>"
+    if len(ch) == 5 and all(re.fullmatch(r"[\sⓐ-ⓩ,()\-ABCD–—→>]+", re.sub(r"<[^>]+>", "", x)) for x in ch):  # ⓐⓑ 조합형·(A)-(C)-(B) 순서형만 (낱말 선지는 실제처럼 한 줄에 하나)
+        return "<div class='ch-grid'>" + "".join(f"<div>{CIRCLED[i]} {qb_html(x)}</div>" for i, x in enumerate(ch)) + "</div>"
+    return "<div class='choices'>" + "".join(f"<div>{CIRCLED[i]} {qb_html(x)}</div>" for i, x in enumerate(ch)) + "</div>"
+
+def _final_q_html(r: Dict, label: str, stem, pt, in_set: bool) -> str:
+    """문항 하나 (시험지에서 한 덩어리 — 쪽 나누기 단위)"""
+    c = r["content"]
+    qt = r["q_type"]
+    o = [f"<div class='q'><div class='stem'><span class='no'>{label}</span> {qb_html(stem)} <span class='pt'>[{pt:g}점]</span></div>"]
+    if c.get("given"):
+        o.append(f"<div class='given'>{qb_paras(c['given'])}</div>")
+    if not in_set:
+        o.append(f"<div class='passage'>{qb_paras(c.get('passage'), qt == '순서', c.get('given'))}</div>")
+    if c.get("box"):
+        summ = qt == "요약문 (A)(B)"
+        if summ:
+            o.append("<div class='arrow'>↓</div>")  # 실제 시험지처럼 지문과 요약문 사이 화살표
+        bx = "<div class='bx'>&lt;보 기&gt;</div>" if re.search(r"[ⓐ-ⓩ]", str(c["box"])) else ""
+        o.append(f"<div class='box{' long' if len(str(c['box'])) > 500 else ''}'>{bx}{qb_paras(c['box'], summary=summ)}</div>")
+    if qt in QB_ESSAY_TYPES:
+        o.append("<div class='write'></div>")
+    else:
+        o.append(final_choices_html(c.get("choices") or []))
+    o.append("</div>")
+    return "".join(o)
+
 def render_final_exam(qs: List[Dict], meta: Dict) -> str:
-    """FINAL 모의고사 시험지 HTML. meta: school, grade, round, subject, term, date, with_answers, predicted"""
+    """FINAL 모의고사 시험지 HTML — 운양고·제일고 실제 시험지(B4) 모양 그대로에 학원명·이름 칸만 더함 (2026-11-17 선생님 요청).
+    학교 로고 자리는 학원 표시, 저작권은 학원, 제목은 '정기시험 대비 문제지' (학교 공식 시험지로 오해되지 않게).
+    meta: school, grade, round, subject, term, date, academy, with_answers, predicted"""
+    e = html.escape
     school, grade = meta.get("school", "운양고"), str(meta.get("grade", "고1"))
     g = re.sub(r"\D", "", grade) or "1"
-    subj = meta.get("subject") or "영어"
+    term = meta.get("term", "")
+    subj = final_subject(meta.get("subject"), school, grade, term)
+    info = final_exam_info(term)
     rnd_no = meta.get("round", 1)
     title = f"{FINAL_TITLE} {rnd_no}회차"
-    n_mc = sum(1 for r in qs if r["q_type"] not in QB_ESSAY_TYPES)
-    n_es = len(qs) - n_mc
-    total = round(sum(r.get("points", 0) for r in qs), 1)
+    academy = meta.get("academy", "") or "PQRS 영T"
     j = school == "제일고"
-    o = ["<div class='printbar'><span class='pnote'>인쇄 창 '설정 더보기'에서 '머리글과 바닥글'은 꺼 주세요 (날짜·주소가 꼬리말과 겹쳐요)</span>"
-         "<button onclick='window.print()'>🖨️ 인쇄 / PDF로 저장</button></div>", f"<div class='sheet{' j' if j else ''}'>"]
+    essays = [r for r in qs if r["q_type"] in QB_ESSAY_TYPES]
+    n_es = len(essays)
+    n_mc = len(qs) - n_es
+    pt_es = round(sum(r.get("points", 0) for r in essays), 1)
+    pt_mc = round(sum(r.get("points", 0) for r in qs) - pt_es, 1)
+    total = round(pt_mc + pt_es, 1)
+    date = str(meta.get("date", "") or "").strip()
+    sp = "&emsp;&ensp;"
+    addl = f"<div class='addl'><span>{e(FINAL_TITLE)} {rnd_no}회 · {e(academy)}</span><span class='nm'>이름<i></i></span></div>"
     if j:
-        o.append(f"<div class='j-title'>{html.escape(title)} 모의고사 문제지 <span style='font-size:10.5pt;font-weight:700'>· {html.escape(meta.get('term', ''))} 제일고 대비</span></div>"
-                 f"<table class='j-head'><tr><td>학 년</td><td class='big'>{g}</td><td class='big'>{html.escape(subj)}</td>"
-                 f"<td>시 행 일 시</td><td>{html.escape(meta.get('date', ''))}</td></tr></table>")
-        o.append(f"<div class='cols'><div class='notice'>※ 다음 내용을 반드시 확인하시오.<br>▣ 문항 수는 선택형 ( <b>{n_mc}</b> )문항"
-                 + (f", 서술형 ( <b>{n_es}</b> )문항" if n_es else "") + f"입니다. (총 {total:g}점)<br>▣ 답안지에 인적사항(학년, 반, 번호, 성명)을 정확히 쓰시오.<br>"
-                 "▣ 각 문항의 배점은 문항 끝에 표시되어 있습니다.</div>")
+        dtxt = e(date) if date else f"{info['year']}년{sp}월{sp}일{sp}교시"
+        head = (addl + f"<div class='j-title'>{info['year']}학년도 {info['sem']}학기 {info['cha']}차 정기시험 대비 문제지</div>"
+                f"<table class='j-head'><tr><td class='k'>학 년</td><td class='g'>{g}</td><td class='s'>{e(subj)}</td>"
+                f"<td class='k2'>시 행 일 시</td><td class='d'>{dtxt}</td></tr></table>")
+        notice = ("<div class='j-notice'><div class='t'>※ 다음 내용을 반드시 확인하시오.</div>"
+                  "<div class='sec'>○ 답안지 작성 요령<br>&nbsp;- 선택형: 선택형 답란 해당란에 ●"
+                  + ("<br>&nbsp;- 서술형: 서술형 답란에 바르게 기재" if n_es else "")
+                  + "<br>○ 문항지의 인쇄 상태, 면수 및 문항 수 등을 반드시 확인하시오.</div><table>"
+                  f"<tr><td>선택형 :</td><td class='r'>1번 ~ {n_mc}번</td><td class='r'>{n_mc} 문항</td></tr>"
+                  + (f"<tr><td>서술형 :</td><td class='r'>1번 ~ {n_es}번</td><td class='r'>{n_es} 문항</td></tr>" if n_es else "")
+                  + "<tr><td></td><td class='r'>총 면수</td><td class='r'><span class='totp'></span> 면</td></tr></table></div>")
+        run, fl, fr = f"{g}학년 {e(subj)}", "", ""
+        end = ("<div class='j-end'><div class='bx'>* 확인 사항<br>○ 답안지의 해당란에 필요한 내용을 정확히 기입(표기)했는지 확인하시오.</div>"
+               f"<div class='cp'>이 문제지에 관한 저작권은 {e(academy)}에 있습니다.</div></div>")
     else:
-        o.append(f"<div class='u-head'><div class='r1'>{html.escape(title)} · ( {g} )학년 {html.escape(meta.get('term', ''))} 대비 모의고사 문제지</div>"
-                 f"<div class='r2'><div class='logo'><b>PQRS 영T</b></div><div class='mid'><div class='big'>고{g} {html.escape(subj)}</div>"
-                 f"<div class='date'>{html.escape(meta.get('date', ''))}</div></div><div class='cls'><div>대비 학교</div><div>운양고 {g}학년</div></div></div></div>")
-        o.append(f"<div class='cols'><div class='notice'>※ 답안지에 필요한 인적 사항(반, 번호, 이름)을 정확히 표기한 후 답안을 작성하시오.<br>"
-                 f"<b>선택형</b> 정답은 OMR카드 선택형 답란에 표기하시오.<br><b>배 점</b> 선택형 {n_mc}문항" + (f" · 서술형 {n_es}문항" if n_es else "")
-                 + f", {total:g}점 (각 문항별 배점은 별도 표시)</div>")
+        dtxt = e(date) if date else f"{info['year']}년{sp}월{sp}일{sp}요일{sp}교시"
+        head = (addl + f"<div class='u-head'><div class='r1'>{info['year']}학년도 ( {g} )학년 ( {info['sem']} )학기 ( {info['cha']} )차 정기시험 대비 문제지</div>"
+                f"<div class='r2'><div class='logo'><div class='emb'>PQRS<br>영T</div></div><div class='mid'><div class='big'>고{g} {e(subj)}</div>"
+                f"<div class='date'>{dtxt}</div></div><div class='cls'><div>실시 학급</div><div>{g}학년 1 ~ 10반</div></div></div></div>")
+        notice = ("<div class='u-notice'><div class='l0'>※ 답안지에 필요한 인적 사항(반, 번호, 이름)을 정확히 표기한 후 답안을 작성하시오.</div>"
+                  "<div class='row'><b>선택형</b><span>정답은 OMR카드 선택형 답란에 컴퓨터용 사인펜으로 '▮' 표기하시오.</span></div>"
+                  + ("<div class='row'><b>논술형</b><span>논술형 답안지에 펜을 사용하여 지시대로 기재하시오.</span></div>" if n_es else "")
+                  + f"<div class='row'><b>배&ensp;점</b><span>선택형 : {n_mc}문항, {pt_mc:g}점"
+                  + (f" / 논술형 : {n_es}문항, {pt_es:g}점" if n_es else "") + "<br>(각 문항별 배점은 별도 표시)</span></div></div>")
+        run, fl, fr = "", f"{g}학년 ({e(subj)})", e(academy)
+        end = ("<div class='u-end'>※ 확인사항<br>○ 답안지의 해당란을 정확히 기입(표기)했는지 확인하시오.<br>"
+               f"&nbsp;이 시험문제의 저작권은 {e(academy)}에 있습니다. 저작권법에 의해 보호받는 저작물이므로 전재와 복제는 금지되며, "
+               "이를 어길시 저작권법에 의거 처벌될 수 있습니다.</div>")
     keys = [None if r["q_type"] in QB_ESSAY_TYPES else _final_pkey(r) for r in qs]
-    mc_no, es_no, essay_started = 0, 0, False
+    blocks = [notice]
+    mc_no = es_no = 0
     for i, r in enumerate(qs):
         c = r["content"]
-        essay = r["q_type"] in QB_ESSAY_TYPES
-        if essay:
+        if r["q_type"] in QB_ESSAY_TYPES:
             es_no += 1
-            label = f"서술형 {es_no}"
-            if not essay_started:
-                essay_started = True
-                o.append("<div class='essay-h'>서 술 형</div>")
+            label = f"[{'서술형' if j else '논술형'} {es_no}]"
         else:
             mc_no += 1
             label = f"{mc_no}."
@@ -13006,29 +13304,17 @@ def render_final_exam(qs: List[Dict], meta: Dict) -> str:
             last = i
             while last + 1 < len(qs) and keys[last + 1] == k:
                 last += 1
-            o.append(f"<div class='q'><div class='sethead'>[{mc_no}~{mc_no + last - i}] 다음 글을 읽고, 물음에 답하시오.</div>"
-                     f"<div class='passage'>{qb_paras(c.get('passage'))}</div></div>")
-        pt = r.get("points", 0)
+            blocks.append(f"<div class='q set'><div class='sethead'>[{mc_no}~{mc_no + last - i}] 다음 글을 읽고 물음에 답하시오.</div>"
+                          f"<div class='passage'>{qb_paras(c.get('passage'))}</div></div>")
         stem = qb_set_stem(c.get("stem")) if in_set and str(k).startswith("SET:") else c.get("stem")  # 한 지문 묶음: '윗글의 ~'
-        o.append(f"<div class='q'><div class='stem'><span class='no'>{label}</span> {qb_html(stem)} <span class='pt'>[{pt:g}점]</span></div>")
-        if c.get("given"):
-            o.append(f"<div class='given'>{qb_paras(c['given'])}</div>")
-        if not in_set:
-            o.append(f"<div class='passage'>{qb_paras(c.get('passage'), r['q_type'] == '순서', c.get('given'))}</div>")
-        if c.get("box"):
-            bx = "<div class='bx'>&lt;보 기&gt;</div>" if re.search(r"[ⓐ-ⓩ]", str(c["box"])) else ""
-            o.append(f"<div class='box{' long' if len(str(c['box'])) > 500 else ''}'>{bx}{qb_paras(c['box'], summary=r['q_type'] == '요약문 (A)(B)')}</div>")
-        ch = c.get("choices") or []
-        if essay:
-            o.append("<div class='write'></div>")
-        elif all(not str(x).strip() for x in ch):
-            o.append("<div class='choices inline'>" + "".join(f"<div>{x}</div>" for x in CIRCLED) + "</div>")
-        else:
-            o.append("<div class='choices'>" + "".join(f"<div>{CIRCLED[n]} {qb_html(re.sub(r'^\s*[①-⑤]\s*', '', str(x)))}</div>" for n, x in enumerate(ch[:5])) + "</div>")
-        o.append("</div>")
-    o.append("</div>")
+        blocks.append(_final_q_html(r, label, stem, r.get("points", 0), in_set))
+    blocks.append(end)
+    o = ["<div class='printbar'><span class='pnote'>실제 시험지와 같은 B4 크기예요. A4 종이에 뽑을 때는 A4를 누른 뒤 인쇄하세요 "
+         "(인쇄 창의 '머리글과 바닥글'은 꺼 주세요).</span><button id='pb4' class='on' onclick=\"setPaper('B4')\">B4</button>"
+         "<button id='pa4' onclick=\"setPaper('A4')\">A4</button><button onclick='window.print()'>🖨️ 인쇄 / PDF로 저장</button></div>",
+         f"<div id='flow'><div class='first-head'>{head}</div><div class='cols'>{''.join(blocks)}</div></div><div id='pages'></div>"]
     if meta.get("with_answers"):
-        o.append(f"<div class='ans-page'><div class='anshead'>{html.escape(title)} 정답 및 해설</div>")
+        o.append(f"<div class='ans'><div class='anshead'>{e(title)} 정답 및 해설</div>")
         if meta.get("predicted") is not None:
             o.append(f"<div class='keynote'>교사용 · 예상 평균 {meta['predicted']:g}점 / {total:g}점 · 난이도 구성: "
                      + " · ".join(f"{lv} {sum(1 for r in qs if r['difficulty'] == lv)}" for lv in QB_LEVELS + [QB_GICHUL_LEVEL] if any(r['difficulty'] == lv for r in qs))
@@ -13040,30 +13326,26 @@ def render_final_exam(qs: List[Dict], meta: Dict) -> str:
                 nos.append(f"서{sum(1 for x in qs[:k2] if x['q_type'] in QB_ESSAY_TYPES)}" if r["q_type"] in QB_ESSAY_TYPES else str(sum(1 for x in qs[:k2] if x['q_type'] not in QB_ESSAY_TYPES)))
             pad = 12 - len(part)
             o.append("<table class='key'><tr><th>번호</th>" + "".join(f"<th>{n}</th>" for n in nos) + "<th></th>" * pad + "</tr>"
-                     "<tr><th>정답</th>" + "".join(f"<td><b>{'서술형' if r['q_type'] in QB_ESSAY_TYPES else html.escape(r['content'].get('answer', ''))}</b></td>" for r in part) + "<td></td>" * pad + "</tr>"
+                     "<tr><th>정답</th>" + "".join(f"<td><b>{'서술형' if r['q_type'] in QB_ESSAY_TYPES else e(r['content'].get('answer', ''))}</b></td>" for r in part) + "<td></td>" * pad + "</tr>"
                      "<tr><th>배점</th>" + "".join(f"<td>{r.get('points', 0):g}</td>" for r in part) + "<td></td>" * pad + "</tr>"
-                     "<tr><th>난이도</th>" + "".join(f"<td>{html.escape(r['difficulty'])}</td>" for r in part) + "<td></td>" * pad + "</tr></table>")
+                     "<tr><th>난이도</th>" + "".join(f"<td>{e(r['difficulty'])}</td>" for r in part) + "<td></td>" * pad + "</tr></table>")
         o.append("<div class='cols'>")
         mc_no = es_no = 0
         for r in qs:
             c = r["content"]
             if r["q_type"] in QB_ESSAY_TYPES:
                 es_no += 1
-                lab = f"서술형 {es_no}"
+                lab = f"{'서술형' if j else '논술형'} {es_no}"
             else:
                 mc_no += 1
                 lab = f"{mc_no}번"
-            o.append(f"<div class='exp'><h3>{lab} 정답 {qb_html(c.get('answer', ''))}<span>({html.escape(r['passage_label'])} · {html.escape(r['q_type'])} · {html.escape(r['difficulty'])})</span></h3><ul>"
-                     + "".join(f"<li>{qb_html(e)}</li>" for e in (c.get("explanation") or [])) + "</ul></div>")
+            o.append(f"<div class='exp'><h3>{lab} 정답 {qb_html(c.get('answer', ''))}<span>({e(r['passage_label'])} · {e(r['q_type'])} · {e(r['difficulty'])})</span></h3><ul>"
+                     + "".join(f"<li>{qb_html(x)}</li>" for x in (c.get("explanation") or [])) + "</ul></div>")
         o.append("</div></div>")
-    foot_l, foot_r = f"{g}학년 ({subj})", f"{title} · {meta.get('academy', '') or 'PQRS 영T'}"
-    o.append(f"<div class='pfoot'><span>{html.escape(foot_l)}</span><span>{html.escape(foot_r)}</span></div>")
-    o.append("</div>")
-    # 예전 position:fixed 꼬리말은 크롬 인쇄에서 1쪽엔 안 찍히고 2쪽부터 맨 위 본문에 겹쳐 찍혔음 → 쪽 여백 칸에 넣음
-    fbox = "font-family: 'Noto Sans KR', sans-serif; font-size: 8.5pt; color: #222; vertical-align: top; padding-top: 4mm;"
-    foot_css = (f"\n@page {{ @bottom-left {{ content: {_css_q(foot_l)}; {fbox} padding-left: 2mm; }}"
-                f" @bottom-right {{ content: {_css_q(foot_r)}; {fbox} padding-right: 2mm; text-align: right; }} }}\n")
-    return f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>{html.escape(title)}</title><style>{FINAL_CSS}{foot_css}</style></head><body>{''.join(o)}</body></html>"
+    cfg = json.dumps({"run": run, "fl": fl, "fr": fr}, ensure_ascii=False).replace("</", "<\\/")
+    o.append(f"<script type='application/json' id='pgcfg'>{cfg}</script>{FINAL_PAGER_JS}")
+    return (f"<!DOCTYPE html><html lang='ko'><head><meta charset='utf-8'><title>{e(title)}</title><style>{FINAL_CSS}</style>"
+            f"<style id='psize'>{final_page_css('B4')}</style></head><body class='{'j' if j else 'u'}'>{''.join(o)}</body></html>")
 
 def qb_fetch_ids(sb, ids: List[str]) -> List[Dict]:
     """문제 id로 불러옴 (저장한 회차 시험지를 다시 만들 때)"""
@@ -13131,7 +13413,7 @@ def render_final_tab(text_model: str, api_delay: int, academy_name: str, school_
         next_round = (max((r.get("round", 0) for r in rounds), default=0) + 1) if series else 1
         last = rounds[-1] if rounds else {}
         c1, c2 = _qb_row("과목·날짜").columns([1, 1])
-        subject = c1.text_input("과목", value=last.get("subject", "공통영어2" if grade == "고1" else "영어"), key=f"final_subject_{school}_{grade}_{series}",
+        subject = c1.text_input("과목", value=final_subject(last.get("subject"), school, grade, series), key=f"final_subject_{school}_{grade}_{series}",
                                 placeholder="과목 (예: 공통영어2, 영어Ⅱ)", label_visibility="collapsed")
         from datetime import datetime, timedelta, timezone
         today = datetime.now(timezone(timedelta(hours=9)))
