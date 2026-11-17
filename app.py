@@ -11879,6 +11879,7 @@ APP_HELP = {
 2. **시험 범위**: 시험에 나오는 지문을 골라요. 다음 회차를 만들 때는 지난 회차의 범위가 그대로 골라져 있어요.
    - **한 지문은 시험지에 한 번만** 실어요. 같은 지문을 따로따로 내면(예: 4·5·6번이 한 지문의 서로 다른 변형) 학생이 지문끼리 비교해 답을 맞힐 수 있어서예요.
    - 고른 지문이 문항 수보다 적으면 모든 지문을 넣고, 남는 문항은 실제 기출처럼 **한 지문에 2문제 묶음**([1~2] 다음 글을 읽고, 물음에 답하시오.)으로 내요. 2문제씩 묶어도 모자라면 3문제 묶음도 써요. 묶음 지문은 **시험에 나올 가능성이 높고 긴 지문**부터 골라요.
+   - **회차마다 돌아가요**: 같은 시험 이름의 앞 회차에서 묶음이었던 지문은 뒤로 미루고, 앞 회차와 같은 지문에서 같은 유형(특히 어법 — 단일형·조합형은 같은 어법으로 봄)이 다시 나오지 않게 칸마다 지문을 바꿔 배치해요. 범위가 좁아 다 피할 수 없으면 가장 덜 겹치게요.
    - 고른 지문이 문항 수보다 많으면 **시험에 나올 가능성이 높은 지문만** 넣어요 (모의고사 18·19·25·27·28·43~45번처럼 실제 시험에 거의 안 나오는 번호를 먼저 빼고, 교과서 본문은 우선). 뺀 지문은 화면에 나와요.
 3. **시험 구성**: 그 학교·학년 **실제 기출 한 회**를 고르면 유형·배점·**문항 수**(선택형·서술형)를 그대로 따라요. 기본은 가장 최근 시험이에요.
    - 기출 표시에서 유형을 알아보지 못한 문항('기타')은 기출 전 문항 분석의 유형으로 채우고, 그래도 모르면 **'아무 유형' 칸**으로 남겨 다른 선택형 문제로 채워요 → 문항 수가 실제 시험보다 줄지 않아요.
@@ -12415,9 +12416,68 @@ def final_structure(slots: List[Dict], n_passages: int) -> List[Dict]:
             out[i]["grp"] = k
     return out
 
-def final_passage_plan(labels: List[str], by_label: Dict, slots: List[Dict]) -> (List[str], List, List[str], Dict):
+# ---- 회차마다 돌아가게 (2026-11-18 선생님 요청) ----
+#   같은 시험 이름의 1·2회차가 같은 참고 기출·같은 범위라 묶음 지문(가능성 높고 긴 지문)과 칸↔지문 짝이 매번 같아,
+#   21번·37번·교과서 4-7에서 회차마다 어법이 나왔음 → 앞 회차에서 묶음이었던 지문은 뒤로, 앞 회차와 같은 지문·같은 유형(어법은 단일·조합형을 하나로)은 피함
+def final_type_family(t: str) -> str:
+    """회차 겹침을 셀 때의 유형: 어법 단일형·조합형은 같은 '어법'"""
+    return "어법" if str(t).startswith("어법") else str(t)
+
+def final_history_from_rows(recs: List[Dict], rows: Dict) -> Dict:
+    """앞 회차 기록 → {'pt': {(지문, 유형): 횟수}, 'set': {지문: 묶음이었던 횟수}, 'n': 회차 수} (rows: 문제 id → 은행 문제)"""
+    pt, sets = {}, {}
+    for rec in recs:
+        seen = set()
+        for x in rec.get("items", []):
+            r = rows.get(x.get("id"))
+            if not r:
+                continue
+            labs = qb_link_parts(r.get("passage_label", ""))[1] or [r.get("passage_label", "")]
+            fam = final_type_family(x.get("q_type") or r.get("q_type", ""))
+            for l in labs:
+                pt[(l, fam)] = pt.get((l, fam), 0) + 1
+            sid = (r.get("content") or {}).get("set_id")
+            if sid and sid not in seen:
+                seen.add(sid)
+                for l in labs:
+                    sets[l] = sets.get(l, 0) + 1
+    return {"pt": pt, "set": sets, "n": len(recs)}
+
+def final_history(sb, recs: List[Dict]) -> Dict:
+    """같은 시험 이름의 앞 회차들에서 낸 (지문, 유형)·묶음 지문 (화면이 다시 그려질 때마다 DB를 읽지 않게 회차 id로 기억)"""
+    if not recs:
+        return {"pt": {}, "set": {}, "n": 0}
+    key = tuple(sorted(r["id"] for r in recs))
+    cache = st.session_state.setdefault("final_hist_cache", {})
+    if key not in cache:
+        ids = [x["id"] for r in recs for x in r.get("items", []) if x.get("id")]
+        cache[key] = final_history_from_rows(recs, {r["id"]: r for r in qb_fetch_ids(sb, ids)})
+    return cache[key]
+
+def _final_hpen(hist: Dict, label: str, t: str) -> int:
+    """앞 회차에 같은 지문·같은 유형을 낸 횟수 (유형을 아직 모르는 칸은 0)"""
+    return 0 if not hist or t == FINAL_ANY else (hist.get("pt") or {}).get((label, final_type_family(t)), 0)
+
+def _final_match(groups: List[List[int]], labs: List[str], pen) -> List[str]:
+    """묶음 ↔ 지문 짝: 벌점(앞 회차와 같은 지문·유형) 합이 가장 작게 — 같으면 원래 짝 그대로"""
+    n = min(len(groups), len(labs))
+    if n <= 1:
+        return labs[:n]
+    if n <= 7:
+        import itertools
+        best = min(itertools.permutations(range(n)), key=lambda p: (sum(pen(groups[k], labs[p[k]]) for k in range(n)), p))
+        return [labs[best[k]] for k in range(n)]
+    left, out = list(range(n)), []
+    for k in range(n):
+        j = min(left, key=lambda j: (pen(groups[k], labs[j]), j))
+        left.remove(j)
+        out.append(labs[j])
+    return out
+
+def final_passage_plan(labels: List[str], by_label: Dict, slots: List[Dict], hist: Dict = None) -> (List[str], List, List[str], Dict):
     """고른 지문 → (쓸 지문, 칸별 정해진 지문 — 묶음 칸만, 뺀 지문, {지문: (가능성, 이유)})
-    지문이 묶음 수보다 많으면 시험에 나올 가능성이 높은 지문만 · 2문제 묶음 지문은 그중 가능성이 높고 긴 지문 (큰 묶음일수록 위에서부터)"""
+    지문이 묶음 수보다 많으면 시험에 나올 가능성이 높은 지문만 · 2문제 묶음 지문은 그중 가능성이 높고 긴 지문 (큰 묶음일수록 위에서부터)
+    hist(앞 회차): 앞 회차에 묶음이었던 지문은 뒤로 · 묶음마다 앞 회차와 같은 지문에 같은 유형(특히 어법)이 오지 않게 짝을 맞춤"""
     gs = final_groups(slots)
     order = {l: i for i, l in enumerate(labels)}
     lk = {l: final_likely(by_label.get(l) or {"label": l}) for l in labels}
@@ -12427,7 +12487,10 @@ def final_passage_plan(labels: List[str], by_label: Dict, slots: List[Dict]) -> 
         keep = [l for l in labels if l in top]
         dropped = [l for l in labels if l not in top]
     multi = sorted([g for g in gs if len(g) > 1], key=lambda g: (-len(g), min(g)))
-    set_labs = sorted(keep, key=lambda l: (-lk[l][0], order[l]))[:len(multi)]
+    hs = (hist or {}).get("set") or {}
+    set_labs = sorted(keep, key=lambda l: (hs.get(l, 0), -lk[l][0], order[l]))[:len(multi)]
+    if hist and hist.get("pt"):
+        set_labs = _final_match(multi, set_labs, lambda g, l: sum(_final_hpen(hist, l, slots[i]["q_type"]) for i in g))
     want = [None] * len(slots)
     for g, l in zip(multi, set_labs):
         for i in g:
@@ -12514,10 +12577,11 @@ def final_pred(slots: List[Dict], assign: List) -> float:
     return sum(s["points"] * FINAL_P.get(r["difficulty"], 0.6) for s, r in chosen) * 100 / (sum(s["points"] for s, _ in chosen) or 1)
 
 def final_assign(rows: List[Dict], slots: List[Dict], labels: List[str], target_raw: float, word_target: int, seed: int,
-                 distinct: bool = False) -> (List, List[str], float):
+                 distinct: bool = False, hist: Dict = None) -> (List, List[str], float):
     """문항 칸마다 맞는 유형 문제를 고름 (AI 호출 없음) → (칸별 문제 또는 None, 알림, 예상 평균)
     목표: 고른 지문을 모두 한 문제 이상 (지문이 칸보다 많으면 칸마다 서로 다른 지문) · 예상 평균 ≈ 목표 · 지문을 골고루 · 지문 단어 수 ≈ 실제 기출
-    distinct: 한 지문은 한 칸에만 (같은 지문을 따로 낸 문제끼리 비교해 답을 맞히지 못하게 — 2026-11-16)"""
+    distinct: 한 지문은 한 칸에만 (같은 지문을 따로 낸 문제끼리 비교해 답을 맞히지 못하게 — 2026-11-16)
+    hist: 앞 회차와 같은 지문·같은 유형(어법은 단일·조합형을 하나로)은 벌점 (2026-11-18 — 회차마다 같은 지문에서 어법이 나오지 않게)"""
     rnd = random.Random(seed)
     rows = qb_dedupe_rows(rows)
     base = {l: i for i, l in enumerate(labels)}
@@ -12544,6 +12608,8 @@ def final_assign(rows: List[Dict], slots: List[Dict], labels: List[str], target_
             for r in chosen:
                 uniq.setdefault(_final_pkey(r), words_of[id(r)])
             e += ((sum(uniq.values()) - word_target) / (word_target * 0.08)) ** 2
+        if hist:
+            e += 6.0 * sum(_final_hpen(hist, p, r["q_type"]) for r in chosen for p in parts[id(r)])
         return e, pred
 
     # 처음 배치: 칸 순서를 섞어, 아직 안 들어간 지문의 문제를 먼저
@@ -12577,8 +12643,30 @@ def final_assign(rows: List[Dict], slots: List[Dict], labels: List[str], target_
                     done = True
     best, _ = score(assign)
     idx = [i for i, r in enumerate(assign) if r is not None]
+    swap_ok = bool(distinct and hist and hist.get("pt") and len(idx) > 1)  # 앞 회차가 있을 때만 (첫 회차는 예전과 똑같이 뽑힘)
     for _ in range(5000 if idx else 0):
         i = rnd.choice(idx)
+        if swap_ok and rnd.random() < 0.5:
+            # 두 칸의 지문 맞바꾸기 (한 지문은 한 칸에만이라 한 칸씩 바꾸면 못 옮김): i칸엔 j칸 지문의 i유형 문제, j칸엔 i칸 지문의 j유형 문제
+            j = rnd.choice(idx)
+            oi, oj = assign[i], assign[j]
+            if j == i or oi is None or oj is None:
+                continue
+            pi, pj = set(parts[id(oi)]), set(parts[id(oj)])
+            ci = [x for x in cands[i] if id(x) not in used and set(parts[id(x)]) == pj]
+            cj = [x for x in cands[j] if id(x) not in used and set(parts[id(x)]) == pi]
+            if not ci or not cj:
+                continue
+            ri, rj = rnd.choice(ci), rnd.choice(cj)
+            assign[i], assign[j] = ri, rj
+            e, _ = score(assign)
+            if e <= best:
+                best = e
+                used -= {id(oi), id(oj)}
+                used |= {id(ri), id(rj)}
+            else:
+                assign[i], assign[j] = oi, oj
+            continue
         r = rnd.choice(cands[i])
         if id(r) in used:
             continue  # 같은 유형 두 칸끼리 맞바꾸기는 점수가 같으니 건너뜀
@@ -12646,7 +12734,7 @@ def final_pick(rows: List[Dict], slots: List[Dict], labels: List[str], target_ra
     return final_order(slots, assign, labels), notes, pred
 
 def final_assign_groups(rows: List[Dict], slots: List[Dict], labels: List[str], want: List, target_raw: float, word_target: int,
-                        seed: int) -> (List, List[str]):
+                        seed: int, hist: Dict = None) -> (List, List[str]):
     """묶음 구조대로 은행에서 채움 (AI 호출 없음) → (칸별 문제 또는 None, 알림)
     한 문제 칸: 묶음 지문이 아닌 지문에서 서로 다른 지문으로 (한 지문은 한 칸에만) · 묶음 칸: 정해진 지문의 은행 묶음(같은 지문으로 함께 만든 문제)이 있으면 그것
     (묶음 짝 문제는 첫 문제의 밑줄·빈칸이 남은 지문이라 한 문제 칸에는 안 씀)"""
@@ -12657,7 +12745,7 @@ def final_assign_groups(rows: List[Dict], slots: List[Dict], labels: List[str], 
     one_labs = [l for l in labels if l not in set_labs]
     one_rows = [r for r in rows if len(_final_row_parts(r, base)) == 1 and _final_row_parts(r, base)[0] in one_labs
                 and int((r.get("content") or {}).get("set_no") or 1) < 2]
-    a1, _, _ = final_assign(one_rows, [slots[i] for i in singles], one_labs, target_raw, word_target, seed, distinct=True)
+    a1, _, _ = final_assign(one_rows, [slots[i] for i in singles], one_labs, target_raw, word_target, seed, distinct=True, hist=hist)
     assign = [None] * len(slots)
     for i, r in zip(singles, a1):
         assign[i] = r
@@ -12710,12 +12798,13 @@ def final_assign_groups(rows: List[Dict], slots: List[Dict], labels: List[str], 
     return assign, notes
 
 def final_fill_plan(slots: List[Dict], assign: List, labels: List[str], target_raw: float, fix_level: bool = False,
-                    want: List = None) -> (List, List[Dict]):
+                    want: List = None, hist: Dict = None) -> (List, List[Dict]):
     """빈 칸을 새 문제로 채울 계획 → (칸별 문제 — 일부 칸을 비울 수 있음, [{i, label, q_type, level, why, (set, set_no, lead_id)}])
     - 묶음 칸(한 지문 2~3문제): 정해진 지문(want)으로 묶음 통째로 · 첫 문제가 이미 있으면 그 지문에 짝만
     - 한 문제 칸: 안 들어간 지문 먼저 (한 지문은 한 칸에만), '아무 유형' 칸은 이 시험에 적게 쓴 유형으로
     - 난이도는 채운 칸과 합쳐 예상 평균이 목표에 가깝게 (어법 단일형은 최상이면 조합형으로 바뀌어 상까지)
-    - fix_level: 그래도 예상 평균이 목표와 3점 넘게 다르면, 한 문제 칸 중 너무 어려운(쉬운) 문제를 같은 지문·유형의 새 문제로 바꿔 맞춤"""
+    - fix_level: 그래도 예상 평균이 목표와 3점 넘게 다르면, 한 문제 칸 중 너무 어려운(쉬운) 문제를 같은 지문·유형의 새 문제로 바꿔 맞춤
+    - hist(앞 회차): 한 문제 칸 ↔ 지문 짝을 앞 회차와 같은 지문·같은 유형(특히 어법)이 되지 않게 바꿈"""
     base = {l: i for i, l in enumerate(labels)}
     assign = list(assign)
     want = list(want) if want else [None] * len(slots)
@@ -12771,16 +12860,32 @@ def final_fill_plan(slots: List[Dict], assign: List, labels: List[str], target_r
     if len(queue) > len(empty) and empty:
         # 안 들어간 지문이 빈 칸보다 많으면 범위 앞쪽만 쓰지 않게 고르게 띄엄띄엄
         queue = [queue[int(k * len(queue) / len(empty))] for k in range(len(empty))]
-    for i in empty:
+    pre = dict(zip(empty, queue))  # 빈 칸 → 안 들어간 지문 (예전처럼 앞 칸부터 범위 순서대로)
+    if hist and hist.get("pt") and pre:
+        # 앞 회차와 같은 지문·같은 유형이 되는 짝은 다른 칸과 지문을 맞바꿈 (벌점 합이 줄 때만 — 앞 회차가 없으면 예전과 똑같음)
+        cur = [pre.get(i) for i in empty]
+        pen = lambda i, l: _final_hpen(hist, l, slots[i]["q_type"]) if l else 0
+        for _ in range(30):
+            moved = False
+            for a in range(len(empty)):
+                for b in range(a + 1, len(empty)):
+                    la, lb = cur[a], cur[b]
+                    if la != lb and pen(empty[a], lb) + pen(empty[b], la) < pen(empty[a], la) + pen(empty[b], lb):
+                        cur[a], cur[b] = lb, la
+                        moved = True
+            if not moved:
+                break
+        pre = {i: l for i, l in zip(empty, cur) if l}
+    for i in sorted(empty, key=lambda i: (i not in pre, i)):  # 안 들어간 지문을 받은 칸 먼저 (그다음 남는 칸이 지문을 고름)
         t = slots[i]["q_type"]
-        if queue:
-            lab = queue.pop(0)
+        if i in pre:
+            lab = pre[i]
         elif labels:
-            lab = min(labels, key=lambda l: (cnt.get(l, 0), (l, t) in used_pt, base[l]))
+            lab = min(labels, key=lambda l: (cnt.get(l, 0), (l, t) in used_pt, _final_hpen(hist, l, t), base[l]))
         else:
             continue
         if t == FINAL_ANY:
-            t = min(FINAL_ANY_GEN, key=lambda x: ((lab, x) in used_pt, t_used.get(x, 0), FINAL_ANY_GEN.index(x)))
+            t = min(FINAL_ANY_GEN, key=lambda x: ((lab, x) in used_pt, _final_hpen(hist, lab, x), t_used.get(x, 0), FINAL_ANY_GEN.index(x)))
         cnt[lab] = cnt.get(lab, 0) + 1
         used_pt.add((lab, t))
         t_used[t] = t_used.get(t, 0) + 1
@@ -13502,7 +13607,8 @@ def render_final_tab(text_model: str, api_delay: int, academy_name: str, school_
         slots_t = final_slots(ex_t, full_types)
         lab_order0 = sorted(sel, key=lambda l: natural_sort_key({"label": l}))
         slots = final_structure(slots_t, len(sel))  # 고른 지문 수에 맞춘 한 지문 묶음 구조
-        keep, want, dropped, lk = final_passage_plan(lab_order0, by_label, slots)
+        hist = final_history(sb, rounds) if rounds else None  # 같은 시험 이름의 앞 회차: 묶음 지문·같은 지문 같은 유형(어법 등)이 겹치지 않게
+        keep, want, dropped, lk = final_passage_plan(lab_order0, by_label, slots, hist)
         tcount = {}
         for s in slots:
             tcount[s["q_type"]] = tcount.get(s["q_type"], 0) + 1
@@ -13553,8 +13659,11 @@ def render_final_tab(text_model: str, api_delay: int, academy_name: str, school_
                        + (f" 문항이 {len(slots)}개라 지문 {len(multi)}개는 실제 기출처럼 한 지문에 "
                           + ("2문제" if all(len(g) == 2 for g in multi) else "2~3문제") + " 묶음으로 내요." if multi else ""))
         if set_labs:
-            st.caption("🧩 묶음 지문 (시험에 나올 가능성이 높고 긴 지문부터): " + ", ".join(set_labs)
+            st.caption("🧩 묶음 지문 (시험에 나올 가능성이 높고 긴 지문부터"
+                       + (f" · 앞 {hist['n']}회차에서 묶음이었던 지문은 뒤로" if hist and hist.get("n") else "") + "): " + ", ".join(set_labs)
                        + " — 묶음 문제는 은행에 같은 지문으로 함께 만든 묶음이 없으면 새로 만들어요.")
+        if hist and hist.get("n"):
+            st.caption(f"🔄 앞 {hist['n']}회차와 같은 지문에서 같은 유형(어법은 단일·조합형을 하나로)이 다시 나오지 않게 칸마다 지문을 바꿔 배치해요.")
     used_ids = {x["id"] for r in mine for x in r.get("items", [])}
     srcs = final_used_sources(sb) if excl_used else []
     used_other = set().union(*(q for _, _, q in srcs)) - used_ids if srcs else set()
@@ -13571,7 +13680,7 @@ def render_final_tab(text_model: str, api_delay: int, academy_name: str, school_
     b1, b2 = st.columns([2, 1])
     again = False
     if fresh:
-        fplan = final_fill_plan(slots, [None] * len(slots), lab_order, target - delta, want=want)[1] if sel else []
+        fplan = final_fill_plan(slots, [None] * len(slots), lab_order, target - delta, want=want, hist=hist)[1] if sel else []
         fcost = final_plan_cost(text_model, fplan)
         make = b1.button(f"🤖 새 문제 {len(slots)}개로 {FINAL_TITLE} {next_round}회차 만들기 · 약 {fcost:,.0f}원", type="primary",
                          disabled=not sel or not series or draft is not None, use_container_width=True, key="final_make_new")
@@ -13612,7 +13721,7 @@ def render_final_tab(text_model: str, api_delay: int, academy_name: str, school_
                             and (r.get("content") or {}).get("final_draft") not in active_drafts)
         rows = [r for r in all_rows if ok_row(r) and r["id"] not in used_ids and r["id"] not in used_other]
         assign, notes = final_assign_groups(rows, slots, lab_order, want, target - delta, (tgt_words or {}).get("passage_words", 0),
-                                            random.randint(1, 10**9))
+                                            random.randint(1, 10**9), hist=hist)
         # 이 범위에서 실제로 뺀 문제를 기록 이름별로 (VISION 시험지·클리닉 등)
         cand_ids = {r["id"] for r in all_rows if ok_row(r)}
         ex_txt = [f"'{t}' {len(q & cand_ids)}개" for _k, t, q in srcs if q & cand_ids]
@@ -13673,7 +13782,7 @@ def render_final_tab(text_model: str, api_delay: int, academy_name: str, school_
         elif abs(off) > 5 and all(r is not None for r in v_assign):
             st.info(f"예상 평균이 목표보다 {abs(off):.0f}점 {'낮아요' if off < 0 else '높아요'} (새 문제가 정답 검증에서 난이도가 낮춰지거나 바뀌었을 수 있어요).")
         elif any(r is None for r in v_assign):
-            plan2 = [x for x in final_fill_plan(v_slots, v_assign, view["lab_order"], view["target"] - view["delta"], want=view.get("want"))[1]
+            plan2 = [x for x in final_fill_plan(v_slots, v_assign, view["lab_order"], view["target"] - view["delta"], want=view.get("want"), hist=hist)[1]
                      if v_assign[x["i"]] is None]
             n_empty = sum(1 for r in v_assign if r is None)
             st.warning(f"{n_empty}칸은 새 문제가 들어오지 못했어요" + (f" (작업 {len(failed)}건 실패)" if failed else " (정답 검증에서 빠짐 등)")
@@ -13689,12 +13798,12 @@ def render_final_tab(text_model: str, api_delay: int, academy_name: str, school_
                     st.rerun()
     else:
         tgt_raw = view["target"] - view["delta"]
-        a2, plan = final_fill_plan(v_slots, v_assign, view["lab_order"], tgt_raw, want=view.get("want"))
+        a2, plan = final_fill_plan(v_slots, v_assign, view["lab_order"], tgt_raw, want=view.get("want"), hist=hist)
         use_fix = False
         if abs(off) > 5:
             st.warning(f"예상 평균이 목표보다 {abs(off):.0f}점 {'낮아요' if off < 0 else '높아요'}. 고른 범위에 남은 문제가 "
                        f"{'어려운(최상·상)' if off < 0 else '쉬운(중·하)'} 문제 위주라서예요.")
-            a3, plan3 = final_fill_plan(v_slots, v_assign, view["lab_order"], tgt_raw, fix_level=True, want=view.get("want"))
+            a3, plan3 = final_fill_plan(v_slots, v_assign, view["lab_order"], tgt_raw, fix_level=True, want=view.get("want"), hist=hist)
             n_lv = sum(1 for x in plan3 if x.get("why") == "level")
             if n_lv:
                 est3 = round(final_plan_est(v_slots, a3, plan3) + view["delta"], 1)
