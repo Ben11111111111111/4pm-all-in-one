@@ -12190,6 +12190,7 @@ st.markdown("""<style>
 FINAL_FILE = os.path.join(BASE_DIR, "final_exams.json")          # 회차 기록 (문항 id·배점·예상/실제 평균)
 FINAL_WORDS_FILE = os.path.join(BASE_DIR, "final_word_stats.json")  # 실제 기출 시험지별 지문 단어 수
 FINAL_TITLE = "PQRS영T FINAL"
+FINAL_COPYRIGHT = "PQRS영쌤"  # FINAL 시험지 끝 저작권 문구의 주인 (2026-11-18 선생님 요청: 학원명이 아니라 PQRS영쌤)
 FINAL_P = {"하": 0.9, "중": 0.75, "상": 0.55, "최상": 0.4, "기출": 0.6}  # 처음 쓰는 난이도별 예상 정답률 (실제 평균 기록으로 보정)
 FINAL_DECAY = 0.6  # 보정: 최근 회차일수록 크게 (한 회차 전 0.6, 두 회차 전 0.36 …)
 _W_RE = re.compile(r"[A-Za-z][A-Za-z'’-]*")
@@ -13272,7 +13273,7 @@ def render_final_exam(qs: List[Dict], meta: Dict) -> str:
                   + "<tr><td></td><td class='r'>총 면수</td><td class='r'><span class='totp'></span> 면</td></tr></table></div>")
         run, fl, fr = f"{g}학년 {e(subj)}", "", ""
         end = ("<div class='j-end'><div class='bx'>* 확인 사항<br>○ 답안지의 해당란에 필요한 내용을 정확히 기입(표기)했는지 확인하시오.</div>"
-               f"<div class='cp'>이 문제지에 관한 저작권은 {e(academy)}에 있습니다.</div></div>")
+               f"<div class='cp'>이 문제지에 관한 저작권은 {FINAL_COPYRIGHT}에게 있습니다.</div></div>")
     else:
         dtxt = e(date) if date else f"{info['year']}년{sp}월{sp}일{sp}요일{sp}교시"
         head = (addl + f"<div class='u-head'><div class='r1'>{info['year']}학년도 ( {g} )학년 ( {info['sem']} )학기 ( {info['cha']} )차 정기시험 대비 문제지</div>"
@@ -13285,7 +13286,7 @@ def render_final_exam(qs: List[Dict], meta: Dict) -> str:
                   + (f" / 논술형 : {n_es}문항, {pt_es:g}점" if n_es else "") + "<br>(각 문항별 배점은 별도 표시)</span></div></div>")
         run, fl, fr = "", f"{g}학년 ({e(subj)})", e(academy)
         end = ("<div class='u-end'>※ 확인사항<br>○ 답안지의 해당란을 정확히 기입(표기)했는지 확인하시오.<br>"
-               f"&nbsp;이 시험문제의 저작권은 {e(academy)}에 있습니다. 저작권법에 의해 보호받는 저작물이므로 전재와 복제는 금지되며, "
+               f"&nbsp;이 시험문제의 저작권은 {FINAL_COPYRIGHT}에게 있습니다. 저작권법에 의해 보호받는 저작물이므로 전재와 복제는 금지되며, "
                "이를 어길시 저작권법에 의거 처벌될 수 있습니다.</div>")
     keys = [None if r["q_type"] in QB_ESSAY_TYPES else _final_pkey(r) for r in qs]
     blocks = [notice]
